@@ -60,14 +60,14 @@ func (c *HttpClient) setheaders(headers map[string]string) *HttpClient {
 	return c
 }
 
-func (c *HttpClient) getHeaders() map[string]string {
+func (c *HttpClient) GetHeaders() http.Header {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	result := make(map[string]string)
+	headers := make(http.Header)
 	for k, v := range c.headers {
-		result[k] = v
+		headers.Add(k, v)
 	}
-	return result
+	return headers
 }
 
 func (c *HttpClient) mergeHeaders(newHeaders map[string]string) *HttpClient {

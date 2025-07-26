@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,20 +14,22 @@ import (
 )
 
 type coinexClient struct {
-	httpClient *HttpClient
-	apiKey     string
-	secretKey  string
-	baseUrl    string
-	baseUrlV2  string
+	httpClient     *HttpClient
+	apiKey         string
+	secretKey      string
+	baseUrl        string
+	baseUrlV2      string
+	allowedMarkets []string
 }
 
-func NewCoinexClient(httpClient *HttpClient) *coinexClient {
+func NewCoinexClient(httpClient *HttpClient, config *Config) *coinexClient {
 	return &coinexClient{
-		httpClient: httpClient,
-		apiKey:     os.Getenv("COINEX_API_KEY"),
-		secretKey:  os.Getenv("COINEX_SECRET_KEY"),
-		baseUrl:    "https://api.coinex.com/v1",
-		baseUrlV2:  "https://api.coinex.com/v2",
+		httpClient:     httpClient,
+		apiKey:         config.APIKey,
+		secretKey:      config.SecretKey,
+		allowedMarkets: config.QuoteCurrencies,
+		baseUrl:        "https://api.coinex.com/v1",
+		baseUrlV2:      "https://api.coinex.com/v2",
 	}
 }
 
@@ -109,11 +110,6 @@ func (c *coinexClient) TestConnection() (string, error) {
 }
 
 func (c *coinexClient) GetBalance() (string, error) {
-	// Since v1 balance endpoints are deprecated, use v2 API for balance
-	return c.getBalanceV2()
-}
-
-func (c *coinexClient) getBalanceV2() (string, error) {
 	// Use v2 API for balance
 	timestamp := time.Now().UnixMilli()
 	method := "GET"
@@ -155,4 +151,57 @@ func (c *coinexClient) getBalanceV2() (string, error) {
 	}
 
 	return string(responseJSON), nil
+}
+
+func (c *coinexClient) GetMarketList() (string, error) {
+	// Use the v1 market list endpoint
+	params := map[string]string{
+		"url":    c.baseUrl + "/market/list",
+		"method": "GET",
+	}
+
+	response, err := c.httpClient.performRequest(params, "GET")
+	if err != nil {
+		return "", err
+	}
+
+	// Convert the response to JSON string for return
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return "", err
+	}
+
+	return string(responseJSON), nil
+}
+
+func (c *coinexClient) GetArbitrageMarkets() ([]string, error) {
+	// Get all available markets from CoinEx
+	marketListString, err := c.GetMarketList()
+	fmt.Printf("Market list: %s\n", marketListString)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get market list: %w", err)
+	}
+
+	var marketList map[string]interface{}
+	err = json.Unmarshal([]byte(marketListString), &marketList)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal market list: %w", err)
+	}
+
+	markets := marketList["data"].([]interface{})
+
+	var arbitrageMarkets []string
+
+	// Categorize markets by quote currency
+	for _, market := range markets {
+		marketStr := market.(string)
+		for _, quoteCurrency := range c.allowedMarkets {
+			if strings.HasSuffix(marketStr, quoteCurrency) {
+				arbitrageMarkets = append(arbitrageMarkets, marketStr)
+				break
+			}
+		}
+	}
+
+	return arbitrageMarkets, nil
 }

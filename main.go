@@ -1,163 +1,225 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
+	"context"
+	"log"
 	"net/http"
-	"sync"
-	"sync/atomic"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
 func main() {
+	// Set up structured logging
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	log.SetPrefix("[ARBITRAGE] ")
+
+	log.Println("🔺 Starting Triangular Arbitrage Bot...")
+
+	// Load configuration
 	config, err := LoadConfig("config.json")
 	if err != nil {
-		fmt.Printf("Failed to load config: %v\n", err)
-		return
+		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	log.Printf("Loaded configuration: API Key length=%d, Quote currencies=%v, Profit threshold=%.6f%%",
+		len(config.APIKey), config.QuoteCurrencies, config.ProfitThreshold*100)
+
+	if config.SimulationMode {
+		log.Println("⚠️  SIMULATION MODE ENABLED - No real trades will be executed")
+	}
+
+	// Initialize HTTP client with WebSocket support
 	httpClient := newHttpClient()
 	httpClient.setheaders(map[string]string{
 		"Content-Type": "application/json",
-		"User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-	}).setClient(http.DefaultClient)
+		"User-Agent":   "TriangularArbitrageBot/2.0",
+	}).setClient(&http.Client{
+		Timeout: 30 * time.Second,
+	}).SetWebSocketUrl("socket.coinex.com")
 
+	// Initialize exchange client
 	coinexClient := NewCoinexClient(httpClient, config)
 
-	// Test connection first
-	fmt.Println("Testing connection...")
+	// Test connection
+	log.Println("🔗 Testing exchange connection...")
 	testResponse, err := coinexClient.TestConnection()
 	if err != nil {
-		fmt.Printf("Connection test failed: %v\n", err)
-	} else {
-		fmt.Printf("Connection test response: %s\n", testResponse)
+		log.Fatalf("Connection test failed: %v", err)
 	}
+	log.Printf("✅ Connection test successful: %s", testResponse[:min(100, len(testResponse))])
 
-	// Initialize WebSocket client
-	wsc := NewWebSocketClient("socket.coinex.com")
-	if err := wsc.Connect(); err != nil {
-		fmt.Printf("Failed to connect to WebSocket: %v\n", err)
-		return
-	}
-
+	// Initialize core components
 	marketDepths := NewMarketDepths()
+	metrics := NewMetrics()
+	arbitrageEngine := NewArbitrageEngine(config, marketDepths, metrics, coinexClient)
 
-	// Get markets suitable for triangular arbitrage from CoinEx
-	arbitrageMarkets, err := coinexClient.GetArbitrageMarkets()
-	if err != nil {
-		fmt.Printf("Failed to get arbitrage markets: %v\n", err)
-		return
+	// Connect to WebSocket using integrated HttpClient
+	log.Println("🔌 Connecting to WebSocket...")
+	if err := httpClient.ConnectWebSocket(); err != nil {
+		log.Fatalf("Failed to connect to WebSocket: %v", err)
 	}
+	log.Println("✅ WebSocket connected successfully")
 
-	fmt.Printf("Found %d markets for triangular arbitrage: %v\n", len(arbitrageMarkets), arbitrageMarkets)
+	// Get markets suitable for triangular arbitrage
+	log.Println("🔍 Discovering arbitrage markets...")
+	arbitrageMarkets, completeAssets, err := coinexClient.GetArbitrageMarkets()
+	if err != nil {
+		log.Fatalf("Failed to get arbitrage markets: %v", err)
+	}
 
 	if len(arbitrageMarkets) == 0 {
-		fmt.Println("No suitable markets found for arbitrage")
-		return
+		log.Fatal("❌ No suitable markets found for triangular arbitrage")
 	}
 
-	fmt.Printf("Subscribing to %d markets for arbitrage detection...\n", len(arbitrageMarkets))
-	for _, marketStr := range arbitrageMarkets {
-		go func() {
-			if err := wsc.Subscribe(marketStr); err != nil {
-				fmt.Printf("Failed to subscribe to %s: %v\n", marketStr, err)
+	log.Printf("✅ Found %d markets for arbitrage (%d complete assets)", len(arbitrageMarkets), len(completeAssets))
+
+	// Log all discovered markets for debugging
+	log.Printf("🔍 DISCOVERED MARKETS:")
+	for i, market := range arbitrageMarkets {
+		if i < 20 { // Show first 20 markets
+			log.Printf("   📊 %s", market)
+		}
+	}
+	if len(arbitrageMarkets) > 20 {
+		log.Printf("   ... and %d more markets", len(arbitrageMarkets)-20)
+	}
+
+	// Log complete assets
+	log.Printf("🎯 COMPLETE ASSETS: %v", completeAssets)
+
+	// Subscribe to markets
+	log.Printf("📡 Subscribing to %d markets...", len(arbitrageMarkets))
+	subscriptionErrors := 0
+	successfulSubscriptions := 0
+
+	for i, market := range arbitrageMarkets {
+		if err := httpClient.SubscribeWebSocket(market); err != nil {
+			subscriptionErrors++
+			log.Printf("❌ Failed to subscribe to %s: %v", market, err)
+		} else {
+			successfulSubscriptions++
+			if i < 5 { // Log first few subscriptions
+				log.Printf("✅ Subscribed to %s", market)
 			}
-			time.Sleep(10 * time.Millisecond)
-		}()
+		}
+
+		// Add small delay to avoid overwhelming the WebSocket
+		if i%10 == 0 && i > 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 
-	fmt.Println("Successfully subscribed to markets. Waiting for market data...")
-	time.Sleep(3 * time.Second) // Give time for initial market data to arrive
+	log.Printf("📊 Subscription Results: %d successful, %d failed out of %d total",
+		successfulSubscriptions, subscriptionErrors, len(arbitrageMarkets))
+	log.Println("✅ Market subscriptions completed")
 
-	// Get initial market list for the arbitrage detection function
-	marketListString, err := coinexClient.GetMarketList()
-	if err != nil {
-		fmt.Printf("GetMarketList failed: %v\n", err)
-		return
-	}
-
-	var marketList map[string]interface{}
-	err = json.Unmarshal([]byte(marketListString), &marketList)
-	if err != nil {
-		fmt.Printf("Failed to unmarshal market list: %v\n", err)
-		return
-	}
-
-	// Goroutine to process WebSocket messages
-	var wsWg sync.WaitGroup
-	wsWg.Add(1)
-	messageCounter := atomic.Uint64{}
-
+	// Start market data processor
+	messageCounter := uint64(0)
 	go func() {
-		defer wsWg.Done()
-		for msg := range wsc.DataFeed() {
-			messageCounter.Add(1)
+		log.Println("🔄 Starting market data processor...")
+		for msg := range httpClient.GetWebSocketDataFeed() {
+			messageCounter++
 
-			var wsResponse map[string]interface{}
-			if err := json.Unmarshal(msg, &wsResponse); err != nil {
-				fmt.Printf("Failed to unmarshal WebSocket message: %v\n", err)
+			// Process WebSocket message
+			if err := processWebSocketMessage(msg, marketDepths, metrics); err != nil {
+				if messageCounter%100 == 0 { // Log errors more frequently for debugging
+					log.Printf("⚠️  WebSocket message processing error: %v | Message preview: %s",
+						err, string(msg)[:min(200, len(msg))])
+				}
 				continue
 			}
 
-			// Handle market depth updates concurrently
-			if method, ok := wsResponse["method"].(string); ok && (method == "depth.update" || method == "market.update") {
-				if params, ok := wsResponse["params"].([]interface{}); ok && len(params) >= 3 {
-					// Process updates concurrently
-					go func(method string, params []interface{}) {
-						if method == "depth.update" {
-							// params[0] is full/incremental flag, params[1] is orderbook data, params[2] is market name
-							marketName, ok1 := params[2].(string)
-							orderBookData, ok2 := params[1].(map[string]interface{})
+			// Log processing stats periodically
+			if messageCounter%10000 == 0 {
+				log.Printf("📈 Processed %d WebSocket messages", messageCounter)
+			}
+		}
+	}()
 
-							if ok1 && ok2 {
-								var orderBook OrderBook
-								dataBytes, err := json.Marshal(orderBookData)
-								if err != nil {
-									fmt.Printf("Failed to marshal market data: %v\n", err)
-									return
-								}
-								if err := json.Unmarshal(dataBytes, &orderBook); err != nil {
-									fmt.Printf("Failed to unmarshal order book: %v\n", err)
-									fmt.Printf("DEBUG: Order book data: %+v\n", orderBookData)
-									return
-								}
-								marketDepths.Store(marketName, &orderBook)
-							}
-						} else if method == "market.update" {
-							// Old API format (fallback)
-							if marketData, ok := params[0].(map[string]interface{}); ok {
-								if marketName, ok := marketData["market"].(string); ok {
-									var orderBook OrderBook
-									dataBytes, err := json.Marshal(marketData["data"])
-									if err != nil {
-										fmt.Printf("Failed to marshal market data: %v\n", err)
-										return
-									}
-									if err := json.Unmarshal(dataBytes, &orderBook); err != nil {
-										fmt.Printf("Failed to unmarshal order book: %v\n", err)
-										return
-									}
-									marketDepths.Store(marketName, &orderBook)
-								}
-							}
-						}
-					}(method, params)
+	// Wait for initial market data
+	log.Println("⏳ Waiting for initial market data...")
+	time.Sleep(3 * time.Second)
+
+	// Update triangular paths in the arbitrage engine
+	arbitrageEngine.UpdateTriangularPaths(arbitrageMarkets, completeAssets)
+
+	// Start arbitrage engine
+	log.Println("🚀 Starting arbitrage engine...")
+	arbitrageEngine.Start()
+
+	// Start simple periodic metrics logging
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		priceTicker := time.NewTicker(2 * time.Minute)  // Log prices less frequently
+		debugTicker := time.NewTicker(15 * time.Second) // Debug market data status frequently
+		defer ticker.Stop()
+		defer priceTicker.Stop()
+		defer debugTicker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				logBasicMetrics(metrics, marketDepths)
+			case <-priceTicker.C:
+				logMarketPrices(marketDepths)
+			case <-debugTicker.C:
+				logMarketDataStatus(marketDepths, arbitrageMarkets)
+
+				// Log WebSocket connection status
+				if httpClient.IsWebSocketConnected() {
+					log.Printf("🔗 WebSocket Status: Connected ✅")
+				} else {
+					log.Printf("🔗 WebSocket Status: Disconnected ❌")
 				}
 			}
 		}
 	}()
 
-	// Wait for initial market data to be processed
-	wsWg.Wait()
-	fmt.Printf("Processed %d initial websocket messages\n", messageCounter.Load())
-	var wg sync.WaitGroup
-	stopTime := time.Now().Add(5 * time.Minute)
-	for time.Now().Before(stopTime) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			findArbitrageOpportunities(marketList, config, marketDepths)
-		}()
+	// Set up graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	log.Printf("✅ Triangular Arbitrage Bot is running!")
+	log.Printf("🛑 Press Ctrl+C to stop")
+
+	// Wait for shutdown signal
+	<-quit
+	log.Println("🛑 Shutdown signal received, stopping bot...")
+
+	// Graceful shutdown
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Stop arbitrage engine
+	log.Println("⏹️  Stopping arbitrage engine...")
+	arbitrageEngine.Stop()
+
+	// Close WebSocket connection
+	log.Println("📪 Closing WebSocket connection...")
+	if err := httpClient.CloseWebSocket(); err != nil {
+		log.Printf("⚠️  Error closing WebSocket: %v", err)
 	}
-	wg.Wait()
+
+	// Final metrics log
+	log.Println("📊 Final metrics:")
+	logSimpleMetrics(metrics, marketDepths)
+
+	// Wait for shutdown or timeout
+	done := make(chan struct{})
+	go func() {
+		// Simulate cleanup completion
+		time.Sleep(1 * time.Second)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Println("✅ Graceful shutdown completed")
+	case <-shutdownCtx.Done():
+		log.Println("⚠️  Shutdown timeout exceeded")
+	}
+
+	log.Println("👋 Triangular Arbitrage Bot stopped")
 }

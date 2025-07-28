@@ -23,6 +23,7 @@ type coinexClient struct {
 }
 
 func NewCoinexClient(httpClient *HttpClient, config *Config) *coinexClient {
+	fmt.Printf("Loading CoinEx client with quote currencies from config: %v\n", config.QuoteCurrencies)
 	return &coinexClient{
 		httpClient:     httpClient,
 		apiKey:         config.APIKey,
@@ -174,34 +175,129 @@ func (c *coinexClient) GetMarketList() (string, error) {
 	return string(responseJSON), nil
 }
 
-func (c *coinexClient) GetArbitrageMarkets() ([]string, error) {
+func (c *coinexClient) GetArbitrageMarkets() ([]string, []string, error) {
 	// Get all available markets from CoinEx
 	marketListString, err := c.GetMarketList()
-	fmt.Printf("Market list: %s\n", marketListString)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get market list: %w", err)
+		return nil, nil, fmt.Errorf("failed to get market list: %w", err)
 	}
 
 	var marketList map[string]interface{}
 	err = json.Unmarshal([]byte(marketListString), &marketList)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal market list: %w", err)
+		return nil, nil, fmt.Errorf("failed to unmarshal market list: %w", err)
 	}
 
 	markets := marketList["data"].([]interface{})
+	fmt.Printf("📊 Total markets from CoinEx: %d\n", len(markets))
 
-	var arbitrageMarkets []string
+	// Find complete assets and their markets in one pass
+	finalMarkets, completeAssets := c.findCompleteTriangularMarkets(markets)
+	return finalMarkets, completeAssets, nil
+}
 
-	// Categorize markets by quote currency
+// findCompleteTriangularMarkets finds assets that have markets for ALL quote currencies and returns both markets and assets
+func (c *coinexClient) findCompleteTriangularMarkets(markets []interface{}) ([]string, []string) {
+	// Group markets by asset and quote currency
+	assetMarkets := make(map[string]map[string]string) // asset -> quote -> market
+
+	fmt.Printf("🔍 Analyzing markets for quote currencies: %v\n", c.allowedMarkets)
+
+	// Parse all markets and group by asset
 	for _, market := range markets {
 		marketStr := market.(string)
-		for _, quoteCurrency := range c.allowedMarkets {
-			if strings.HasSuffix(marketStr, quoteCurrency) {
-				arbitrageMarkets = append(arbitrageMarkets, marketStr)
+
+		for _, quote := range c.allowedMarkets {
+			if strings.HasSuffix(marketStr, quote) {
+				asset := strings.TrimSuffix(marketStr, quote)
+				if asset != "" {
+					if assetMarkets[asset] == nil {
+						assetMarkets[asset] = make(map[string]string)
+					}
+					assetMarkets[asset][quote] = marketStr
+				}
 				break
 			}
 		}
 	}
 
-	return arbitrageMarkets, nil
+	// Find assets that have ALL required quote currency pairs
+	completeAssets := []string{}
+	incompleteAssets := []string{}
+
+	for asset, quotes := range assetMarkets {
+		hasAllQuotes := true
+		for _, requiredQuote := range c.allowedMarkets {
+			if _, exists := quotes[requiredQuote]; !exists {
+				hasAllQuotes = false
+				break
+			}
+		}
+
+		if hasAllQuotes {
+			completeAssets = append(completeAssets, asset)
+		} else {
+			incompleteAssets = append(incompleteAssets, asset)
+		}
+	}
+
+	fmt.Printf("✅ Assets with ALL quote pairs (%d): %v\n", len(completeAssets), completeAssets)
+	if len(incompleteAssets) > 0 {
+		maxShow := 10
+		if len(incompleteAssets) < maxShow {
+			maxShow = len(incompleteAssets)
+		}
+		fmt.Printf("⚠️  Assets with PARTIAL quote pairs (%d): %v\n", len(incompleteAssets), incompleteAssets[:maxShow])
+	}
+
+	// Build final market list ONLY for complete assets + direct quote pairs
+	finalMarkets := []string{}
+
+	// Add all markets for complete assets only
+	for _, asset := range completeAssets {
+		for _, quote := range c.allowedMarkets {
+			market := asset + quote
+			finalMarkets = append(finalMarkets, market)
+			fmt.Printf("   📈 Added: %s\n", market)
+		}
+	}
+
+	// Add direct quote currency pairs if they exist (e.g., USDCUSDT, USDTUSDC)
+	directPairs := c.findDirectQuotePairs(markets)
+	for _, pair := range directPairs {
+		finalMarkets = append(finalMarkets, pair)
+		fmt.Printf("   🔗 Added direct pair: %s\n", pair)
+	}
+
+	fmt.Printf("🎯 Final market list: %d markets for %d complete assets\n", len(finalMarkets), len(completeAssets))
+
+	return finalMarkets, completeAssets
+}
+
+// findDirectQuotePairs finds direct trading pairs between quote currencies
+func (c *coinexClient) findDirectQuotePairs(markets []interface{}) []string {
+	directPairs := []string{}
+
+	// Check all combinations of quote currencies
+	for i, quote1 := range c.allowedMarkets {
+		for j, quote2 := range c.allowedMarkets {
+			if i >= j { // Avoid duplicates
+				continue
+			}
+
+			// Try both directions
+			pair1 := quote1 + quote2
+			pair2 := quote2 + quote1
+
+			for _, market := range markets {
+				marketStr := market.(string)
+				if marketStr == pair1 || marketStr == pair2 {
+					directPairs = append(directPairs, marketStr)
+					break
+				}
+			}
+		}
+	}
+
+	return directPairs
 }

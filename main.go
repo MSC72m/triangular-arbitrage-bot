@@ -29,7 +29,38 @@ func main() {
 
 	if config.SimulationMode {
 		log.Println("⚠️  SIMULATION MODE ENABLED - No real trades will be executed")
+		log.Println("   📝 FOK orders will be simulated")
+		log.Println("   🔧 Enable real trading by setting simulationMode: false in config.json")
+	} else {
+		log.Println("🚀 REAL TRADING MODE ENABLED - FOK orders will use CoinEx API")
+		log.Printf("   ⚡ FOK Polling Frequency: %.1fHz (every %.0fms)",
+			config.FOKOrderSettings.PollingFrequencyHz,
+			1000/config.FOKOrderSettings.PollingFrequencyHz)
+		log.Printf("   ⏰ FOK Order Timeout: %ds", config.FOKOrderSettings.OrderTimeoutSeconds)
+		log.Printf("   🔄 Max Retry Attempts: %d", config.FOKOrderSettings.MaxRetryAttempts)
+		log.Println("   ⚠️  REAL MONEY WILL BE USED!")
 	}
+
+	// Display order execution settings
+	log.Printf("💰 ORDER EXECUTION SETTINGS:")
+	log.Printf("   📊 Max Orders Per Second: %.2f (1 order every %.1fs)",
+		config.OrderExecutionSettings.MaxOrdersPerSecond,
+		1.0/config.OrderExecutionSettings.MaxOrdersPerSecond)
+	log.Printf("   🔢 Max Concurrent Orders: %d", config.OrderExecutionSettings.MaxConcurrentOrders)
+	log.Printf("   💵 Order Amount Type: %s", config.OrderExecutionSettings.OrderAmountType)
+
+	if config.OrderExecutionSettings.OrderAmountType == "static" {
+		log.Printf("   💲 Static Order Amount: $%.2f per order", config.OrderExecutionSettings.StaticOrderAmount)
+	} else {
+		log.Printf("   📈 Dynamic Order Percentage: %.2f%% of available balance",
+			config.OrderExecutionSettings.DynamicOrderPercentage*100)
+	}
+
+	log.Printf("   🏦 Account Balance: $%.2f", config.OrderExecutionSettings.AccountBalance)
+	log.Printf("   💸 Max Daily Spend: $%.2f", config.OrderExecutionSettings.MaxDailySpend)
+	log.Printf("   🛡️  Spending Limits: %s", map[bool]string{true: "ENABLED", false: "DISABLED"}[config.OrderExecutionSettings.EnableSpendingLimits])
+	log.Printf("   ⬇️  Min Order Amount: $%.2f", config.OrderExecutionSettings.MinOrderAmount)
+	log.Printf("   ⬆️  Max Order Amount: $%.2f", config.OrderExecutionSettings.MaxOrderAmount)
 
 	// Initialize HTTP client with WebSocket support
 	httpClient := newHttpClient()
@@ -42,6 +73,19 @@ func main() {
 
 	// Initialize exchange client
 	coinexClient := NewCoinexClient(httpClient, config)
+
+	// Display current order execution state
+	concurrent, dailySpent, availableBalance := coinexClient.GetOrderExecutionStats()
+	log.Printf("💳 CURRENT ORDER EXECUTION STATE:")
+	log.Printf("   🔢 Active Concurrent Orders: %d/%d", concurrent, config.OrderExecutionSettings.MaxConcurrentOrders)
+	log.Printf("   💸 Daily Spent: $%.2f/$%.2f", dailySpent, config.OrderExecutionSettings.MaxDailySpend)
+	log.Printf("   💰 Available Balance: $%.2f", availableBalance)
+
+	if config.OrderExecutionSettings.OrderAmountType == "dynamic" {
+		nextOrderValue := availableBalance * config.OrderExecutionSettings.DynamicOrderPercentage
+		log.Printf("   📊 Next Order Value: $%.2f (%.1f%% of available)",
+			nextOrderValue, config.OrderExecutionSettings.DynamicOrderPercentage*100)
+	}
 
 	// Test connection
 	log.Println("🔗 Testing exchange connection...")
@@ -335,6 +379,47 @@ func main() {
 	// Stop arbitrage engine
 	log.Println("⏹️  Stopping arbitrage engine...")
 	arbitrageEngine.Stop()
+
+	// Wait for active FOK orders to complete their FULL 3-leg cycles
+	log.Println("⏳ Waiting for ALL active FOK orders to complete...")
+	activeTrackers := coinexClient.GetActiveTrackers()
+
+	if len(activeTrackers) > 0 {
+		log.Printf("📊 Found %d active FOK orders - waiting for COMPLETE execution...", len(activeTrackers))
+
+		// Wait indefinitely for ALL orders to complete (no timeout pressure)
+		// Each FOK order has max 2s timeout, but we want full 3-leg cycle completion
+		waitStart := time.Now()
+
+		for {
+			activeTrackers = coinexClient.GetActiveTrackers()
+			if len(activeTrackers) == 0 {
+				log.Printf("✅ ALL FOK orders completed successfully in %v", time.Since(waitStart))
+				break
+			}
+
+			// Log every 2 seconds what we're waiting for
+			if int(time.Since(waitStart).Seconds())%2 == 0 {
+				log.Printf("⏳ Still waiting for %d FOK orders to complete... (%v elapsed)",
+					len(activeTrackers), time.Since(waitStart))
+
+				// Show which orders we're waiting for
+				for i, tracker := range activeTrackers {
+					if i < 3 { // Show first 3
+						log.Printf("   📋 Order %d: %s | Market: %s | Age: %v",
+							i+1, tracker.OrderID, tracker.Market, time.Since(tracker.CreatedAt))
+					}
+				}
+				if len(activeTrackers) > 3 {
+					log.Printf("   ... and %d more orders", len(activeTrackers)-3)
+				}
+			}
+
+			time.Sleep(500 * time.Millisecond)
+		}
+	} else {
+		log.Println("✅ No active FOK orders to wait for")
+	}
 
 	// Close WebSocket connection
 	log.Println("📪 Closing WebSocket connection...")

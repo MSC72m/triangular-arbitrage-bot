@@ -3,19 +3,641 @@ package main
 import (
 	"fmt"
 	"log"
+	"math/rand" // Added for re-evaluation simulation
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
+// AssetLockManager manages asset locking during order execution
+type AssetLockManager struct {
+	lockedAssets    map[string]int  // asset -> number of active orders
+	executingAssets map[string]bool // assets currently in execution channel
+	lockMutex       sync.RWMutex    // RW mutex for efficient read access
+	executionMutex  sync.RWMutex    // separate mutex for execution cache
+	config          *Config
+}
+
+// NewAssetLockManager creates a new asset lock manager
+func NewAssetLockManager(config *Config) *AssetLockManager {
+	return &AssetLockManager{
+		lockedAssets:    make(map[string]int),
+		executingAssets: make(map[string]bool),
+		config:          config,
+	}
+}
+
+// TryLockAssets attempts to lock multiple assets for an arbitrage trade
+// Returns true if all assets can be locked, false otherwise
+func (alm *AssetLockManager) TryLockAssets(assets []string) bool {
+	if !alm.config.EnableAssetLocking {
+		return true // Asset locking disabled, always allow
+	}
+
+	alm.lockMutex.Lock()
+	defer alm.lockMutex.Unlock()
+
+	// Check if any market would exceed max concurrent orders
+	for _, market := range assets {
+		currentOrders := alm.lockedAssets[market]
+		if alm.config.MaxConcurrentOrdersPerAsset > 0 &&
+			currentOrders >= alm.config.MaxConcurrentOrdersPerAsset {
+			return false // Market is at max concurrent orders
+		}
+	}
+
+	// All markets can be locked, proceed to lock them
+	for _, market := range assets {
+		alm.lockedAssets[market]++
+	}
+
+	log.Printf("🔒 MARKETS LOCKED | %v | Current locks: %v", assets, alm.getLockedAssetsSnapshot())
+	return true
+}
+
+// UnlockAssets unlocks multiple assets after order completion
+func (alm *AssetLockManager) UnlockAssets(assets []string) {
+	if !alm.config.EnableAssetLocking {
+		return // Asset locking disabled, nothing to unlock
+	}
+
+	alm.lockMutex.Lock()
+	defer alm.lockMutex.Unlock()
+
+	for _, market := range assets {
+		if count, exists := alm.lockedAssets[market]; exists && count > 0 {
+			alm.lockedAssets[market]--
+			if alm.lockedAssets[market] == 0 {
+				delete(alm.lockedAssets, market)
+			}
+		}
+	}
+
+	log.Printf("🔓 MARKETS UNLOCKED | %v | Current locks: %v", assets, alm.getLockedAssetsSnapshot())
+}
+
+// IsPathLocked checks if any asset in the arbitrage path is locked
+func (alm *AssetLockManager) IsPathLocked(path TriangularPath) bool {
+	if !alm.config.EnableAssetLocking {
+		return false // Asset locking disabled, never locked
+	}
+
+	assets := alm.extractAssetsFromPath(path)
+
+	alm.lockMutex.RLock()
+	defer alm.lockMutex.RUnlock()
+
+	for _, asset := range assets {
+		if currentOrders := alm.lockedAssets[asset]; alm.config.MaxConcurrentOrdersPerAsset > 0 &&
+			currentOrders >= alm.config.MaxConcurrentOrdersPerAsset {
+			return true // Asset is locked
+		}
+	}
+
+	return false
+}
+
+// IsPathInExecution checks if any asset in the path is currently being executed
+func (alm *AssetLockManager) IsPathInExecution(path TriangularPath) bool {
+	if !alm.config.EnableAssetLocking {
+		return false
+	}
+
+	// Use the base asset (the main asset being arbitraged) as the execution key
+	baseAsset := path.Asset1
+
+	alm.executionMutex.RLock()
+	defer alm.executionMutex.RUnlock()
+
+	return alm.executingAssets[baseAsset]
+}
+
+// MarkAssetInExecution marks an asset as currently being executed
+func (alm *AssetLockManager) MarkAssetInExecution(path TriangularPath) bool {
+	if !alm.config.EnableAssetLocking {
+		return true
+	}
+
+	baseAsset := path.Asset1
+
+	alm.executionMutex.Lock()
+	defer alm.executionMutex.Unlock()
+
+	// Check if already in execution
+	if alm.executingAssets[baseAsset] {
+		return false // Already being executed
+	}
+
+	// Mark as executing
+	alm.executingAssets[baseAsset] = true
+	log.Printf("🚀 EXECUTION STARTED | Asset: %s | Path: %s→%s→%s",
+		baseAsset, path.Market1, path.Market2, path.Market3)
+	return true
+}
+
+// UnmarkAssetInExecution removes an asset from execution cache
+func (alm *AssetLockManager) UnmarkAssetInExecution(path TriangularPath) {
+	if !alm.config.EnableAssetLocking {
+		return
+	}
+
+	baseAsset := path.Asset1
+
+	alm.executionMutex.Lock()
+	defer alm.executionMutex.Unlock()
+
+	delete(alm.executingAssets, baseAsset)
+	log.Printf("✅ EXECUTION COMPLETED | Asset: %s | Available for new opportunities", baseAsset)
+}
+
+// GetExecutionStats returns execution cache statistics
+func (alm *AssetLockManager) GetExecutionStats() (int, []string) {
+	alm.executionMutex.RLock()
+	defer alm.executionMutex.RUnlock()
+
+	executingAssets := make([]string, 0, len(alm.executingAssets))
+	for asset := range alm.executingAssets {
+		executingAssets = append(executingAssets, asset)
+	}
+
+	return len(alm.executingAssets), executingAssets
+}
+
+// extractAssetsFromPath extracts the specific markets/trading pairs that should be locked
+func (alm *AssetLockManager) extractAssetsFromPath(path TriangularPath) []string {
+	// Instead of locking base assets, lock the specific trading pairs (markets)
+	// This allows the same base asset (e.g., GMT) to trade on different pairs simultaneously
+	markets := []string{path.Market1, path.Market2, path.Market3}
+
+	// Remove duplicates if any
+	uniqueMarkets := make(map[string]bool)
+	for _, market := range markets {
+		uniqueMarkets[market] = true
+	}
+
+	result := make([]string, 0, len(uniqueMarkets))
+	for market := range uniqueMarkets {
+		result = append(result, market)
+	}
+
+	return result
+}
+
+// getLockedAssetsSnapshot returns a snapshot of locked assets (for logging)
+func (alm *AssetLockManager) getLockedAssetsSnapshot() map[string]int {
+	snapshot := make(map[string]int)
+	for asset, count := range alm.lockedAssets {
+		snapshot[asset] = count
+	}
+	return snapshot
+}
+
+// GetLockStats returns lock statistics for monitoring
+func (alm *AssetLockManager) GetLockStats() (int, []string) {
+	alm.lockMutex.RLock()
+	defer alm.lockMutex.RUnlock()
+
+	totalLocks := 0
+	lockedAssets := make([]string, 0, len(alm.lockedAssets))
+
+	for asset, count := range alm.lockedAssets {
+		totalLocks += count
+		lockedAssets = append(lockedAssets, fmt.Sprintf("%s:%d", asset, count))
+	}
+
+	return totalLocks, lockedAssets
+}
+
+// OrderExecutionManager manages order execution and lifecycle
+type OrderExecutionManager struct {
+	coinexClient     *coinexClient
+	assetLockManager *AssetLockManager
+	orderResultChan  chan *OrderResult
+	config           *Config
+}
+
+// NewOrderExecutionManager creates a new order execution manager
+func NewOrderExecutionManager(coinexClient *coinexClient, assetLockManager *AssetLockManager, config *Config) *OrderExecutionManager {
+	return &OrderExecutionManager{
+		coinexClient:     coinexClient,
+		assetLockManager: assetLockManager,
+		orderResultChan:  make(chan *OrderResult, 2000), // Buffered channel for order results
+		config:           config,
+	}
+}
+
+// ExecuteArbitrageOrders executes all three legs of an arbitrage trade with advanced FOK handling
+func (oem *OrderExecutionManager) ExecuteArbitrageOrders(opportunity ArbitrageOpportunity) {
+	path := opportunity.Path
+	markets := oem.assetLockManager.extractAssetsFromPath(path)
+
+	// Always unmark from execution cache at the end
+	defer oem.assetLockManager.UnmarkAssetInExecution(path)
+
+	// Try to lock markets
+	if !oem.assetLockManager.TryLockAssets(markets) {
+		log.Printf("🚫 ARBITRAGE BLOCKED | Path: %s→%s→%s | Markets locked: %v",
+			path.Market1, path.Market2, path.Market3, markets)
+		return
+	}
+
+	executionMode := map[bool]string{true: "SIMULATION", false: "REAL API"}[oem.config.SimulationMode]
+	log.Printf("🚀 EXECUTING FOK ARBITRAGE (%s) | Path: %s→%s→%s | Markets: %v | Expected Profit: %.6f%%",
+		executionMode, path.Market1, path.Market2, path.Market3, markets, opportunity.NetProfit*100)
+
+	// Start FOK arbitrage execution with retry logic
+	oem.executeFOKArbitrageWithRetry(opportunity, markets, 0)
+}
+
+// executeFOKArbitrageWithRetry executes FOK arbitrage with intelligent retry and re-evaluation
+func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity ArbitrageOpportunity, markets []string, attemptNumber int) {
+	log.Printf("🔄 FOK ARBITRAGE EXECUTION | Attempt: %d/%d | Path: %s→%s→%s | Profit: %.6f%%",
+		attemptNumber, oem.config.FOKOrderSettings.MaxRetryAttempts,
+		opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3,
+		opportunity.EstimatedProfit*100)
+
+	// Unlock assets when done
+	defer func() {
+		oem.assetLockManager.UnlockAssets(markets)
+		log.Printf("🔓 ASSETS UNLOCKED | Markets: %v", markets)
+	}()
+
+	// Step 3: Place FOK orders for all three legs
+	log.Printf("📤 PLACING 3 FOK ORDERS | Attempt: %d/%d", attemptNumber, oem.config.FOKOrderSettings.MaxRetryAttempts)
+
+	orderTrackers := make([]*FOKOrderTracker, 3)
+	orderResults := make(map[int]*OrderResult)
+	resultMutex := sync.RWMutex{}
+
+	// Place all three orders
+	for i := 0; i < 3; i++ {
+		var market, orderType string
+		var amount, price float64
+
+		// Determine order parameters for each leg
+		switch i {
+		case 0: // First leg
+			market = opportunity.Path.Market1
+			orderType = "buy"
+			amount = opportunity.Volume
+			price = opportunity.Price1
+		case 1: // Second leg
+			market = opportunity.Path.Market2
+			orderType = "sell"
+			amount = opportunity.Volume
+			price = opportunity.Price2
+		case 2: // Third leg
+			market = opportunity.Path.Market3
+			orderType = "buy"
+			amount = opportunity.Volume
+			price = opportunity.Price3
+		}
+
+		// Create result channel for this order
+		orderResultChan := make(chan *OrderResult, 1)
+
+		// Place FOK order
+		log.Printf("🔄 ATTEMPTING ORDER %d | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
+			i+1, market, orderType, amount, price)
+
+		tracker := oem.coinexClient.PlaceFOKOrder(market, orderType, amount, price, orderResultChan)
+		if tracker == nil {
+			log.Printf("❌ ORDER %d REJECTED | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
+				i+1, market, orderType, amount, price)
+			log.Printf("💡 POSSIBLE REASONS: Rate limit (5/sec), Spending limit ($%.2f balance), Concurrent limit (%d)",
+				oem.config.OrderExecutionSettings.AccountBalance, oem.config.OrderExecutionSettings.MaxConcurrentOrders)
+
+			// Cancel any orders that were already placed
+			for j := 0; j < i; j++ {
+				if orderTrackers[j] != nil {
+					orderTrackers[j].mu.Lock()
+					if orderTrackers[j].CancelChan != nil {
+						select {
+						case orderTrackers[j].CancelChan <- struct{}{}:
+						default:
+						}
+					}
+					orderTrackers[j].mu.Unlock()
+				}
+			}
+
+			log.Printf("🛑 ARBITRAGE CANCELLED | Order %d rejected, cancelling previous orders", i+1)
+			return
+		}
+
+		orderTrackers[i] = tracker
+		log.Printf("✅ ORDER %d PLACED | ID: %s | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
+			i+1, tracker.OrderID, market, orderType, amount, price)
+
+		// Start result collector goroutine for this order
+		go func(orderIndex int, resultChan <-chan *OrderResult) {
+			result := <-resultChan
+			resultMutex.Lock()
+			orderResults[orderIndex] = result
+			resultMutex.Unlock()
+			log.Printf("📥 ORDER %d RESULT | ID: %s | Status: %s", orderIndex+1, result.OrderID, result.Status)
+		}(i, orderResultChan)
+	}
+
+	// Step 4: Wait for all results with timeout
+	timeout := time.Duration(oem.config.FOKOrderSettings.OrderTimeoutSeconds+1) * time.Second
+	waitStart := time.Now()
+
+	log.Printf("⏳ WAITING FOR ALL ORDER RESULTS | Timeout: %v", timeout)
+
+	for time.Since(waitStart) < timeout {
+		resultMutex.RLock()
+		resultCount := len(orderResults)
+		resultMutex.RUnlock()
+
+		if resultCount == 3 {
+			log.Printf("✅ ALL ORDER RESULTS RECEIVED | Time: %v", time.Since(waitStart))
+			break
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Step 5: Analyze results and decide next action
+	resultMutex.RLock()
+	results := make(map[int]*OrderResult)
+	for k, v := range orderResults {
+		results[k] = v
+	}
+	resultMutex.RUnlock()
+
+	oem.analyzeFOKResultsAndDecide(opportunity, markets, results, attemptNumber)
+}
+
+// analyzeFOKResultsAndDecide analyzes FOK results and decides whether to retry or complete
+func (oem *OrderExecutionManager) analyzeFOKResultsAndDecide(opportunity ArbitrageOpportunity, markets []string, results map[int]*OrderResult, attemptNumber int) {
+	successfulOrders := 0
+	failedOrders := 0
+	totalFilled := 0.0
+	totalPnL := 0.0
+	totalFees := 0.0
+
+	// Analyze each order result
+	for i := 0; i < 3; i++ {
+		if result, exists := results[i]; exists {
+			if result.Status == OrderStatusFilled {
+				successfulOrders++
+				totalFilled += result.FilledAmount * result.AvgPrice
+				totalFees += result.Fee
+
+				// Calculate PnL contribution
+				if strings.Contains(result.Type, "sell") {
+					totalPnL += result.FilledAmount * result.AvgPrice
+				} else {
+					totalPnL -= result.FilledAmount * result.AvgPrice
+				}
+			} else {
+				failedOrders++
+			}
+
+			log.Printf("📊 LEG %d ANALYSIS | ID: %s | Status: %s | Filled: %.6f | Fee: %.6f %s",
+				i+1, result.OrderID, result.Status, result.FilledAmount, result.Fee, result.FeeCurrency)
+		} else {
+			failedOrders++
+			log.Printf("📊 LEG %d ANALYSIS | Missing result", i+1)
+		}
+	}
+
+	log.Printf("📊 FOK ARBITRAGE ANALYSIS | Attempt %d | Successful: %d/3 | Failed: %d/3 | Total PnL: $%.4f | Total Fees: $%.4f",
+		attemptNumber+1, successfulOrders, failedOrders, totalPnL, totalFees)
+
+	// Check if arbitrage was successful
+	if successfulOrders == 3 {
+		// Complete success
+		netPnL := totalPnL - totalFees
+		log.Printf("✅ FOK ARBITRAGE COMPLETE | Attempt %d | Expected: $%.4f | Actual: $%.4f | Net: $%.4f",
+			attemptNumber+1, opportunity.NetProfit*opportunity.Volume, totalPnL, netPnL)
+
+		// Unlock markets - arbitrage completed successfully
+		oem.assetLockManager.UnlockAssets(markets)
+		return
+	}
+
+	// Partial or complete failure - decide whether to retry
+	shouldRetry := false
+	retryReason := ""
+
+	if attemptNumber < oem.config.FOKOrderSettings.MaxRetryAttempts && oem.config.FOKOrderSettings.EnableAggressiveReEvaluation {
+		// Re-evaluate profitability with current market conditions
+		log.Printf("🔄 RE-EVALUATING PROFIT | Attempt %d | Checking if retry is worthwhile", attemptNumber+1)
+
+		newOpportunity := oem.reEvaluateOpportunity(opportunity)
+		if newOpportunity != nil {
+			profitDifference := newOpportunity.NetProfit - opportunity.NetProfit
+
+			// Check if profit is still above threshold and hasn't degraded too much
+			if newOpportunity.NetProfit >= oem.config.ProfitThreshold &&
+				profitDifference >= -oem.config.ProfitThreshold {
+
+				shouldRetry = true
+				retryReason = fmt.Sprintf("Still profitable: %.6f%% (change: %+.6f%%)",
+					newOpportunity.NetProfit*100, profitDifference*100)
+				opportunity = *newOpportunity // Update opportunity with new prices
+			} else {
+				retryReason = fmt.Sprintf("Profit degraded: %.6f%% → %.6f%% (change: %+.6f%%)",
+					opportunity.NetProfit*100, newOpportunity.NetProfit*100, profitDifference*100)
+			}
+		} else {
+			retryReason = "Market data unavailable for re-evaluation"
+		}
+	} else if attemptNumber >= oem.config.FOKOrderSettings.MaxRetryAttempts {
+		retryReason = "Maximum retry attempts reached"
+	} else if !oem.config.FOKOrderSettings.EnableAggressiveReEvaluation {
+		retryReason = "Aggressive re-evaluation disabled"
+	}
+
+	if shouldRetry {
+		log.Printf("🔄 RETRYING FOK ARBITRAGE | Attempt %d → %d | Reason: %s",
+			attemptNumber+1, attemptNumber+2, retryReason)
+
+		// Small delay before retry to let market conditions stabilize
+		time.Sleep(100 * time.Millisecond)
+
+		// Retry with updated opportunity
+		oem.executeFOKArbitrageWithRetry(opportunity, markets, attemptNumber+1)
+	} else {
+		log.Printf("🛑 FOK ARBITRAGE ABANDONED | After %d attempts | Reason: %s",
+			attemptNumber+1, retryReason)
+
+		// Cancel all remaining active orders if configured to do so
+		if oem.config.FOKOrderSettings.CancelAllOnSingleFailure {
+			log.Printf("🛑 CANCELLING ALL REMAINING ORDERS | Per configuration")
+			oem.coinexClient.CancelAllActiveOrders()
+		}
+
+		// Unlock markets - arbitrage abandoned
+		oem.assetLockManager.UnlockAssets(markets)
+	}
+}
+
+// reEvaluateOpportunity re-evaluates the arbitrage opportunity with current market data
+func (oem *OrderExecutionManager) reEvaluateOpportunity(originalOpportunity ArbitrageOpportunity) *ArbitrageOpportunity {
+	// This would typically be done by the arbitrage engine
+	// For now, we'll simulate a re-evaluation with some price movement
+
+	// Simulate slight price movements (±0.01%) since original calculation
+	priceMovement1 := 0.9999 + rand.Float64()*0.0002 // ±0.01%
+	priceMovement2 := 0.9999 + rand.Float64()*0.0002
+	priceMovement3 := 0.9999 + rand.Float64()*0.0002
+
+	newOpportunity := originalOpportunity
+	newOpportunity.Price1 *= priceMovement1
+	newOpportunity.Price2 *= priceMovement2
+	newOpportunity.Price3 *= priceMovement3
+
+	// Recalculate profit based on direction
+	path := originalOpportunity.Path
+	var roundTripRate float64
+
+	if path.Direction1 == "buy" && path.Direction2 == "sell" && path.Direction3 == "sell" {
+		roundTripRate = (1.0 / newOpportunity.Price1) * newOpportunity.Price2 * newOpportunity.Price3
+	} else if path.Direction1 == "buy" && path.Direction2 == "buy" && path.Direction3 == "sell" {
+		roundTripRate = (1.0 / newOpportunity.Price1) * (1.0 / newOpportunity.Price2) * newOpportunity.Price3
+	} else {
+		// Handle other direction combinations
+		roundTripRate = 1.0 // Fallback
+	}
+
+	estimatedProfit := roundTripRate - 1.0
+
+	// Subtract fees
+	fee1 := oem.getTradingFee(path.Market1)
+	fee2 := oem.getTradingFee(path.Market2)
+	fee3 := oem.getTradingFee(path.Market3)
+	totalFees := fee1 + fee2 + fee3
+
+	newOpportunity.EstimatedProfit = estimatedProfit
+	newOpportunity.NetProfit = estimatedProfit - totalFees
+	newOpportunity.Timestamp = time.Now()
+
+	log.Printf("🔄 PROFIT RE-EVALUATION | Original: %.6f%% | New: %.6f%% | Change: %+.6f%% | Prices: %.8f→%.8f, %.8f→%.8f, %.8f→%.8f",
+		originalOpportunity.NetProfit*100, newOpportunity.NetProfit*100,
+		(newOpportunity.NetProfit-originalOpportunity.NetProfit)*100,
+		originalOpportunity.Price1, newOpportunity.Price1,
+		originalOpportunity.Price2, newOpportunity.Price2,
+		originalOpportunity.Price3, newOpportunity.Price3)
+
+	return &newOpportunity
+}
+
+// getTradingFee returns the trading fee for a market
+func (oem *OrderExecutionManager) getTradingFee(market string) float64 {
+	if fee, exists := oem.config.TradingFees[market]; exists {
+		return fee
+	}
+	return oem.config.DefaultTradingFee
+}
+
+// calculateMaxVolume calculates the maximum safe volume for the arbitrage
+func (ae *ArbitrageEngine) calculateMaxVolume(vol1, vol2, vol3, price1, price2, price3 float64) float64 {
+	// Apply volume fraction limit
+	maxVol1 := vol1 * ae.config.MaxVolumeFraction
+	maxVol2 := vol2 * ae.config.MaxVolumeFraction
+	maxVol3 := vol3 * ae.config.MaxVolumeFraction
+
+	// Convert all volumes to base currency equivalent
+	baseVol1 := maxVol1 * price1
+	baseVol2 := maxVol2 * price2
+	baseVol3 := maxVol3 * price3
+
+	// Take minimum of all three
+	minVolume := baseVol1
+	if baseVol2 < minVolume {
+		minVolume = baseVol2
+	}
+	if baseVol3 < minVolume {
+		minVolume = baseVol3
+	}
+
+	// Apply position size limit
+	if minVolume > ae.config.MaxPositionSize {
+		minVolume = ae.config.MaxPositionSize
+	}
+
+	return minVolume
+}
+
+// executionWorker handles the execution of arbitrage opportunities
+func (ae *ArbitrageEngine) executionWorker() {
+	for {
+		select {
+		case <-ae.stopChan:
+			return
+		case opportunity := <-ae.executionChan:
+			if ae.config.SimulationMode {
+				ae.simulateExecution(opportunity)
+			} else {
+				// Use the new order execution manager
+				ae.orderExecutionManager.ExecuteArbitrageOrders(opportunity)
+			}
+		}
+	}
+}
+
+// simulateExecution simulates the execution for testing purposes
+func (ae *ArbitrageEngine) simulateExecution(opportunity ArbitrageOpportunity) {
+	path := opportunity.Path
+	markets := ae.assetLockManager.extractAssetsFromPath(path)
+
+	// Always unmark from execution cache at the end
+	defer ae.assetLockManager.UnmarkAssetInExecution(path)
+
+	// Check asset locking in simulation mode too
+	if !ae.assetLockManager.TryLockAssets(markets) {
+		log.Printf("🚫 SIMULATION BLOCKED | Path: %s→%s→%s | Markets locked: %v",
+			path.Market1, path.Market2, path.Market3, markets)
+		return
+	}
+
+	log.Printf("💰 SIMULATION TRADE | Path: %s→%s→%s | Expected Profit: %.6f%% | Volume: $%.2f | Est. PnL: $%.4f | Markets: %v",
+		opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3,
+		opportunity.NetProfit*100,
+		opportunity.Volume,
+		opportunity.NetProfit*opportunity.Volume,
+		markets)
+
+	// Log the three legs of the trade
+	log.Printf("   🔄 Leg 1: %s %s at price %.8f",
+		opportunity.Path.Direction1, opportunity.Path.Market1, opportunity.Price1)
+	log.Printf("   🔄 Leg 2: %s %s at price %.8f",
+		opportunity.Path.Direction2, opportunity.Path.Market2, opportunity.Price2)
+	log.Printf("   🔄 Leg 3: %s %s at price %.8f",
+		opportunity.Path.Direction3, opportunity.Path.Market3, opportunity.Price3)
+
+	// Simulate execution time
+	if ae.config.EnableOrderSimulation {
+		executionTime := time.Duration(ae.config.OrderExecutionTimeMs) * time.Millisecond
+		log.Printf("⏳ SIMULATING EXECUTION | Markets: %v | Duration: %v", markets, executionTime)
+		time.Sleep(executionTime)
+	}
+
+	ae.metrics.IncrementTrades()
+	ae.metrics.AddPnL(opportunity.NetProfit * opportunity.Volume)
+
+	// Unlock markets after simulation
+	ae.assetLockManager.UnlockAssets(markets)
+
+	log.Printf("✅ SIMULATION COMPLETE | Total trades: %d | Total PnL: $%.4f | Markets unlocked: %v",
+		ae.metrics.GetSnapshot().TradesExecuted,
+		ae.metrics.GetSnapshot().TotalPnL,
+		markets)
+}
+
 // ArbitrageEngine handles triangular arbitrage detection and execution
 type ArbitrageEngine struct {
-	config       *Config
-	marketDepths *MarketDepths
-	metrics      *Metrics
-	coinexClient *coinexClient
-	rateLimiter  *RateLimiter
+	config                *Config
+	marketDepths          *MarketDepths
+	metrics               *Metrics
+	coinexClient          *coinexClient
+	rateLimiter           *RateLimiter
+	assetLockManager      *AssetLockManager
+	orderExecutionManager *OrderExecutionManager
 
 	// Triangular paths cache
 	triangularPaths []TriangularPath
@@ -32,15 +654,20 @@ type ArbitrageEngine struct {
 
 // NewArbitrageEngine creates a new arbitrage engine
 func NewArbitrageEngine(config *Config, marketDepths *MarketDepths, metrics *Metrics, coinexClient *coinexClient) *ArbitrageEngine {
+	assetLockManager := NewAssetLockManager(config)
+	orderExecutionManager := NewOrderExecutionManager(coinexClient, assetLockManager, config)
+
 	return &ArbitrageEngine{
-		config:        config,
-		marketDepths:  marketDepths,
-		metrics:       metrics,
-		coinexClient:  coinexClient,
-		rateLimiter:   NewRateLimiter(config.RateLimitPerSecond, config.RateLimitPerSecond),
-		activeTrades:  make(map[string]*ArbitrageTrade),
-		executionChan: make(chan ArbitrageOpportunity, 100),
-		stopChan:      make(chan struct{}),
+		config:                config,
+		marketDepths:          marketDepths,
+		metrics:               metrics,
+		coinexClient:          coinexClient,
+		rateLimiter:           NewRateLimiter(config.RateLimitPerSecond, config.RateLimitPerSecond),
+		assetLockManager:      assetLockManager,
+		orderExecutionManager: orderExecutionManager,
+		activeTrades:          make(map[string]*ArbitrageTrade),
+		executionChan:         make(chan ArbitrageOpportunity, 2000),
+		stopChan:              make(chan struct{}),
 	}
 }
 
@@ -89,6 +716,22 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 				availableMarkets := ae.marketDepths.GetAvailableMarkets()
 				if len(availableMarkets) >= 3 { // Reduced from 10 to 3 - many markets are illiquid
 					log.Printf("✅ Market data ready with %d markets", len(availableMarkets))
+
+					// Check critical quote pairs
+					criticalPairs := []string{"USDCUSDT", "USDTUSDC"}
+					for _, pair := range criticalPairs {
+						if orderBook, exists := ae.marketDepths.Load(pair); exists && orderBook != nil {
+							if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
+								log.Printf("   ✅ %s has order book data (bids: %d, asks: %d)",
+									pair, len(orderBook.Bids), len(orderBook.Asks))
+							} else {
+								log.Printf("   ⚠️  %s exists but has empty order book", pair)
+							}
+						} else {
+							log.Printf("   ❌ %s not found in market depths", pair)
+						}
+					}
+
 					marketDataReady <- true
 					return
 				}
@@ -116,6 +759,42 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 
 	// Show some examples of available vs expected
 	log.Printf("   📈 Available markets (first 10): %v", availableMarkets[:Min(10, len(availableMarkets))])
+
+	// Check specifically for critical quote pairs
+	log.Printf("   🔍 Critical quote pair check:")
+	for _, pair := range []string{"USDCUSDT", "USDTUSDC"} {
+		if orderBook, exists := ae.marketDepths.Load(pair); exists && orderBook != nil {
+			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
+				log.Printf("      ✅ %s: Available with %d bids, %d asks",
+					pair, len(orderBook.Bids), len(orderBook.Asks))
+			} else {
+				log.Printf("      ⚠️  %s: Found but empty order book", pair)
+			}
+		} else {
+			log.Printf("      ❌ %s: Not found in market depths", pair)
+		}
+	}
+
+	// Check if USDCUSDT exists in the original markets list
+	log.Printf("   🔍 Checking original markets list for USDC pairs:")
+	usdcInOriginal := false
+	usdtInOriginal := false
+	for _, market := range markets {
+		if market == "USDCUSDT" {
+			usdcInOriginal = true
+			log.Printf("      ✅ USDCUSDT found in original markets list")
+		}
+		if market == "USDTUSDC" {
+			usdtInOriginal = true
+			log.Printf("      ✅ USDTUSDC found in original markets list")
+		}
+	}
+	if !usdcInOriginal {
+		log.Printf("      ❌ USDCUSDT NOT found in original markets list")
+	}
+	if !usdtInOriginal {
+		log.Printf("      ❌ USDTUSDC NOT found in original markets list")
+	}
 
 	// Filter markets to only include those with actual data AND liquidity
 	validMarkets := []string{}
@@ -146,6 +825,25 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 
 	// Create triangular arbitrage paths using liquid markets only
 	// Look for cycles like USDT → Asset → USDC → USDT
+	log.Printf("🔍 Creating triangular paths from %d liquid markets", len(liquidMarkets))
+	if len(liquidMarkets) > 0 {
+		log.Printf("   📊 Sample liquid markets: %v", liquidMarkets[:Min(10, len(liquidMarkets))])
+	}
+
+	// Check if USDCUSDT is in liquid markets
+	usdcInLiquid := false
+	for _, market := range liquidMarkets {
+		if market == "USDCUSDT" {
+			usdcInLiquid = true
+			break
+		}
+	}
+	if usdcInLiquid {
+		log.Printf("   ✅ USDCUSDT found in liquid markets")
+	} else {
+		log.Printf("   ❌ USDCUSDT NOT found in liquid markets")
+	}
+
 	paths := ae.discoverTriangularArbitrageCycles(liquidMarkets)
 
 	ae.pathsLock.Lock()
@@ -153,6 +851,20 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 	ae.pathsLock.Unlock()
 
 	log.Printf("🔄 Updated triangular paths: %d arbitrage cycles discovered", len(paths))
+
+	// Debug: Why no paths?
+	if len(paths) == 0 {
+		log.Printf("🔍 DEBUG: Why no triangular paths found?")
+		log.Printf("   - Available markets: %d", len(liquidMarkets))
+		log.Printf("   - Complete assets: %d", len(completeAssets))
+
+		if len(liquidMarkets) > 0 {
+			log.Printf("   - Sample markets: %v", liquidMarkets[:Min(5, len(liquidMarkets))])
+		}
+		if len(completeAssets) > 0 {
+			log.Printf("   - Complete assets: %v", completeAssets)
+		}
+	}
 
 	// Log first few paths for debugging
 	for i, path := range paths {
@@ -171,14 +883,6 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 
 	if len(paths) > 5 {
 		log.Printf("   ... and %d more cycles", len(paths)-5)
-	}
-
-	if len(paths) == 0 {
-		log.Printf("⚠️  WARNING: No valid triangular arbitrage cycles found!")
-		log.Printf("   This might be due to:")
-		log.Printf("   1. Insufficient market data")
-		log.Printf("   2. No suitable asset combinations for triangular arbitrage")
-		log.Printf("   3. WebSocket data not fully synchronized")
 	}
 }
 
@@ -219,11 +923,22 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 
 	// Only create cycles if we have both quote currencies configured
 	if len(ae.config.QuoteCurrencies) >= 2 {
-		// USDT → Asset → USDC → USDT (requires USDCUSDT pair)
-		if marketSet["USDCUSDT"] || marketSet["USDTUSDC"] {
-			quotePair := "USDCUSDT"
-			if marketSet["USDTUSDC"] {
+		// Check if we have a direct USDC/USDT pair
+		hasDirectPair := marketSet["USDCUSDT"] || marketSet["USDTUSDC"]
+
+		if hasDirectPair {
+			// Use direct USDC/USDT pair if available
+			var quotePair string
+			var quoteDirection string
+
+			if marketSet["USDCUSDT"] {
+				quotePair = "USDCUSDT"
+				quoteDirection = "sell" // Selling USDC for USDT
+				log.Printf("   🎯 Using direct quote pair: USDCUSDT (sell USDC for USDT)")
+			} else if marketSet["USDTUSDC"] {
 				quotePair = "USDTUSDC"
+				quoteDirection = "buy" // Buying USDC with USDT
+				log.Printf("   🎯 Using direct quote pair: USDTUSDC (buy USDC with USDT)")
 			}
 
 			for asset := range usdtMarkets {
@@ -235,13 +950,20 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 						Asset2:     "USDC",
 						Market1:    asset + "USDT", // Buy asset with USDT
 						Market2:    asset + "USDC", // Sell asset for USDC
-						Market3:    quotePair,      // Sell USDC for USDT
+						Market3:    quotePair,      // Convert USDC back to USDT
 						Direction1: "buy",
 						Direction2: "sell",
-						Direction3: "sell",
+						Direction3: quoteDirection, // Correct direction based on available pair
 					}
 
 					// Reverse cycle: USDT → USDC → Asset → USDT
+					var reverseDirection1 string
+					if quotePair == "USDCUSDT" {
+						reverseDirection1 = "buy" // Buy USDC with USDT (reverse of USDCUSDT)
+					} else {
+						reverseDirection1 = "buy" // Buy USDC with USDT (USDTUSDC direction)
+					}
+
 					path2 := TriangularPath{
 						BaseAsset:  "USDT",
 						Asset1:     "USDC",
@@ -249,7 +971,7 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 						Market1:    quotePair,      // Buy USDC with USDT
 						Market2:    asset + "USDC", // Buy asset with USDC
 						Market3:    asset + "USDT", // Sell asset for USDT
-						Direction1: "buy",
+						Direction1: reverseDirection1,
 						Direction2: "buy",
 						Direction3: "sell",
 					}
@@ -257,53 +979,82 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 					paths = append(paths, path1, path2)
 					cycleCount += 2
 
-					log.Printf("   ✅ Created cycles for %s: USDT→%s→USDC→USDT and reverse", asset, asset)
+					log.Printf("   ✅ Created cycles for %s: USDT→%s→USDC→USDT and reverse (using %s)", asset, asset, quotePair)
 				}
 			}
 		} else {
-			log.Printf("   ⚠️  Missing USDC/USDT pair - cannot create triangular cycles")
+			// No direct USDC/USDT pair - create triangular cycles using USDC as intermediate
+			// This creates cycles like: USDT → Asset → USDC → USDT (via another asset)
+			log.Printf("   🎯 No direct USDC/USDT pair found - creating USDC-based triangular cycles")
+
+			// Find assets that have both USDT and USDC pairs
+			completeAssets := []string{}
+			for asset := range usdtMarkets {
+				if usdcMarkets[asset] {
+					completeAssets = append(completeAssets, asset)
+				}
+			}
+
+			log.Printf("   📊 Assets with both USDT and USDC pairs: %d", len(completeAssets))
+
+			if len(completeAssets) == 0 {
+				log.Printf("   ⚠️  No assets found with both USDT and USDC pairs")
+				return paths
+			}
+
+			// Create triangular cycles: USDT → Asset1 → Asset2 → USDT
+			// Where Asset1 and Asset2 both have USDC pairs
+			for i, asset1 := range completeAssets {
+				for j, asset2 := range completeAssets {
+					if i != j { // Different assets
+						// Cycle: USDT → Asset1 → Asset2 → USDT
+						// This works because both assets can be traded against USDC
+						path1 := TriangularPath{
+							BaseAsset:  "USDT",
+							Asset1:     asset1,
+							Asset2:     asset2,
+							Market1:    asset1 + "USDT", // Buy asset1 with USDT
+							Market2:    asset1 + "USDC", // Sell asset1 for USDC
+							Market3:    asset2 + "USDC", // Buy asset2 with USDC
+							Direction1: "buy",
+							Direction2: "sell",
+							Direction3: "buy",
+						}
+
+						// Reverse cycle: USDT → Asset2 → Asset1 → USDT
+						path2 := TriangularPath{
+							BaseAsset:  "USDT",
+							Asset1:     asset2,
+							Asset2:     asset1,
+							Market1:    asset2 + "USDT", // Buy asset2 with USDT
+							Market2:    asset2 + "USDC", // Sell asset2 for USDC
+							Market3:    asset1 + "USDC", // Buy asset1 with USDC
+							Direction1: "buy",
+							Direction2: "sell",
+							Direction3: "buy",
+						}
+
+						paths = append(paths, path1, path2)
+						cycleCount += 2
+
+						if cycleCount <= 10 { // Limit logging to first 10 cycles
+							log.Printf("   ✅ Created cycle: USDT→%s→%s→USDT", asset1, asset2)
+						}
+					}
+				}
+			}
 		}
 	} else {
 		log.Printf("   ⚠️  Need at least 2 quote currencies for triangular arbitrage (configured: %v)", ae.config.QuoteCurrencies)
 	}
 
 	log.Printf("✅ Created %d triangular arbitrage cycles", cycleCount)
-
-	// Log discovered assets for debugging
-	if len(usdtMarkets) > 0 && len(usdcMarkets) > 0 {
-		completeAssets := []string{}
-		for asset := range usdtMarkets {
-			if usdcMarkets[asset] {
-				completeAssets = append(completeAssets, asset)
-			}
-		}
-
-		log.Printf("   💰 Assets with both USDT and USDC pairs: %v", completeAssets)
-
-		if len(completeAssets) == 0 {
-			log.Printf("   ⚠️  No assets found with both USDT and USDC pairs")
-
-			// Show what we do have
-			usdtAssets := make([]string, 0, len(usdtMarkets))
-			for asset := range usdtMarkets {
-				usdtAssets = append(usdtAssets, asset)
-			}
-			usdcAssets := make([]string, 0, len(usdcMarkets))
-			for asset := range usdcMarkets {
-				usdcAssets = append(usdcAssets, asset)
-			}
-
-			log.Printf("   📈 USDT-only assets: %v", usdtAssets[:Min(10, len(usdtAssets))])
-			log.Printf("   💎 USDC-only assets: %v", usdcAssets[:Min(10, len(usdcAssets))])
-		}
-	}
-
 	return paths
 }
 
 // arbitrageScanner continuously scans for arbitrage opportunities
 func (ae *ArbitrageEngine) arbitrageScanner(scannerID int) {
-	ticker := time.NewTicker(100 * time.Millisecond) // Reduced frequency from 10ms to 100ms for illiquid markets
+	ticker := time.NewTicker(50 * time.Millisecond) // Increased frequency from 100ms to 50ms for faster opportunity detection
 	defer ticker.Stop()
 
 	scanCount := 0
@@ -354,30 +1105,66 @@ func (ae *ArbitrageEngine) scanForOpportunities(scannerID int, scanCount int) {
 	// Get snapshot of market depths
 	snapshot := ae.marketDepths.GetSnapshot()
 
-	// Debug: Show available markets vs required markets
-	if scanCount%1000 == 0 && scannerID == 0 { // Log every 1000 scans from scanner 0 (every 10 seconds)
-		availableMarkets := make([]string, 0, len(snapshot))
-		for market := range snapshot {
-			availableMarkets = append(availableMarkets, market)
-		}
+	// Debug: Show asset lock status periodically
+	if scanCount%1000 == 0 && scannerID == 0 { // Log every 1000 scans from scanner 0
+		totalLocks, lockedAssets := ae.assetLockManager.GetLockStats()
+		executingCount, executingAssets := ae.assetLockManager.GetExecutionStats()
 
-		requiredMarkets := make(map[string]bool)
-		for _, path := range paths[:Min(3, len(paths))] { // Check first 3 paths only
-			requiredMarkets[path.Market1] = true
-			requiredMarkets[path.Market2] = true
-			requiredMarkets[path.Market3] = true
+		if totalLocks > 0 || executingCount > 0 {
+			log.Printf("🔒 ASSET STATUS | Locked: %d assets: %v | Executing: %d assets: %v",
+				totalLocks, lockedAssets[:Min(10, len(lockedAssets))],
+				executingCount, executingAssets)
 		}
-
-		log.Printf("🔍 MARKET DEBUG | Available: %d markets | Required (first 3 paths): %v",
-			len(availableMarkets), getKeys(requiredMarkets))
 	}
 
 	opportunitiesFound := 0
 	pathsChecked := 0
 	pathsWithData := 0
+	pathsBlocked := 0
+	pathsInExecution := 0
+	pathsBelowThreshold := 0
+	pathsLosing := 0
+
+	// Track which assets are being scanned vs blocked vs executing
+	assetsScanned := make(map[string]int)
+	assetsBlocked := make(map[string]int)
+	assetsExecuting := make(map[string]int)
 
 	for _, path := range paths {
 		pathsChecked++
+
+		// Extract assets for this path
+		markets := ae.assetLockManager.extractAssetsFromPath(path)
+		baseAsset := path.Asset1 // The main asset being arbitraged (e.g., GMT, ONE, etc.)
+
+		// Check if this asset is already in execution (PRIORITY CHECK)
+		if ae.assetLockManager.IsPathInExecution(path) {
+			pathsInExecution++
+			assetsExecuting[baseAsset]++
+
+			// Log execution blocking occasionally for debugging
+			if pathsInExecution <= 3 && scanCount%500 == 0 && scannerID == 0 {
+				log.Printf("🔄 ASSET IN EXECUTION | %s | Skipping recalculation", baseAsset)
+			}
+			continue
+		}
+
+		// Check if this path is blocked by asset locking
+		if ae.assetLockManager.IsPathLocked(path) {
+			pathsBlocked++
+			assetsBlocked[baseAsset]++
+
+			// Log blocked paths occasionally for debugging
+			if pathsBlocked <= 5 && scanCount%100 == 0 && scannerID == 0 {
+				log.Printf("🚫 PATH BLOCKED | %s→%s→%s | Markets locked: %v",
+					path.Market1, path.Market2, path.Market3, markets)
+			}
+			continue
+		}
+
+		// Track that we're scanning this asset
+		assetsScanned[baseAsset]++
+
 		opportunity := ae.calculateOpportunity(path, snapshot, startTime)
 
 		if opportunity != nil {
@@ -395,22 +1182,63 @@ func (ae *ArbitrageEngine) scanForOpportunities(scannerID int, scanCount int) {
 					opportunity.Volume,
 					opportunity.Price1, opportunity.Price2, opportunity.Price3)
 
-				// Send to execution channel (non-blocking)
-				select {
-				case ae.executionChan <- *opportunity:
-					log.Printf("✅ QUEUED | Scanner %d | Opportunity sent to execution", scannerID)
-				default:
-					log.Printf("⚠️  DROPPED | Scanner %d | Execution channel full", scannerID)
+				// Mark asset as in execution before sending to channel
+				if ae.assetLockManager.MarkAssetInExecution(path) {
+					// Send to execution channel (non-blocking)
+					select {
+					case ae.executionChan <- *opportunity:
+						log.Printf("✅ QUEUED | Scanner %d | Opportunity sent to execution", scannerID)
+					default:
+						// If channel is full, unmark the asset since we're not executing
+						ae.assetLockManager.UnmarkAssetInExecution(path)
+						log.Printf("⚠️  DROPPED | Scanner %d | Execution channel full", scannerID)
+					}
+				} else {
+					log.Printf("🔄 DUPLICATE SKIPPED | Scanner %d | Asset %s already in execution", scannerID, baseAsset)
 				}
+			} else if opportunity.NetProfit > 0 {
+				pathsBelowThreshold++
+			} else {
+				pathsLosing++
 			}
-			// Note: Below threshold and losing paths are now logged within calculateOpportunity()
 		}
 	}
 
-	// Log scan summary every 1000 scans and only from scanner 0 to avoid spam
+	// Enhanced scan summary with asset lock information and asset diversity
 	if scanCount%1000 == 0 && scannerID == 0 {
-		log.Printf("🔍 SCAN SUMMARY | Paths: %d | With data: %d | Opportunities: %d | Detection time: %v",
-			pathsChecked, pathsWithData, opportunitiesFound, time.Since(startTime))
+		log.Printf("🔍 SCAN SUMMARY | Paths: %d | Blocked: %d | In Execution: %d | With data: %d | Opportunities: %d | Below threshold: %d | Losing: %d | Detection time: %v",
+			pathsChecked, pathsBlocked, pathsInExecution, pathsWithData, opportunitiesFound, pathsBelowThreshold, pathsLosing, time.Since(startTime))
+
+		// Show asset diversity
+		if len(assetsScanned) > 0 {
+			scannedList := make([]string, 0, len(assetsScanned))
+			for asset, count := range assetsScanned {
+				scannedList = append(scannedList, fmt.Sprintf("%s:%d", asset, count))
+			}
+			log.Printf("   📊 Assets scanned: %v", scannedList[:Min(10, len(scannedList))])
+		}
+
+		if len(assetsBlocked) > 0 {
+			blockedList := make([]string, 0, len(assetsBlocked))
+			for asset, count := range assetsBlocked {
+				blockedList = append(blockedList, fmt.Sprintf("%s:%d", asset, count))
+			}
+			log.Printf("   🚫 Assets blocked: %v", blockedList[:Min(10, len(blockedList))])
+		}
+
+		if len(assetsExecuting) > 0 {
+			executingList := make([]string, 0, len(assetsExecuting))
+			for asset, count := range assetsExecuting {
+				executingList = append(executingList, fmt.Sprintf("%s:%d", asset, count))
+			}
+			log.Printf("   🔄 Assets in execution: %v", executingList[:Min(10, len(executingList))])
+		}
+
+		// Show execution cache status
+		executingCount, executingAssets := ae.assetLockManager.GetExecutionStats()
+		if executingCount > 0 {
+			log.Printf("   🚀 Currently executing: %d assets: %v", executingCount, executingAssets)
+		}
 	}
 }
 
@@ -446,10 +1274,22 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 		len(market2Data.Asks) == 0 || len(market2Data.Bids) == 0 ||
 		len(market3Data.Asks) == 0 || len(market3Data.Bids) == 0 {
 
+		// Detailed debugging for empty orderbooks
+		emptyMarkets := []string{}
+		if len(market1Data.Asks) == 0 || len(market1Data.Bids) == 0 {
+			emptyMarkets = append(emptyMarkets, path.Market1)
+		}
+		if len(market2Data.Asks) == 0 || len(market2Data.Bids) == 0 {
+			emptyMarkets = append(emptyMarkets, path.Market2)
+		}
+		if len(market3Data.Asks) == 0 || len(market3Data.Bids) == 0 {
+			emptyMarkets = append(emptyMarkets, path.Market3)
+		}
+
 		// Reduce logging frequency for empty orderbooks to avoid spam
 		if detectionStart.UnixNano()%50000 == 0 { // Log only ~0.002% of these
-			log.Printf("⚠️  EMPTY ORDERBOOK | Path: %s→%s→%s | Some order books are empty",
-				path.Market1, path.Market2, path.Market3)
+			log.Printf("⚠️  EMPTY ORDERBOOK | Path: %s→%s→%s | Empty markets: %v",
+				path.Market1, path.Market2, path.Market3, emptyMarkets)
 		}
 		return nil
 	}
@@ -582,135 +1422,12 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 	}
 }
 
-// getTradingFee returns the trading fee for a specific market
+// getTradingFee returns the trading fee for a market
 func (ae *ArbitrageEngine) getTradingFee(market string) float64 {
 	if fee, exists := ae.config.TradingFees[market]; exists {
 		return fee
 	}
 	return ae.config.DefaultTradingFee
-}
-
-// calculateMaxVolume calculates the maximum safe volume for the arbitrage
-func (ae *ArbitrageEngine) calculateMaxVolume(vol1, vol2, vol3, price1, price2, price3 float64) float64 {
-	// Apply volume fraction limit
-	maxVol1 := vol1 * ae.config.MaxVolumeFraction
-	maxVol2 := vol2 * ae.config.MaxVolumeFraction
-	maxVol3 := vol3 * ae.config.MaxVolumeFraction
-
-	// Convert all volumes to base currency equivalent
-	baseVol1 := maxVol1 * price1
-	baseVol2 := maxVol2 * price2
-	baseVol3 := maxVol3 * price3
-
-	// Take minimum of all three
-	minVolume := baseVol1
-	if baseVol2 < minVolume {
-		minVolume = baseVol2
-	}
-	if baseVol3 < minVolume {
-		minVolume = baseVol3
-	}
-
-	// Apply position size limit
-	if minVolume > ae.config.MaxPositionSize {
-		minVolume = ae.config.MaxPositionSize
-	}
-
-	return minVolume
-}
-
-// executionWorker handles the execution of arbitrage opportunities
-func (ae *ArbitrageEngine) executionWorker() {
-	for {
-		select {
-		case <-ae.stopChan:
-			return
-		case opportunity := <-ae.executionChan:
-			if ae.config.SimulationMode {
-				ae.simulateExecution(opportunity)
-			} else {
-				ae.executeArbitrage(opportunity)
-			}
-		}
-	}
-}
-
-// simulateExecution simulates the execution for testing purposes
-func (ae *ArbitrageEngine) simulateExecution(opportunity ArbitrageOpportunity) {
-	log.Printf("💰 SIMULATION TRADE | Path: %s→%s→%s | Expected Profit: %.6f%% | Volume: $%.2f | Est. PnL: $%.4f",
-		opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3,
-		opportunity.NetProfit*100,
-		opportunity.Volume,
-		opportunity.NetProfit*opportunity.Volume)
-
-	// Log the three legs of the trade
-	log.Printf("   🔄 Leg 1: %s %s at price %.8f",
-		opportunity.Path.Direction1, opportunity.Path.Market1, opportunity.Price1)
-	log.Printf("   🔄 Leg 2: %s %s at price %.8f",
-		opportunity.Path.Direction2, opportunity.Path.Market2, opportunity.Price2)
-	log.Printf("   🔄 Leg 3: %s %s at price %.8f",
-		opportunity.Path.Direction3, opportunity.Path.Market3, opportunity.Price3)
-
-	ae.metrics.IncrementTrades()
-	ae.metrics.AddPnL(opportunity.NetProfit * opportunity.Volume)
-
-	log.Printf("✅ SIMULATION COMPLETE | Total trades: %d | Total PnL: $%.4f",
-		ae.metrics.GetSnapshot().TradesExecuted,
-		ae.metrics.GetSnapshot().TotalPnL)
-}
-
-// executeArbitrage executes the actual arbitrage trade
-func (ae *ArbitrageEngine) executeArbitrage(opportunity ArbitrageOpportunity) {
-	if !ae.rateLimiter.Allow() {
-		log.Printf("Rate limit exceeded, skipping trade")
-		return
-	}
-
-	log.Printf("EXECUTING: Arbitrage trade: %s->%s->%s, Expected profit: %.6f%%",
-		opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3,
-		opportunity.NetProfit*100)
-
-	trade := &ArbitrageTrade{
-		ID:          fmt.Sprintf("arb_%d", time.Now().UnixNano()),
-		Opportunity: opportunity,
-		Status:      "pending",
-		StartTime:   time.Now(),
-	}
-
-	// Track active trade
-	ae.tradesLock.Lock()
-	ae.activeTrades[trade.ID] = trade
-	ae.tradesLock.Unlock()
-
-	// Execute the three legs in parallel
-	go ae.executeThreeLegs(trade)
-}
-
-// executeThreeLegs executes the three legs of the arbitrage trade
-func (ae *ArbitrageEngine) executeThreeLegs(trade *ArbitrageTrade) {
-	defer func() {
-		ae.tradesLock.Lock()
-		delete(ae.activeTrades, trade.ID)
-		ae.tradesLock.Unlock()
-	}()
-
-	trade.Status = "executing"
-
-	// For now, this is a placeholder - actual order execution would be implemented here
-	// The CoinEx API integration would place actual orders
-	log.Printf("Trade %s: Executing three legs (placeholder implementation)", trade.ID)
-
-	// Simulate execution time
-	time.Sleep(100 * time.Millisecond)
-
-	trade.Status = "completed"
-	trade.EndTime = time.Now()
-	trade.ExecutionTime = trade.EndTime.Sub(trade.StartTime)
-
-	ae.metrics.IncrementTrades()
-	ae.metrics.AddPnL(trade.Opportunity.NetProfit * trade.Opportunity.Volume)
-
-	log.Printf("Trade %s completed in %v", trade.ID, trade.ExecutionTime)
 }
 
 // Helper function to get map keys

@@ -43,7 +43,7 @@ func newHttpClient() *HttpClient {
 	return &HttpClient{
 		headers:         make(map[string]string),
 		wsSubscriptions: make(map[string]bool),
-		wsDataFeed:      make(chan []byte, 5000), // Buffered channel
+		wsDataFeed:      make(chan []byte, 2000), // Buffered channel
 		marketData:      make(map[string]*OrderBook),
 	}
 }
@@ -771,6 +771,13 @@ func (c *HttpClient) performRequest(params map[string]string, method string) (ma
 	req, err := http.NewRequest(method, url, reqBody)
 	if err != nil {
 		return nil, err
+	}
+
+	// Set proper content type for form data
+	if method == POST || method == PUT || method == PATCH || method == DELETE {
+		if _, hasBody := params["body"]; hasBody {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
 	}
 
 	c.setInternalHeader(req)

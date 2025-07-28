@@ -117,12 +117,19 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 	// Show some examples of available vs expected
 	log.Printf("   📈 Available markets (first 10): %v", availableMarkets[:min(10, len(availableMarkets))])
 
-	// Filter markets to only include those with actual data
+	// Filter markets to only include those with actual data AND liquidity
 	validMarkets := []string{}
+	liquidMarkets := []string{}
 	missingMarkets := []string{}
 
 	for _, market := range markets {
 		if availableMarketSet[market] {
+			// Check if market has actual liquidity (order book data)
+			if orderBook, exists := ae.marketDepths.Load(market); exists && orderBook != nil {
+				if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
+					liquidMarkets = append(liquidMarkets, market)
+				}
+			}
 			validMarkets = append(validMarkets, market)
 		} else {
 			missingMarkets = append(missingMarkets, market)
@@ -130,15 +137,16 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 	}
 
 	log.Printf("   ✅ Valid markets: %d", len(validMarkets))
+	log.Printf("   💧 Liquid markets: %d", len(liquidMarkets))
 	log.Printf("   ❌ Missing markets: %d", len(missingMarkets))
 
 	if len(missingMarkets) > 0 {
 		log.Printf("   🚫 Missing markets (first 10): %v", missingMarkets[:min(10, len(missingMarkets))])
 	}
 
-	// Create triangular arbitrage paths using a different strategy
-	// Look for cycles like USDT → Asset1 → Asset2 → USDT
-	paths := ae.discoverTriangularArbitrageCycles(validMarkets)
+	// Create triangular arbitrage paths using liquid markets only
+	// Look for cycles like USDT → Asset → USDC → USDT
+	paths := ae.discoverTriangularArbitrageCycles(liquidMarkets)
 
 	ae.pathsLock.Lock()
 	ae.triangularPaths = paths
@@ -295,7 +303,7 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 
 // arbitrageScanner continuously scans for arbitrage opportunities
 func (ae *ArbitrageEngine) arbitrageScanner(scannerID int) {
-	ticker := time.NewTicker(10 * time.Millisecond) // High frequency scanning
+	ticker := time.NewTicker(100 * time.Millisecond) // Reduced frequency from 10ms to 100ms for illiquid markets
 	defer ticker.Stop()
 
 	scanCount := 0
@@ -438,8 +446,11 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 		len(market2Data.Asks) == 0 || len(market2Data.Bids) == 0 ||
 		len(market3Data.Asks) == 0 || len(market3Data.Bids) == 0 {
 
-		log.Printf("⚠️  EMPTY ORDERBOOK | Path: %s→%s→%s | Some order books are empty",
-			path.Market1, path.Market2, path.Market3)
+		// Reduce logging frequency for empty orderbooks to avoid spam
+		if detectionStart.UnixNano()%50000 == 0 { // Log only ~0.002% of these
+			log.Printf("⚠️  EMPTY ORDERBOOK | Path: %s→%s→%s | Some order books are empty",
+				path.Market1, path.Market2, path.Market3)
+		}
 		return nil
 	}
 

@@ -175,6 +175,21 @@ func (c *coinexClient) GetMarketList() (string, error) {
 	return string(responseJSON), nil
 }
 
+// Add new method to get all market statistics with 24H volume
+func (c *coinexClient) GetAllMarketTickers() (map[string]interface{}, error) {
+	params := map[string]string{
+		"url":    c.baseUrl + "/market/ticker/all",
+		"method": "GET",
+	}
+
+	response, err := c.httpClient.performRequest(params, "GET")
+	if err != nil {
+		return nil, err
+	}
+
+	return response, nil
+}
+
 func (c *coinexClient) GetArbitrageMarkets() ([]string, []string, error) {
 	// Get all available markets from CoinEx
 	marketListString, err := c.GetMarketList()
@@ -191,9 +206,49 @@ func (c *coinexClient) GetArbitrageMarkets() ([]string, []string, error) {
 	markets := marketList["data"].([]interface{})
 	fmt.Printf("📊 Total markets from CoinEx: %d\n", len(markets))
 
-	// Find markets suitable for triangular arbitrage (focus on USDT-based cycles)
-	finalMarkets, suitableAssets := c.findTriangularArbitrageMarkets(markets)
-	return finalMarkets, suitableAssets, nil
+	// Step 1: Find theoretical triangular arbitrage opportunities
+	fmt.Printf("🔍 Step 1: Finding theoretical triangular markets...\n")
+	triangularMarkets, completeAssets := c.findTriangularArbitrageMarkets(markets)
+
+	// Step 2: Get real market activity data (24H volume) for ALL markets
+	fmt.Printf("🔍 Step 2: Fetching real market activity data from CoinEx...\n")
+	tickerData, err := c.GetAllMarketTickers()
+	if err != nil {
+		fmt.Printf("⚠️  Failed to get market ticker data, using heuristic filtering: %v\n", err)
+		// Fallback to heuristic filtering
+		activeMarkets, _ := c.validateMarketActivity(triangularMarkets)
+		activeCompleteAssets := c.filterCompleteAssetsByActiveMarkets(completeAssets, activeMarkets)
+		return activeMarkets, activeCompleteAssets, nil
+	}
+
+	// Step 3: Filter markets based on real 24H volume data
+	activeMarkets, deadMarkets := c.filterMarketsByRealActivity(triangularMarkets, tickerData)
+
+	fmt.Printf("\n🎯 REAL DATA FILTERING RESULTS:\n")
+	fmt.Printf("   📊 Theoretical markets: %d\n", len(triangularMarkets))
+	fmt.Printf("   ✅ Active markets (with volume): %d\n", len(activeMarkets))
+	fmt.Printf("   💀 Dead markets (no volume): %d\n", len(deadMarkets))
+	fmt.Printf("   💰 Efficiency gain: %.1f%% reduction in subscriptions\n",
+		float64(len(deadMarkets))/float64(len(triangularMarkets))*100)
+
+	if len(deadMarkets) > 0 {
+		fmt.Printf("   🚫 Dead markets (no 24H volume): %v\n", deadMarkets[:min(10, len(deadMarkets))])
+		if len(deadMarkets) > 10 {
+			fmt.Printf("   ... and %d more dead markets\n", len(deadMarkets)-10)
+		}
+	}
+
+	// Update complete assets based on active markets only
+	activeCompleteAssets := c.filterCompleteAssetsByActiveMarkets(completeAssets, activeMarkets)
+
+	fmt.Printf("   🎯 Complete assets with active markets: %d (from %d)\n",
+		len(activeCompleteAssets), len(completeAssets))
+
+	if len(activeCompleteAssets) > 0 {
+		fmt.Printf("   📈 Active triangular assets: %v\n", activeCompleteAssets)
+	}
+
+	return activeMarkets, activeCompleteAssets, nil
 }
 
 // findTriangularArbitrageMarkets finds markets suitable for triangular arbitrage cycles
@@ -241,36 +296,295 @@ func (c *coinexClient) findTriangularArbitrageMarkets(markets []interface{}) ([]
 
 	// Find assets that have BOTH quote currency pairs (required for triangular arbitrage)
 	completeAssets := []string{}
-	finalMarkets := []string{}
+	triangularMarkets := []string{}
 
 	for asset := range usdtMarkets {
 		if _, hasUSDC := usdcMarkets[asset]; hasUSDC {
 			completeAssets = append(completeAssets, asset)
 			// Add both markets for this asset
-			finalMarkets = append(finalMarkets, usdtMarkets[asset])
-			finalMarkets = append(finalMarkets, usdcMarkets[asset])
-			fmt.Printf("   ✅ Complete asset: %s (has %s and %s)\n", asset, usdtMarkets[asset], usdcMarkets[asset])
+			triangularMarkets = append(triangularMarkets, usdtMarkets[asset])
+			triangularMarkets = append(triangularMarkets, usdcMarkets[asset])
+			fmt.Printf("   ✅ Complete asset: %s → Markets: %s, %s\n",
+				asset, usdtMarkets[asset], usdcMarkets[asset])
 		}
+	}
+
+	// Sort complete assets to prioritize major/liquid assets first
+	majorAssets := []string{"BTC", "ETH", "BNB", "SOL", "ADA", "DOT", "AVAX", "MATIC", "LINK", "UNI"}
+	prioritizedAssets := []string{}
+	remainingAssets := []string{}
+
+	// Add major assets first if they exist
+	for _, major := range majorAssets {
+		for _, asset := range completeAssets {
+			if asset == major {
+				prioritizedAssets = append(prioritizedAssets, asset)
+				break
+			}
+		}
+	}
+
+	// Add remaining assets
+	for _, asset := range completeAssets {
+		isMajor := false
+		for _, major := range majorAssets {
+			if asset == major {
+				isMajor = true
+				break
+			}
+		}
+		if !isMajor {
+			remainingAssets = append(remainingAssets, asset)
+		}
+	}
+
+	// Rebuild the asset list with priorities
+	completeAssets = append(prioritizedAssets, remainingAssets...)
+
+	if len(prioritizedAssets) > 0 {
+		fmt.Printf("   🎯 Priority assets found: %v\n", prioritizedAssets)
 	}
 
 	// Add the direct quote pair if it exists (USDC/USDT)
 	for _, market := range markets {
 		marketStr := market.(string)
 		if marketStr == "USDCUSDT" || marketStr == "USDTUSDC" {
-			finalMarkets = append(finalMarkets, marketStr)
+			triangularMarkets = append(triangularMarkets, marketStr)
 			fmt.Printf("   🎯 Added critical quote pair: %s\n", marketStr)
 		}
 	}
 
-	fmt.Printf("🎯 Final results:\n")
-	fmt.Printf("   📈 Complete assets for triangular arbitrage: %d\n", len(completeAssets))
-	fmt.Printf("   📊 Total markets to subscribe: %d\n", len(finalMarkets))
+	fmt.Printf("\n🎯 TRIANGULAR ARBITRAGE SUMMARY:\n")
+	fmt.Printf("   📊 Assets with both quote pairs: %d\n", len(completeAssets))
+	fmt.Printf("   📡 Markets to subscribe: %d (vs %d total)\n", len(triangularMarkets), len(markets))
+	fmt.Printf("   💰 Efficiency gain: %.1f%% reduction in subscriptions\n",
+		float64(len(markets)-len(triangularMarkets))/float64(len(markets))*100)
 
 	if len(completeAssets) > 0 {
-		fmt.Printf("   🔄 Assets with both pairs: %v\n", completeAssets[:min(10, len(completeAssets))])
+		fmt.Printf("   🔄 Triangular assets: %v\n", completeAssets)
+		fmt.Printf("   📈 Example cycle: USDT → %s → USDC → USDT\n", completeAssets[0])
 	} else {
-		fmt.Printf("   ⚠️  No assets found with both USDT and USDC pairs\n")
+		fmt.Printf("   ⚠️  WARNING: No assets found with both USDT and USDC pairs!\n")
+		fmt.Printf("   💡 Suggestion: Check if CoinEx supports USDC markets\n")
+
+		// Show what we do have for debugging
+		if len(usdtMarkets) > 0 {
+			usdtSample := make([]string, 0, 5)
+			for asset := range usdtMarkets {
+				if len(usdtSample) < 5 {
+					usdtSample = append(usdtSample, asset)
+				}
+			}
+			fmt.Printf("   📈 Sample USDT assets: %v\n", usdtSample)
+		}
+
+		if len(usdcMarkets) > 0 {
+			usdcSample := make([]string, 0, 5)
+			for asset := range usdcMarkets {
+				if len(usdcSample) < 5 {
+					usdcSample = append(usdcSample, asset)
+				}
+			}
+			fmt.Printf("   💎 Sample USDC assets: %v\n", usdcSample)
+		}
 	}
 
-	return finalMarkets, completeAssets
+	return triangularMarkets, completeAssets
+}
+
+// filterMarketsByRealActivity filters markets based on real 24H volume data from CoinEx
+func (c *coinexClient) filterMarketsByRealActivity(markets []string, tickerData map[string]interface{}) ([]string, []string) {
+	fmt.Printf("   🔍 Analyzing real market activity for %d markets...\n", len(markets))
+
+	// Extract ticker data
+	data, ok := tickerData["data"].(map[string]interface{})
+	if !ok {
+		fmt.Printf("   ⚠️  Invalid ticker data format, falling back to heuristic filtering\n")
+		return c.validateMarketActivity(markets)
+	}
+
+	tickers, ok := data["ticker"].(map[string]interface{})
+	if !ok {
+		fmt.Printf("   ⚠️  Invalid ticker format, falling back to heuristic filtering\n")
+		return c.validateMarketActivity(markets)
+	}
+
+	activeMarkets := []string{}
+	deadMarkets := []string{}
+
+	// Minimum 24H volume threshold (in USD value)
+	minVolumeThreshold := 1000.0 // $1000 minimum 24H volume
+
+	for _, market := range markets {
+		marketData, exists := tickers[market]
+		if !exists {
+			deadMarkets = append(deadMarkets, market)
+			if len(deadMarkets) <= 5 {
+				fmt.Printf("   💀 Dead: %s (no ticker data)\n", market)
+			}
+			continue
+		}
+
+		marketInfo, ok := marketData.(map[string]interface{})
+		if !ok {
+			deadMarkets = append(deadMarkets, market)
+			continue
+		}
+
+		volumeStr, ok := marketInfo["vol"].(string)
+		if !ok {
+			deadMarkets = append(deadMarkets, market)
+			continue
+		}
+
+		volume, err := strconv.ParseFloat(volumeStr, 64)
+		if err != nil {
+			deadMarkets = append(deadMarkets, market)
+			continue
+		}
+
+		// Get last price to calculate USD volume
+		lastPriceStr, ok := marketInfo["last"].(string)
+		var usdVolume float64
+		if ok {
+			lastPrice, err := strconv.ParseFloat(lastPriceStr, 64)
+			if err == nil {
+				if strings.HasSuffix(market, "USDT") || strings.HasSuffix(market, "USDC") {
+					usdVolume = volume * lastPrice // Already in USD equivalent
+				} else if strings.HasSuffix(market, "BTC") {
+					usdVolume = volume * lastPrice * 45000 // Estimate BTC at $45k
+				} else {
+					usdVolume = volume * lastPrice // Best guess
+				}
+			}
+		}
+
+		if usdVolume >= minVolumeThreshold {
+			activeMarkets = append(activeMarkets, market)
+			if len(activeMarkets) <= 5 {
+				fmt.Printf("   ✅ Active: %s (24H vol: $%.0f)\n", market, usdVolume)
+			}
+		} else {
+			deadMarkets = append(deadMarkets, market)
+			if len(deadMarkets) <= 5 {
+				fmt.Printf("   💀 Dead: %s (24H vol: $%.0f < $%.0f threshold)\n", market, usdVolume, minVolumeThreshold)
+			}
+		}
+	}
+
+	if len(activeMarkets) > 5 {
+		fmt.Printf("   ... and %d more active markets\n", len(activeMarkets)-5)
+	}
+	if len(deadMarkets) > 5 {
+		fmt.Printf("   ... and %d more dead markets\n", len(deadMarkets)-5)
+	}
+
+	fmt.Printf("   📊 Volume Analysis Complete:\n")
+	fmt.Printf("     - Active markets (>$%.0f/24h): %d\n", minVolumeThreshold, len(activeMarkets))
+	fmt.Printf("     - Dead markets (<$%.0f/24h): %d\n", minVolumeThreshold, len(deadMarkets))
+
+	return activeMarkets, deadMarkets
+}
+
+// validateMarketActivity tests markets for actual trading activity before subscription
+func (c *coinexClient) validateMarketActivity(markets []string) ([]string, []string) {
+	fmt.Printf("   🔍 Testing %d markets for trading activity...\n", len(markets))
+
+	activeMarkets := []string{}
+	deadMarkets := []string{}
+
+	// For now, we'll use a simple heuristic based on market naming patterns
+	// In production, you'd want to call CoinEx API to check 24h volume or recent trades
+
+	for _, market := range markets {
+		isActive := c.isMarketActive(market)
+
+		if isActive {
+			activeMarkets = append(activeMarkets, market)
+			if len(activeMarkets) <= 5 { // Log first few
+				fmt.Printf("   ✅ Active: %s\n", market)
+			}
+		} else {
+			deadMarkets = append(deadMarkets, market)
+			if len(deadMarkets) <= 5 { // Log first few
+				fmt.Printf("   💀 Dead: %s (filtered out)\n", market)
+			}
+		}
+	}
+
+	if len(activeMarkets) > 5 {
+		fmt.Printf("   ... and %d more active markets\n", len(activeMarkets)-5)
+	}
+	if len(deadMarkets) > 5 {
+		fmt.Printf("   ... and %d more dead markets\n", len(deadMarkets)-5)
+	}
+
+	return activeMarkets, deadMarkets
+}
+
+// isMarketActive determines if a market is likely to be active based on heuristics
+func (c *coinexClient) isMarketActive(market string) bool {
+	// Major liquid assets (high priority - likely active)
+	majorAssets := []string{"BTC", "ETH", "BNB", "SOL", "ADA", "DOT", "AVAX", "MATIC", "LINK", "UNI", "DOGE", "LTC", "XRP"}
+
+	for _, major := range majorAssets {
+		if strings.Contains(market, major) {
+			return true // Major assets are almost always active
+		}
+	}
+
+	// Critical pairs (always include)
+	if market == "USDCUSDT" || market == "USDTUSDC" {
+		return true
+	}
+
+	// USDC markets are often illiquid on CoinEx (be selective)
+	if strings.HasSuffix(market, "USDC") {
+		// Only include USDC pairs for major assets
+		asset := strings.TrimSuffix(market, "USDC")
+		for _, major := range majorAssets {
+			if asset == major {
+				return true
+			}
+		}
+		return false // Most USDC pairs are dead on CoinEx
+	}
+
+	// USDT markets are generally more liquid
+	if strings.HasSuffix(market, "USDT") {
+		return true
+	}
+
+	return false // Conservative approach - exclude unknown patterns
+}
+
+// filterCompleteAssetsByActiveMarkets filters complete assets to only include those with active markets
+func (c *coinexClient) filterCompleteAssetsByActiveMarkets(completeAssets []string, activeMarkets []string) []string {
+	activeMarketSet := make(map[string]bool)
+	for _, market := range activeMarkets {
+		activeMarketSet[market] = true
+	}
+
+	filteredAssets := []string{}
+
+	for _, asset := range completeAssets {
+		hasActiveUSDT := activeMarketSet[asset+"USDT"]
+		hasActiveUSDC := activeMarketSet[asset+"USDC"]
+
+		if hasActiveUSDT && hasActiveUSDC {
+			filteredAssets = append(filteredAssets, asset)
+			fmt.Printf("   ✅ Asset %s: Both %sUSDT and %sUSDC are active\n", asset, asset, asset)
+		} else {
+			fmt.Printf("   ❌ Asset %s excluded: ", asset)
+			if !hasActiveUSDT {
+				fmt.Printf("%sUSDT inactive ", asset)
+			}
+			if !hasActiveUSDC {
+				fmt.Printf("%sUSDC inactive ", asset)
+			}
+			fmt.Printf("\n")
+		}
+	}
+
+	return filteredAssets
 }

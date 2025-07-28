@@ -75,7 +75,7 @@ func calculateSpread(askStr, bidStr string) float64 {
 }
 
 // processWebSocketMessage processes incoming WebSocket messages and updates market depths
-func processWebSocketMessage(msg []byte, marketDepths *MarketDepths, metrics *Metrics) error {
+func processWebSocketMessage(msg []byte, marketDepths *MarketDepths, metrics *Metrics, httpClient *HttpClient) error {
 	var wsResponse map[string]interface{}
 	if err := json.Unmarshal(msg, &wsResponse); err != nil {
 		return fmt.Errorf("failed to unmarshal WebSocket message: %w", err)
@@ -95,7 +95,7 @@ func processWebSocketMessage(msg []byte, marketDepths *MarketDepths, metrics *Me
 
 	switch method {
 	case "depth.update":
-		return handleDepthUpdate(wsResponse, marketDepths)
+		return handleDepthUpdate(wsResponse, marketDepths, httpClient)
 	case "server.ping":
 		// Ping response - no action needed
 		return nil
@@ -106,7 +106,7 @@ func processWebSocketMessage(msg []byte, marketDepths *MarketDepths, metrics *Me
 }
 
 // handleDepthUpdate processes order book depth updates
-func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDepths) error {
+func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDepths, httpClient *HttpClient) error {
 	params, ok := wsResponse["params"].([]interface{})
 	if !ok || len(params) < 3 {
 		return fmt.Errorf("invalid depth.update params - expected 3 parameters [full_flag, order_book_data, market_name], got: %+v", wsResponse)
@@ -142,6 +142,13 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 	// Store in market depths with the correct market name
 	marketDepths.Store(marketName, &orderBook)
 
+	// Also store in httpClient's marketData cache for enhanced validation
+	if httpClient != nil {
+		httpClient.mu.Lock()
+		httpClient.marketData[marketName] = &orderBook
+		httpClient.mu.Unlock()
+	}
+
 	// Debug: Log first few successful data updates to verify WebSocket is working
 	wsDataReceivedCounter++
 	if wsDataReceivedCounter <= 5 {
@@ -161,7 +168,7 @@ func logMarketDataStatus(marketDepths *MarketDepths, expectedMarkets []string) {
 	log.Printf("   📊 Available markets: %d", len(availableMarkets))
 
 	// Show first few available markets
-	log.Printf("   ✅ Available: %v", availableMarkets[:min(10, len(availableMarkets))])
+	log.Printf("   ✅ Available: %v", availableMarkets[:Min(10, len(availableMarkets))])
 
 	// Find missing markets
 	availableSet := make(map[string]bool)
@@ -177,7 +184,7 @@ func logMarketDataStatus(marketDepths *MarketDepths, expectedMarkets []string) {
 	}
 
 	if len(missing) > 0 {
-		log.Printf("   ❌ Missing: %v", missing[:min(10, len(missing))])
+		log.Printf("   ❌ Missing: %v", missing[:Min(10, len(missing))])
 		if len(missing) > 10 {
 			log.Printf("   ... and %d more missing markets", len(missing)-10)
 		}
@@ -259,4 +266,11 @@ func Includes[T any](arr []string, items ...T) bool {
 	}
 	// All items were found
 	return true
+}
+
+func Min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

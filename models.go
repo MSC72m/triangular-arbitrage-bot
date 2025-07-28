@@ -254,7 +254,7 @@ func (rl *RateLimiter) Allow() bool {
 	// Refill tokens based on elapsed time
 	tokensToAdd := int(elapsed.Seconds()) * rl.refillRate
 	if tokensToAdd > 0 {
-		rl.tokens = min(rl.maxTokens, rl.tokens+tokensToAdd)
+		rl.tokens = Min(rl.maxTokens, rl.tokens+tokensToAdd)
 		rl.lastRefill = now
 	}
 
@@ -264,11 +264,4 @@ func (rl *RateLimiter) Allow() bool {
 	}
 
 	return false
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

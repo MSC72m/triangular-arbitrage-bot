@@ -232,7 +232,7 @@ func (c *coinexClient) GetArbitrageMarkets() ([]string, []string, error) {
 		float64(len(deadMarkets))/float64(len(triangularMarkets))*100)
 
 	if len(deadMarkets) > 0 {
-		fmt.Printf("   🚫 Dead markets (no 24H volume): %v\n", deadMarkets[:min(10, len(deadMarkets))])
+		fmt.Printf("   🚫 Dead markets (no 24H volume): %v\n", deadMarkets[:Min(10, len(deadMarkets))])
 		if len(deadMarkets) > 10 {
 			fmt.Printf("   ... and %d more dead markets\n", len(deadMarkets)-10)
 		}
@@ -309,41 +309,8 @@ func (c *coinexClient) findTriangularArbitrageMarkets(markets []interface{}) ([]
 		}
 	}
 
-	// Sort complete assets to prioritize major/liquid assets first
-	majorAssets := []string{"BTC", "ETH", "BNB", "SOL", "ADA", "DOT", "AVAX", "MATIC", "LINK", "UNI"}
-	prioritizedAssets := []string{}
-	remainingAssets := []string{}
-
-	// Add major assets first if they exist
-	for _, major := range majorAssets {
-		for _, asset := range completeAssets {
-			if asset == major {
-				prioritizedAssets = append(prioritizedAssets, asset)
-				break
-			}
-		}
-	}
-
-	// Add remaining assets
-	for _, asset := range completeAssets {
-		isMajor := false
-		for _, major := range majorAssets {
-			if asset == major {
-				isMajor = true
-				break
-			}
-		}
-		if !isMajor {
-			remainingAssets = append(remainingAssets, asset)
-		}
-	}
-
-	// Rebuild the asset list with priorities
-	completeAssets = append(prioritizedAssets, remainingAssets...)
-
-	if len(prioritizedAssets) > 0 {
-		fmt.Printf("   🎯 Priority assets found: %v\n", prioritizedAssets)
-	}
+	// NO PRIORITY LOGIC - All tokens treated equally as requested
+	fmt.Printf("   💡 All %d assets treated equally (no priorities)\n", len(completeAssets))
 
 	// Add the direct quote pair if it exists (USDC/USDT)
 	for _, market := range markets {

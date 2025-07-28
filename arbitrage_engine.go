@@ -115,7 +115,7 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 	log.Printf("   ✅ Available markets with data: %d", len(availableMarkets))
 
 	// Show some examples of available vs expected
-	log.Printf("   📈 Available markets (first 10): %v", availableMarkets[:min(10, len(availableMarkets))])
+	log.Printf("   📈 Available markets (first 10): %v", availableMarkets[:Min(10, len(availableMarkets))])
 
 	// Filter markets to only include those with actual data AND liquidity
 	validMarkets := []string{}
@@ -124,7 +124,7 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 
 	for _, market := range markets {
 		if availableMarketSet[market] {
-			// Check if market has actual liquidity (order book data)
+			// Check if market has actual liquidity (order book data from WebSocket)
 			if orderBook, exists := ae.marketDepths.Load(market); exists && orderBook != nil {
 				if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
 					liquidMarkets = append(liquidMarkets, market)
@@ -141,7 +141,7 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 	log.Printf("   ❌ Missing markets: %d", len(missingMarkets))
 
 	if len(missingMarkets) > 0 {
-		log.Printf("   🚫 Missing markets (first 10): %v", missingMarkets[:min(10, len(missingMarkets))])
+		log.Printf("   🚫 Missing markets (first 10): %v", missingMarkets[:Min(10, len(missingMarkets))])
 	}
 
 	// Create triangular arbitrage paths using liquid markets only
@@ -293,8 +293,8 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 				usdcAssets = append(usdcAssets, asset)
 			}
 
-			log.Printf("   📈 USDT-only assets: %v", usdtAssets[:min(10, len(usdtAssets))])
-			log.Printf("   💎 USDC-only assets: %v", usdcAssets[:min(10, len(usdcAssets))])
+			log.Printf("   📈 USDT-only assets: %v", usdtAssets[:Min(10, len(usdtAssets))])
+			log.Printf("   💎 USDC-only assets: %v", usdcAssets[:Min(10, len(usdcAssets))])
 		}
 	}
 
@@ -343,7 +343,7 @@ func (ae *ArbitrageEngine) scanForOpportunities(scannerID int, scanCount int) {
 			availableMarkets := ae.marketDepths.GetAvailableMarkets()
 			log.Printf("   📊 Available markets with data: %d", len(availableMarkets))
 			if len(availableMarkets) > 0 {
-				log.Printf("   📈 Sample available markets: %v", availableMarkets[:min(5, len(availableMarkets))])
+				log.Printf("   📈 Sample available markets: %v", availableMarkets[:Min(5, len(availableMarkets))])
 			} else {
 				log.Printf("   ❌ No market data available at all - WebSocket may be disconnected")
 			}
@@ -362,7 +362,7 @@ func (ae *ArbitrageEngine) scanForOpportunities(scannerID int, scanCount int) {
 		}
 
 		requiredMarkets := make(map[string]bool)
-		for _, path := range paths[:min(3, len(paths))] { // Check first 3 paths only
+		for _, path := range paths[:Min(3, len(paths))] { // Check first 3 paths only
 			requiredMarkets[path.Market1] = true
 			requiredMarkets[path.Market2] = true
 			requiredMarkets[path.Market3] = true

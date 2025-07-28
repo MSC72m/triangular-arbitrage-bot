@@ -49,7 +49,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Connection test failed: %v", err)
 	}
-	log.Printf("✅ Connection test successful: %s", testResponse[:min(100, len(testResponse))])
+	log.Printf("✅ Connection test successful: %s", testResponse[:Min(100, len(testResponse))])
 
 	// Initialize core components
 	marketDepths := NewMarketDepths()
@@ -90,54 +90,60 @@ func main() {
 	// Log complete assets
 	log.Printf("🎯 COMPLETE ASSETS: %v", completeAssets)
 
-	// Subscribe to markets
-	log.Printf("📡 Subscribing to %d markets...", len(arbitrageMarkets))
-	subscriptionErrors := 0
-	successfulSubscriptions := 0
-
-	for i, market := range arbitrageMarkets {
-		if err := httpClient.SubscribeWebSocket(market); err != nil {
-			subscriptionErrors++
-			log.Printf("❌ Failed to subscribe to %s: %v", market, err)
-		} else {
-			successfulSubscriptions++
-			if i < 5 { // Log first few subscriptions
-				log.Printf("✅ Subscribed to %s", market)
-			}
-		}
-
-		// Add small delay to avoid overwhelming the WebSocket
-		if i%10 == 0 && i > 0 {
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-
-	log.Printf("📊 Subscription Results: %d successful, %d failed out of %d total",
-		successfulSubscriptions, subscriptionErrors, len(arbitrageMarkets))
-	log.Println("✅ Market subscriptions completed")
-
-	// Start market data processor
+	// Start market data processor BEFORE subscriptions
 	messageCounter := uint64(0)
 	go func() {
 		log.Println("🔄 Starting market data processor...")
-		for msg := range httpClient.GetWebSocketDataFeed() {
+		dataFeed := httpClient.GetWebSocketDataFeed()
+		log.Printf("📡 Data feed channel ready, waiting for messages...")
+
+		for msg := range dataFeed {
 			messageCounter++
 
+			// Log first few messages for debugging
+			if messageCounter <= 5 {
+				log.Printf("📨 Processing message #%d: %s", messageCounter, string(msg)[:Min(200, len(msg))])
+			}
+
 			// Process WebSocket message
-			if err := processWebSocketMessage(msg, marketDepths, metrics); err != nil {
+			if err := processWebSocketMessage(msg, marketDepths, metrics, httpClient); err != nil {
 				if messageCounter%100 == 0 { // Log errors more frequently for debugging
 					log.Printf("⚠️  WebSocket message processing error: %v | Message preview: %s",
-						err, string(msg)[:min(200, len(msg))])
+						err, string(msg)[:Min(200, len(msg))])
 				}
 				continue
 			}
 
 			// Log processing stats periodically
-			if messageCounter%10000 == 0 {
-				log.Printf("📈 Processed %d WebSocket messages", messageCounter)
+			if messageCounter%1000 == 0 || messageCounter <= 10 {
+				log.Printf("📈 Processed %d WebSocket messages successfully", messageCounter)
 			}
 		}
+		log.Printf("⚠️  Market data processor exited - data feed channel closed")
 	}()
+
+	// Subscribe to markets with optimistic approach (faster, more reliable)
+	log.Printf("📡 Subscribing to %d markets with optimistic approach...", len(arbitrageMarkets))
+
+	successfulSubscriptions, failedSubscriptions := httpClient.SubscribeWebSocketBatchOptimistic(arbitrageMarkets)
+
+	log.Printf("📊 OPTIMISTIC Subscription Results:")
+	log.Printf("   ✅ Working with data: %d", len(successfulSubscriptions))
+	log.Printf("   ❌ Failed/dead: %d", len(failedSubscriptions))
+	log.Printf("   📈 Success rate: %.1f%%", float64(len(successfulSubscriptions))/float64(len(arbitrageMarkets))*100)
+
+	if len(failedSubscriptions) > 0 {
+		log.Printf("   🚫 Failed markets (first 10): %v", failedSubscriptions[:Min(10, len(failedSubscriptions))])
+	}
+
+	// Update arbitrageMarkets to only include successfully subscribed markets
+	arbitrageMarkets = successfulSubscriptions
+
+	if len(arbitrageMarkets) == 0 {
+		log.Fatal("❌ No markets successfully subscribed - cannot proceed")
+	}
+
+	log.Printf("✅ Proceeding with %d working subscriptions", len(arbitrageMarkets))
 
 	// Wait for initial market data and verify it's flowing with proper synchronization
 	log.Println("⏳ Waiting for initial market data...")
@@ -175,7 +181,7 @@ func main() {
 
 				if len(initialMarkets) >= 3 && hasUSDCUSDT { // Reduced from 5 to 3, but require USDC pair
 					log.Printf("✅ Initial market data ready with %d markets (including USDC/USDT pair)", len(initialMarkets))
-					log.Printf("✅ Market data flowing: %v", initialMarkets[:min(10, len(initialMarkets))])
+					log.Printf("✅ Market data flowing: %v", initialMarkets[:Min(10, len(initialMarkets))])
 					marketDataReady <- true
 					return
 				} else if len(initialMarkets) >= 3 {
@@ -193,12 +199,91 @@ func main() {
 		retryMarkets := marketDepths.GetAvailableMarkets()
 		log.Printf("   📊 Available markets: %d", len(retryMarkets))
 		if len(retryMarkets) > 0 {
-			log.Printf("   📈 Available: %v", retryMarkets[:min(5, len(retryMarkets))])
+			log.Printf("   📈 Available: %v", retryMarkets[:Min(5, len(retryMarkets))])
 		}
 	}
 
 	// Update triangular paths in the arbitrage engine
 	arbitrageEngine.UpdateTriangularPaths(arbitrageMarkets, completeAssets)
+
+	// Enhanced WebSocket data validation and fallback
+	log.Printf("🔍 Validating WebSocket data health...")
+
+	// Wait a bit more for WebSocket data to stabilize
+	time.Sleep(5 * time.Second)
+
+	// Validate actual data delivery vs subscriptions
+	activeWsMarkets, deadWsMarkets := httpClient.ValidateWebSocketDataHealth(arbitrageMarkets)
+
+	log.Printf("📊 WEBSOCKET DATA HEALTH:")
+	log.Printf("   📡 Subscribed markets: %d", len(arbitrageMarkets))
+	log.Printf("   ✅ Delivering data: %d (%.1f%%)", len(activeWsMarkets), float64(len(activeWsMarkets))/float64(len(arbitrageMarkets))*100)
+	log.Printf("   ❌ Dead subscriptions: %d", len(deadWsMarkets))
+
+	if len(deadWsMarkets) > 0 {
+		log.Printf("   🚫 Dead markets (first 10): %v", deadWsMarkets[:Min(10, len(deadWsMarkets))])
+	}
+
+	// Define critical markets that MUST have data for triangular arbitrage
+	criticalMarkets := []string{"USDCUSDT", "BTCUSDT", "ETHUSDT", "BNBUSDT"}
+	criticalMissing := []string{}
+
+	for _, critical := range criticalMarkets {
+		found := false
+		for _, active := range activeWsMarkets {
+			if active == critical {
+				found = true
+				break
+			}
+		}
+		if !found {
+			criticalMissing = append(criticalMissing, critical)
+		}
+	}
+
+	if len(criticalMissing) > 0 {
+		log.Printf("🚨 CRITICAL MARKETS MISSING: %v", criticalMissing)
+		log.Printf("🔄 Attempting REST API fallback for critical markets...")
+
+		// Use REST API fallback for critical markets
+		httpClient.EnsureCriticalMarketData(criticalMissing, marketDepths)
+
+		// Re-validate after fallback
+		activeWsMarkets, deadWsMarkets = httpClient.ValidateWebSocketDataHealth(arbitrageMarkets)
+		log.Printf("🔄 After fallback - Active: %d, Dead: %d", len(activeWsMarkets), len(deadWsMarkets))
+	}
+
+	// Update triangular paths with only markets that actually have data
+	log.Printf("🔄 Updating arbitrage engine with validated markets...")
+
+	// Combine WebSocket active markets with critical markets that have REST fallback data
+	allActiveMarkets := append([]string{}, activeWsMarkets...)
+
+	// Add critical markets that have REST fallback data
+	for _, critical := range criticalMarkets {
+		// Check if critical market now has data (either WebSocket or REST)
+		if orderBook, exists := marketDepths.Load(critical); exists && orderBook != nil {
+			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
+				// Add to active markets if not already present
+				found := false
+				for _, active := range allActiveMarkets {
+					if active == critical {
+						found = true
+						break
+					}
+				}
+				if !found {
+					allActiveMarkets = append(allActiveMarkets, critical)
+					log.Printf("✅ Added critical market to active list: %s (via REST fallback)", critical)
+				}
+			}
+		}
+	}
+
+	log.Printf("📊 Final active markets count: %d (WebSocket: %d + REST fallback: %d)",
+		len(allActiveMarkets), len(activeWsMarkets), len(allActiveMarkets)-len(activeWsMarkets))
+
+	arbitrageEngine.UpdateTriangularPaths(allActiveMarkets, completeAssets)
 
 	// Start arbitrage engine
 	log.Println("🚀 Starting arbitrage engine...")

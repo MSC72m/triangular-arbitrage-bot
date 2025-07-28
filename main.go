@@ -271,7 +271,11 @@ func main() {
 	// Define critical markets that MUST have data - only quote currency variations
 	criticalMarkets := config.CriticalMarkets
 
-	// Check which critical markets are missing WebSocket data
+	// ALWAYS use REST API for critical markets (USDCUSDT, USDTUSDC, etc.)
+	log.Printf("🔄 ALWAYS using REST API for critical markets: %v", criticalMarkets)
+	coinexClient.EnsureCriticalMarketData(criticalMarkets, marketDepths)
+
+	// Check which critical markets are missing WebSocket data (for logging only)
 	criticalMissing := []string{}
 
 	for _, critical := range criticalMarkets {
@@ -363,9 +367,9 @@ func main() {
 					log.Printf("🔗 WebSocket Status: Disconnected ❌")
 				}
 			case <-criticalDataTicker.C:
-				// Check if critical markets have data, use REST only if WebSocket data is missing
-				// REST API is used as fallback, not primary data source
-				log.Printf("🔍 Checking critical markets data availability...")
+				// ALWAYS use REST API for critical markets (USDCUSDT, USDTUSDC, etc.)
+				log.Printf("🔄 Periodic REST API refresh for critical markets: %v", config.CriticalMarkets)
+				coinexClient.EnsureCriticalMarketData(config.CriticalMarkets, marketDepths)
 			}
 		}
 	}()

@@ -1612,7 +1612,7 @@ func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, market
 			}
 		}
 
-		log.Printf("📡 Fetching %s via REST API...", market)
+		log.Printf("📡 Fetching %s via REST API (WebSocket data missing)...", market)
 
 		// Use the HttpClient's REST API fallback method
 		restOrderBook, err := c.httpClient.GetOrderBookREST(market)

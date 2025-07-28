@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -626,29 +627,47 @@ func (c *HttpClient) ValidateWebSocketDataHealth(expectedMarkets []string) ([]st
 
 // Add method to get order book via REST API as fallback
 func (c *HttpClient) GetOrderBookREST(market string) (*OrderBook, error) {
+	log.Printf("🔗 Making REST API call for %s order book...", market)
+
+	// Add timestamp to avoid cached responses
+	timestamp := time.Now().Unix()
 	params := map[string]string{
-		"url":    fmt.Sprintf("https://api.coinex.com/v1/market/depth?market=%s&merge=0&limit=5", market),
+		"url":    fmt.Sprintf("%s/market/depth?market=%s&merge=0&limit=%d&_t=%d", c.config.APIBaseURL, market, c.config.OrderBookDepthLimit, timestamp),
 		"method": "GET",
 	}
 
 	response, err := c.performRequest(params, "GET")
 	if err != nil {
+		log.Printf("❌ REST API request failed for %s: %v", market, err)
 		return nil, err
 	}
+
+	log.Printf("📊 REST API response received for %s", market)
+
+	// Debug: Log the actual response structure
+	log.Printf("🔍 DEBUG: Response keys: %v", getMapKeys(response))
 
 	// Parse CoinEx depth response
 	data, ok := response["data"].(map[string]interface{})
 	if !ok {
+		log.Printf("❌ Invalid response format for %s: missing data", market)
+		log.Printf("🔍 DEBUG: Response structure: %+v", response)
 		return nil, fmt.Errorf("invalid response format")
 	}
 
+	log.Printf("🔍 DEBUG: Data keys: %v", getMapKeys(data))
+
 	asks, ok := data["asks"].([]interface{})
 	if !ok {
+		log.Printf("❌ Invalid asks format for %s", market)
+		log.Printf("🔍 DEBUG: Asks type: %T, value: %+v", data["asks"], data["asks"])
 		return nil, fmt.Errorf("invalid asks format")
 	}
 
 	bids, ok := data["bids"].([]interface{})
 	if !ok {
+		log.Printf("❌ Invalid bids format for %s", market)
+		log.Printf("🔍 DEBUG: Bids type: %T, value: %+v", data["bids"], data["bids"])
 		return nil, fmt.Errorf("invalid bids format")
 	}
 
@@ -685,7 +704,17 @@ func (c *HttpClient) GetOrderBookREST(market string) (*OrderBook, error) {
 		}
 	}
 
+	log.Printf("✅ REST API order book parsed for %s: %d bids, %d asks", market, len(orderBook.Bids), len(orderBook.Asks))
 	return orderBook, nil
+}
+
+// Helper function to get map keys for debugging
+func getMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // EnsureCriticalMarketData ensures critical markets have data via REST API fallback

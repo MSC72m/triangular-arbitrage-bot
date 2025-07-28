@@ -34,3 +34,6 @@ go.work.sum
 # Build
 build/
 config*
+log/
+*.log
+*log*

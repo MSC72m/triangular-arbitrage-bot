@@ -269,7 +269,7 @@ func main() {
 	}
 
 	// Define critical markets that MUST have data for triangular arbitrage
-	criticalMarkets := []string{"USDCUSDT", "BTCUSDT", "ETHUSDT", "BNBUSDT"}
+	criticalMarkets := []string{"USDCUSDT", "BTCUSDT", "USDTUSDC"}
 	criticalMissing := []string{}
 
 	for _, critical := range criticalMarkets {
@@ -338,9 +338,11 @@ func main() {
 		ticker := time.NewTicker(30 * time.Second)
 		priceTicker := time.NewTicker(2 * time.Minute)  // Log prices less frequently
 		debugTicker := time.NewTicker(15 * time.Second) // Debug market data status frequently
+		criticalDataTicker := time.NewTicker(10 * time.Second) // Fetch critical data every 10 seconds
 		defer ticker.Stop()
 		defer priceTicker.Stop()
 		defer debugTicker.Stop()
+		defer criticalDataTicker.Stop()
 
 		for {
 			select {
@@ -357,6 +359,10 @@ func main() {
 				} else {
 					log.Printf("🔗 WebSocket Status: Disconnected ❌")
 				}
+			case <-criticalDataTicker.C:
+				// Ensure critical market data is always available
+				criticalMarkets := []string{"USDCUSDT", "USDTUSDC"}
+				httpClient.EnsureCriticalMarketData(criticalMarkets, marketDepths)
 			}
 		}
 	}()

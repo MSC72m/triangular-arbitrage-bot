@@ -959,16 +959,16 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 					// Reverse cycle: USDT → USDC → Asset → USDT
 					var reverseDirection1 string
 					if quotePair == "USDCUSDT" {
-						reverseDirection1 = "buy" // Buy USDC with USDT (reverse of USDCUSDT)
+						reverseDirection1 = "buy" // Buy USDC with USDT
 					} else {
-						reverseDirection1 = "buy" // Buy USDC with USDT (USDTUSDC direction)
+						reverseDirection1 = "sell" // Sell USDT for USDC
 					}
 
 					path2 := TriangularPath{
 						BaseAsset:  "USDT",
 						Asset1:     "USDC",
 						Asset2:     asset,
-						Market1:    quotePair,      // Buy USDC with USDT
+						Market1:    quotePair,      // Convert USDT to USDC
 						Market2:    asset + "USDC", // Buy asset with USDC
 						Market3:    asset + "USDT", // Sell asset for USDT
 						Direction1: reverseDirection1,
@@ -1002,45 +1002,40 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 				return paths
 			}
 
-			// Create triangular cycles: USDT → Asset1 → Asset2 → USDT
-			// Where Asset1 and Asset2 both have USDC pairs
-			for i, asset1 := range completeAssets {
-				for j, asset2 := range completeAssets {
-					if i != j { // Different assets
-						// Cycle: USDT → Asset1 → Asset2 → USDT
-						// This works because both assets can be traded against USDC
-						path1 := TriangularPath{
-							BaseAsset:  "USDT",
-							Asset1:     asset1,
-							Asset2:     asset2,
-							Market1:    asset1 + "USDT", // Buy asset1 with USDT
-							Market2:    asset1 + "USDC", // Sell asset1 for USDC
-							Market3:    asset2 + "USDC", // Buy asset2 with USDC
-							Direction1: "buy",
-							Direction2: "sell",
-							Direction3: "buy",
-						}
+			// Create triangular cycles: USDT → Asset1 → USDC → USDT
+			// Where Asset1 has both USDT and USDC pairs
+			for _, asset1 := range completeAssets {
+				// Forward cycle: USDT → Asset1 → USDC → USDT
+				path1 := TriangularPath{
+					BaseAsset:  "USDT",
+					Asset1:     asset1,
+					Asset2:     "USDC",
+					Market1:    asset1 + "USDT", // Buy asset1 with USDT
+					Market2:    asset1 + "USDC", // Sell asset1 for USDC
+					Market3:    "USDCUSDT",      // Sell USDC for USDT (assuming USDCUSDT exists)
+					Direction1: "buy",
+					Direction2: "sell",
+					Direction3: "sell", // Sell USDC for USDT
+				}
 
-						// Reverse cycle: USDT → Asset2 → Asset1 → USDT
-						path2 := TriangularPath{
-							BaseAsset:  "USDT",
-							Asset1:     asset2,
-							Asset2:     asset1,
-							Market1:    asset2 + "USDT", // Buy asset2 with USDT
-							Market2:    asset2 + "USDC", // Sell asset2 for USDC
-							Market3:    asset1 + "USDC", // Buy asset1 with USDC
-							Direction1: "buy",
-							Direction2: "sell",
-							Direction3: "buy",
-						}
+				// Reverse cycle: USDT → USDC → Asset1 → USDT
+				path2 := TriangularPath{
+					BaseAsset:  "USDT",
+					Asset1:     "USDC",
+					Asset2:     asset1,
+					Market1:    "USDCUSDT",      // Sell USDC for USDT
+					Market2:    asset1 + "USDC", // Buy asset1 with USDC
+					Market3:    asset1 + "USDT", // Sell asset1 for USDT
+					Direction1: "sell",          // Sell USDC for USDT
+					Direction2: "buy",           // Buy asset1 with USDC
+					Direction3: "sell",          // Sell asset1 for USDT
+				}
 
-						paths = append(paths, path1, path2)
-						cycleCount += 2
+				paths = append(paths, path1, path2)
+				cycleCount += 2
 
-						if cycleCount <= 10 { // Limit logging to first 10 cycles
-							log.Printf("   ✅ Created cycle: USDT→%s→%s→USDT", asset1, asset2)
-						}
-					}
+				if cycleCount <= 10 { // Limit logging to first 10 cycles
+					log.Printf("   ✅ Created cycle: USDT→%s→USDC→USDT", asset1)
 				}
 			}
 		}
@@ -1352,6 +1347,9 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 	} else if path.Direction1 == "sell" && path.Direction2 == "sell" && path.Direction3 == "buy" {
 		// USDT → Asset → USDC → USDT (reverse)
 		roundTripRate = price1 * price2 * (1.0 / price3)
+	} else if path.Direction1 == "sell" && path.Direction2 == "buy" && path.Direction3 == "sell" {
+		// USDT → USDC → Asset → USDT (alternative reverse)
+		roundTripRate = price1 * (1.0 / price2) * price3
 	} else {
 		log.Printf("⚠️  INVALID DIRECTION | Path: %s→%s→%s | Invalid direction combination: %s, %s, %s",
 			path.Market1, path.Market2, path.Market3,

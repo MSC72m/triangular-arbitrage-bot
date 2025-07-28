@@ -34,31 +34,17 @@ type HttpClient struct {
 	wsUrl           string
 	wsConnected     bool
 
-	// Market data cache
-	marketData map[string]*OrderBook
-
-	// Subscription confirmation tracking
-	pendingSubscriptions   map[int64]string // id -> market
-	confirmedSubscriptions map[string]bool  // market -> confirmed
-	subscriptionResponses  chan subscriptionResult
-}
-
-type subscriptionResult struct {
-	ID      int64
-	Market  string
-	Success bool
-	Error   string
+	// Market data cache with proper synchronization
+	marketData   map[string]*OrderBook
+	marketDataMu sync.RWMutex
 }
 
 func newHttpClient() *HttpClient {
 	return &HttpClient{
-		headers:                make(map[string]string),
-		wsSubscriptions:        make(map[string]bool),
-		wsDataFeed:             make(chan []byte, 10000), // Buffered channel
-		marketData:             make(map[string]*OrderBook),
-		pendingSubscriptions:   make(map[int64]string),
-		confirmedSubscriptions: make(map[string]bool),
-		subscriptionResponses:  make(chan subscriptionResult, 200),
+		headers:         make(map[string]string),
+		wsSubscriptions: make(map[string]bool),
+		wsDataFeed:      make(chan []byte, 5000), // Buffered channel
+		marketData:      make(map[string]*OrderBook),
 	}
 }
 
@@ -195,16 +181,6 @@ func (c *HttpClient) readWebSocketMessages() {
 
 		messageCount++
 
-		// Parse message to detect subscription confirmations
-		var wsMsg map[string]interface{}
-		if err := json.Unmarshal(message, &wsMsg); err == nil {
-			// Check if this is a subscription confirmation response
-			if id, hasID := wsMsg["id"].(float64); hasID {
-				// This is a response to one of our requests
-				c.handleSubscriptionResponse(int64(id), wsMsg)
-			}
-		}
-
 		// Log only first few messages and periodic summaries
 		if messageCount <= 3 {
 			fmt.Printf("📨 WebSocket Message #%d: %s\n", messageCount, string(message))
@@ -219,75 +195,6 @@ func (c *HttpClient) readWebSocketMessages() {
 		default:
 			fmt.Printf("⚠️  WebSocket data feed channel full, dropping message #%d\n", messageCount)
 		}
-	}
-}
-
-// handleSubscriptionResponse processes subscription confirmation responses
-func (c *HttpClient) handleSubscriptionResponse(id int64, response map[string]interface{}) {
-	c.mu.RLock()
-	market, exists := c.pendingSubscriptions[id]
-	c.mu.RUnlock()
-
-	if !exists {
-		// Not a subscription we're tracking
-		fmt.Printf("🔍 DEBUG: Received response for unknown ID %d\n", id)
-		return
-	}
-
-	fmt.Printf("🔍 DEBUG: Processing subscription response for %s (ID: %d): %+v\n", market, id, response)
-
-	// Check if subscription was successful
-	var success bool
-	var errorMsg string
-
-	// Method 1: Check for result.status
-	if result, hasResult := response["result"].(map[string]interface{}); hasResult {
-		if status, hasStatus := result["status"].(string); hasStatus {
-			success = (status == "success")
-			fmt.Printf("🔍 DEBUG: Found result.status = %s for %s\n", status, market)
-		} else {
-			fmt.Printf("🔍 DEBUG: No status field in result for %s\n", market)
-		}
-	} else {
-		fmt.Printf("🔍 DEBUG: No result field for %s\n", market)
-	}
-
-	// Method 2: Check if error is null and result exists (alternative success indicator)
-	if !success {
-		if errorData, hasError := response["error"]; !hasError || errorData == nil {
-			if _, hasResult := response["result"]; hasResult {
-				success = true
-				fmt.Printf("🔍 DEBUG: Treating as success (error=null, result exists) for %s\n", market)
-			}
-		}
-	}
-
-	// Check for errors
-	if errorData, hasError := response["error"]; hasError && errorData != nil {
-		if errorMap, ok := errorData.(map[string]interface{}); ok {
-			if msg, ok := errorMap["message"].(string); ok {
-				errorMsg = msg
-			}
-		} else if errorStr, ok := errorData.(string); ok {
-			errorMsg = errorStr
-		}
-		success = false
-		fmt.Printf("🔍 DEBUG: Found error for %s: %s\n", market, errorMsg)
-	}
-
-	fmt.Printf("🔍 DEBUG: Final result for %s: success=%t, error=%s\n", market, success, errorMsg)
-
-	// Send result to confirmation channel
-	select {
-	case c.subscriptionResponses <- subscriptionResult{
-		ID:      id,
-		Market:  market,
-		Success: success,
-		Error:   errorMsg,
-	}:
-		fmt.Printf("🔍 DEBUG: Sent confirmation result for %s to channel\n", market)
-	default:
-		fmt.Printf("⚠️  Subscription response channel full for %s\n", market)
 	}
 }
 
@@ -332,80 +239,25 @@ func (c *HttpClient) SubscribeWebSocket(market string) error {
 		return nil // Already subscribed
 	}
 
-	// Generate unique ID for this subscription
-	id := time.Now().UnixNano()
-
 	// CoinEx WebSocket API format: [market, limit, interval, diff]
 	subMsg := map[string]interface{}{
 		"method": "depth.subscribe",
 		"params": []interface{}{market, 5, "0", true}, // market, limit, interval, diff
-		"id":     id,
+		"id":     time.Now().UnixNano(),
 	}
 
-	fmt.Printf("🔍 DEBUG: Subscribing to %s with ID %d\n", market, id)
-
-	// Track this pending subscription
-	c.pendingSubscriptions[id] = market
+	fmt.Printf("🔍 DEBUG: Subscribing to %s with ID %d\n", market, subMsg["id"])
 
 	// Send subscription message
 	if err := c.wsConn.WriteJSON(subMsg); err != nil {
-		delete(c.pendingSubscriptions, id)
 		c.mu.Unlock()
 		return fmt.Errorf("websocket write error for %s: %w", market, err)
 	}
 
 	c.mu.Unlock()
 
-	// Wait for confirmation with timeout
-	timeout := time.After(3 * time.Second) // Reduced from 5s to 3s
-	confirmationReceived := false
-
-	for !confirmationReceived {
-		select {
-		case response := <-c.subscriptionResponses:
-			fmt.Printf("🔍 DEBUG: Received response for ID %d (market %s), looking for ID %d (market %s)\n",
-				response.ID, response.Market, id, market)
-
-			if response.ID == id {
-				c.mu.Lock()
-				delete(c.pendingSubscriptions, id)
-
-				if response.Success {
-					c.wsSubscriptions[market] = true
-					c.confirmedSubscriptions[market] = true
-					c.mu.Unlock()
-					fmt.Printf("✅ Confirmed subscription: %s (ID: %d)\n", market, id)
-					return nil
-				} else {
-					c.mu.Unlock()
-					return fmt.Errorf("subscription failed for %s: %s", market, response.Error)
-				}
-			} else {
-				// This response is for a different subscription, continue waiting
-				fmt.Printf("🔍 DEBUG: Response ID mismatch, continuing to wait...\n")
-			}
-		case <-timeout:
-			c.mu.Lock()
-			delete(c.pendingSubscriptions, id)
-			c.mu.Unlock()
-
-			// Before declaring timeout, check if we're actually getting data
-			time.Sleep(500 * time.Millisecond) // Wait a bit more
-			if orderBook, exists := c.marketData[market]; exists && orderBook != nil {
-				if len(orderBook.Bids) > 0 || len(orderBook.Asks) > 0 {
-					// We're getting data even without confirmation - treat as success
-					c.mu.Lock()
-					c.wsSubscriptions[market] = true
-					c.confirmedSubscriptions[market] = true
-					c.mu.Unlock()
-					fmt.Printf("✅ Data-based confirmation: %s (timeout but data flowing)\n", market)
-					return nil
-				}
-			}
-
-			return fmt.Errorf("subscription timeout for %s (no confirmation in 3s)", market)
-		}
-	}
+	// Mark as subscribed optimistically
+	c.wsSubscriptions[market] = true
 
 	return nil
 }
@@ -463,12 +315,14 @@ func (c *HttpClient) SubscribeWebSocketOptimistic(market string) error {
 		return nil // Already subscribed
 	}
 
+	// Generate ID but don't track it (just for CoinEx compatibility)
+	id := time.Now().UnixNano()
+
 	// CoinEx WebSocket API format: [market, limit, interval, diff]
-	// Don't use ID tracking for optimistic subscriptions
 	subMsg := map[string]interface{}{
 		"method": "depth.subscribe",
 		"params": []interface{}{market, 5, "0", true}, // market, limit, interval, diff
-		// No ID field - this prevents "unknown ID" issues
+		"id":     id,                                  // Required by CoinEx but we don't track it
 	}
 
 	// Send subscription message
@@ -583,6 +437,145 @@ func (c *HttpClient) SubscribeWebSocketBatchOptimistic(markets []string) ([]stri
 	return actuallyWorking, actuallyFailed
 }
 
+// SubscribeWebSocketProgressive subscribes to markets in progressive batches to avoid overwhelming the connection
+func (c *HttpClient) SubscribeWebSocketProgressive(markets []string, batchSize int) ([]string, []string) {
+	successful := []string{}
+	failed := []string{}
+
+	if batchSize <= 0 {
+		batchSize = 10 // Reduced from 15 to 10 for better stability
+	}
+
+	fmt.Printf("📡 Starting progressive batch subscription: %d markets in batches of %d...\n",
+		len(markets), batchSize)
+
+	// Process markets in batches
+	for batchStart := 0; batchStart < len(markets); batchStart += batchSize {
+		batchEnd := batchStart + batchSize
+		if batchEnd > len(markets) {
+			batchEnd = len(markets)
+		}
+
+		currentBatch := markets[batchStart:batchEnd]
+		batchNum := (batchStart / batchSize) + 1
+		totalBatches := (len(markets) + batchSize - 1) / batchSize
+
+		fmt.Printf("\n🔄 Batch %d/%d: Subscribing to %d markets...\n",
+			batchNum, totalBatches, len(currentBatch))
+
+		// Subscribe to current batch (fast within batch)
+		batchSuccessful := []string{}
+		batchFailed := []string{}
+
+		for i, market := range currentBatch {
+			// Small delay between subscriptions within batch (increased for stability)
+			if i > 0 {
+				time.Sleep(75 * time.Millisecond) // Increased from 50ms to 75ms
+			}
+
+			err := c.SubscribeWebSocketOptimistic(market)
+			if err != nil {
+				batchFailed = append(batchFailed, market)
+				fmt.Printf("   ❌ %s: %v\n", market, err)
+			} else {
+				batchSuccessful = append(batchSuccessful, market)
+				if len(batchSuccessful) <= 3 || len(batchSuccessful)%5 == 0 {
+					fmt.Printf("   📡 %s subscribed\n", market)
+				}
+			}
+		}
+
+		fmt.Printf("   📊 Batch %d sent: %d subscriptions\n", batchNum, len(batchSuccessful))
+
+		// Wait for data to start flowing from this batch
+		fmt.Printf("   ⏳ Waiting for batch %d data validation...\n", batchNum)
+
+		batchWorking := []string{}
+		batchDead := []string{}
+
+		// Give time for data to accumulate from this batch
+		for waitSeconds := 1; waitSeconds <= 4; waitSeconds++ {
+			time.Sleep(1 * time.Second)
+
+			// Check how many from this batch are working
+			workingCount := 0
+			c.marketDataMu.RLock()
+			for _, market := range batchSuccessful {
+				if orderBook, exists := c.marketData[market]; exists && orderBook != nil {
+					if len(orderBook.Bids) > 0 || len(orderBook.Asks) > 0 {
+						workingCount++
+					}
+				}
+			}
+			c.marketDataMu.RUnlock()
+
+			fmt.Printf("     📊 After %ds: %d/%d markets from batch %d have data\n",
+				waitSeconds, workingCount, len(batchSuccessful), batchNum)
+
+			// If most of the batch is working, we can move on
+			if float64(workingCount)/float64(len(batchSuccessful)) >= 0.6 && waitSeconds >= 2 {
+				fmt.Printf("     ✅ Batch %d ready (%.1f%% working)\n",
+					batchNum, float64(workingCount)/float64(len(batchSuccessful))*100)
+				break
+			}
+		}
+
+		// Final validation for this batch
+		c.marketDataMu.RLock()
+		for _, market := range batchSuccessful {
+			if orderBook, exists := c.marketData[market]; exists && orderBook != nil {
+				if len(orderBook.Bids) > 0 || len(orderBook.Asks) > 0 {
+					batchWorking = append(batchWorking, market)
+				} else {
+					batchDead = append(batchDead, market)
+				}
+			} else {
+				batchDead = append(batchDead, market)
+			}
+		}
+		c.marketDataMu.RUnlock()
+
+		// Add batch results to totals
+		successful = append(successful, batchWorking...)
+		failed = append(failed, batchFailed...)
+		failed = append(failed, batchDead...)
+
+		fmt.Printf("   📊 Batch %d results: %d working, %d failed\n",
+			batchNum, len(batchWorking), len(batchFailed)+len(batchDead))
+
+		if len(batchWorking) > 0 {
+			fmt.Printf("   ✅ Batch %d working markets: %v\n",
+				batchNum, batchWorking[:Min(3, len(batchWorking))])
+			if len(batchWorking) > 3 {
+				fmt.Printf("       ... and %d more\n", len(batchWorking)-3)
+			}
+		}
+
+		// Check if connection is still healthy before next batch
+		if !c.IsWebSocketConnected() {
+			fmt.Printf("   ⚠️  WebSocket disconnected during batch %d, stopping\n", batchNum)
+			break
+		}
+
+		// Small pause before next batch (unless it's the last batch)
+		if batchEnd < len(markets) {
+			fmt.Printf("   💤 Cooling down 3s before next batch...\n") // Increased from 2s to 3s
+			time.Sleep(3 * time.Second)
+		}
+	}
+
+	fmt.Printf("\n📊 Progressive subscription completed!\n")
+	fmt.Printf("   ✅ Total working: %d\n", len(successful))
+	fmt.Printf("   ❌ Total failed: %d\n", len(failed))
+	fmt.Printf("   📈 Success rate: %.1f%%\n", float64(len(successful))/float64(len(markets))*100)
+
+	if len(failed) > 0 {
+		fmt.Printf("   🚫 Failed markets (first 10): %v\n", failed[:Min(10, len(failed))])
+	}
+
+	return successful, failed
+}
+
 func (c *HttpClient) GetWebSocketDataFeed() <-chan []byte {
 	return c.wsDataFeed
 }
@@ -606,16 +599,15 @@ func (c *HttpClient) CloseWebSocket() error {
 	return nil
 }
 
-// Add method to validate WebSocket data health
+// ValidateWebSocketDataHealth validates which markets have actual order book data
 func (c *HttpClient) ValidateWebSocketDataHealth(expectedMarkets []string) ([]string, []string) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.marketDataMu.RLock()
+	defer c.marketDataMu.RUnlock()
 
 	activeMarkets := []string{}
 	deadMarkets := []string{}
 
 	for _, market := range expectedMarkets {
-		// Check if we have actual order book data (not just subscription)
 		if orderBook, exists := c.marketData[market]; exists && orderBook != nil {
 			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
 				activeMarkets = append(activeMarkets, market)
@@ -694,13 +686,13 @@ func (c *HttpClient) GetOrderBookREST(market string) (*OrderBook, error) {
 	return orderBook, nil
 }
 
-// Add method to ensure critical markets have data
+// EnsureCriticalMarketData ensures critical markets have data via REST API fallback
 func (c *HttpClient) EnsureCriticalMarketData(criticalMarkets []string, marketDepths *MarketDepths) {
 	for _, market := range criticalMarkets {
-		c.mu.RLock()
+		c.marketDataMu.RLock()
 		orderBook, exists := c.marketData[market]
 		hasData := exists && orderBook != nil && len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0
-		c.mu.RUnlock()
+		c.marketDataMu.RUnlock()
 
 		if !hasData {
 			fmt.Printf("🔄 Critical market %s missing data, fetching via REST API...\n", market)
@@ -712,10 +704,10 @@ func (c *HttpClient) EnsureCriticalMarketData(criticalMarkets []string, marketDe
 			}
 
 			if len(restOrderBook.Bids) > 0 && len(restOrderBook.Asks) > 0 {
-				// Store in both caches
-				c.mu.Lock()
+				// Store in both caches with proper synchronization
+				c.marketDataMu.Lock()
 				c.marketData[market] = restOrderBook
-				c.mu.Unlock()
+				c.marketDataMu.Unlock()
 
 				// Also store in marketDepths so arbitrage engine can find it
 				if marketDepths != nil {

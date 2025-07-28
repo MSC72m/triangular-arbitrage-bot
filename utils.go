@@ -144,9 +144,9 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 
 	// Also store in httpClient's marketData cache for enhanced validation
 	if httpClient != nil {
-		httpClient.mu.Lock()
+		httpClient.marketDataMu.Lock()
 		httpClient.marketData[marketName] = &orderBook
-		httpClient.mu.Unlock()
+		httpClient.marketDataMu.Unlock()
 	}
 
 	// Debug: Log first few successful data updates to verify WebSocket is working

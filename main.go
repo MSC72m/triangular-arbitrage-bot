@@ -122,12 +122,12 @@ func main() {
 		log.Printf("⚠️  Market data processor exited - data feed channel closed")
 	}()
 
-	// Subscribe to markets with optimistic approach (faster, more reliable)
-	log.Printf("📡 Subscribing to %d markets with optimistic approach...", len(arbitrageMarkets))
+	// Subscribe to markets with progressive batching approach (prevents WebSocket overload)
+	log.Printf("📡 Subscribing to %d markets with progressive batching...", len(arbitrageMarkets))
 
-	successfulSubscriptions, failedSubscriptions := httpClient.SubscribeWebSocketBatchOptimistic(arbitrageMarkets)
+	successfulSubscriptions, failedSubscriptions := httpClient.SubscribeWebSocketProgressive(arbitrageMarkets, 10)
 
-	log.Printf("📊 OPTIMISTIC Subscription Results:")
+	log.Printf("📊 PROGRESSIVE Subscription Results:")
 	log.Printf("   ✅ Working with data: %d", len(successfulSubscriptions))
 	log.Printf("   ❌ Failed/dead: %d", len(failedSubscriptions))
 	log.Printf("   📈 Success rate: %.1f%%", float64(len(successfulSubscriptions))/float64(len(arbitrageMarkets))*100)

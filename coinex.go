@@ -133,7 +133,6 @@ type coinexClient struct {
 	apiKey               string
 	secretKey            string
 	baseUrl              string
-	baseUrlV2            string
 	allowedMarkets       []string
 	config               *Config // Add reference to config
 	orderTrackingManager *OrderTrackingManager
@@ -152,14 +151,13 @@ func NewCoinexClient(httpClient *HttpClient, config *Config) *coinexClient {
 		apiKey:               config.APIKey,
 		secretKey:            config.SecretKey,
 		allowedMarkets:       config.QuoteCurrencies,
-		baseUrl:              "https://api.coinex.com/v1",
-		baseUrlV2:            "https://api.coinex.com/v2",
-		config:               config, // Store config reference
+		baseUrl:              config.APIBaseURL, // Use v1 API for market operations
+		config:               config,            // Store config reference
 		orderTrackingManager: NewOrderTrackingManager(config),
 	}
 }
 
-func (c coinexClient) GetApiKey() string {
+func (c *coinexClient) GetApiKey() string {
 	return c.apiKey
 }
 
@@ -209,7 +207,7 @@ func (c *coinexClient) generateV2Signature(method, requestPath, queryString, bod
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (c coinexClient) PlaceOrder() string {
+func (c *coinexClient) PlaceOrder() string {
 	return ""
 }
 
@@ -732,7 +730,7 @@ func (c *coinexClient) TestConnection() (string, error) {
 	// Test with a public endpoint that doesn't require authentication
 	// Use the market list endpoint which is simpler and doesn't need market parameter
 	params := map[string]string{
-		"url":    c.baseUrl + "/market/list",
+		"url":    c.config.APIBaseURL + "/market/list",
 		"method": "GET",
 	}
 
@@ -776,7 +774,7 @@ func (c *coinexClient) GetBalance() (string, error) {
 
 	// Add the required parameters to the request
 	requestParams := map[string]string{
-		"url":    c.baseUrlV2 + requestPath,
+		"url":    c.config.APIBaseURLV2 + requestPath,
 		"method": method,
 	}
 
@@ -1056,12 +1054,11 @@ func (c *coinexClient) filterMarketsByRealActivity(markets []string, tickerData 
 		if ok {
 			lastPrice, err := strconv.ParseFloat(lastPriceStr, 64)
 			if err == nil {
-				if strings.HasSuffix(market, "USDT") || strings.HasSuffix(market, "USDC") {
-					usdVolume = volume * lastPrice // Already in USD equivalent
-				} else if strings.HasSuffix(market, "BTC") {
-					usdVolume = volume * lastPrice * 45000 // Estimate BTC at $45k
-				} else {
-					usdVolume = volume * lastPrice // Best guess
+				for _, quote := range c.config.QuoteCurrencies {
+					if strings.HasSuffix(market, quote) {
+						usdVolume = volume * lastPrice
+						break
+					}
 				}
 			}
 		}
@@ -1599,4 +1596,121 @@ func (c *coinexClient) buildQueryString(params map[string]string) string {
 		parts = append(parts, key+"="+params[key])
 	}
 	return strings.Join(parts, "&")
+}
+
+// EnsureCriticalMarketData ensures critical markets have data via REST API fallback
+func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, marketDepths *MarketDepths) {
+	log.Printf("🔄 Ensuring quote currency markets have data via REST API: %v", criticalMarkets)
+
+	for _, market := range criticalMarkets {
+		// Check if market already has data in marketDepths
+		if orderBook, exists := marketDepths.Load(market); exists && orderBook != nil {
+			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
+				// Market already has data, skip
+				log.Printf("✅ %s already has data, skipping", market)
+				continue
+			}
+		}
+
+		log.Printf("📡 Fetching %s via REST API...", market)
+
+		// Use the HttpClient's REST API fallback method
+		restOrderBook, err := c.httpClient.GetOrderBookREST(market)
+		if err != nil {
+			log.Printf("❌ Failed to get %s via REST: %v", market, err)
+			continue
+		}
+
+		if len(restOrderBook.Bids) > 0 && len(restOrderBook.Asks) > 0 {
+			// Store in marketDepths so arbitrage engine can find it
+			marketDepths.Store(market, restOrderBook)
+
+			// Also store in HttpClient's market data cache for consistency
+			c.httpClient.marketDataMu.Lock()
+			c.httpClient.marketData[market] = restOrderBook
+			c.httpClient.marketDataMu.Unlock()
+
+			log.Printf("✅ Quote currency market %s data restored via REST | Bids: %d | Asks: %d",
+				market, len(restOrderBook.Bids), len(restOrderBook.Asks))
+		} else {
+			log.Printf("⚠️  Quote currency market %s has empty order book even via REST", market)
+		}
+	}
+}
+
+// FetchCriticalMarketsViaREST fetches order book data for critical markets via REST API
+// This is used as a primary data source for quote currencies and other critical markets
+func (c *coinexClient) FetchCriticalMarketsViaREST(markets []string, marketDepths *MarketDepths) {
+	log.Printf("🔄 Fetching critical markets via REST API: %v", markets)
+
+	successCount := 0
+	failedCount := 0
+
+	for _, market := range markets {
+		log.Printf("📡 Fetching %s via REST API...", market)
+
+		restOrderBook, err := c.httpClient.GetOrderBookREST(market)
+		if err != nil {
+			log.Printf("❌ Failed to fetch %s via REST: %v", market, err)
+			failedCount++
+			continue
+		}
+
+		if len(restOrderBook.Bids) > 0 && len(restOrderBook.Asks) > 0 {
+			// Store in marketDepths
+			marketDepths.Store(market, restOrderBook)
+
+			// Also store in HttpClient's market data cache for consistency
+			c.httpClient.marketDataMu.Lock()
+			c.httpClient.marketData[market] = restOrderBook
+			c.httpClient.marketDataMu.Unlock()
+
+			log.Printf("✅ %s fetched via REST | Bids: %d | Asks: %d",
+				market, len(restOrderBook.Bids), len(restOrderBook.Asks))
+			successCount++
+		} else {
+			log.Printf("⚠️  %s has empty order book via REST", market)
+			failedCount++
+		}
+
+		// Small delay to avoid overwhelming the API
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	log.Printf("📊 REST API fetch complete: %d success, %d failed", successCount, failedCount)
+}
+
+// GetQuoteCurrencyMarkets returns all markets for the configured quote currencies
+func (c *coinexClient) GetQuoteCurrencyMarkets() []string {
+	var quoteMarkets []string
+
+	// Get all available markets from CoinEx
+	marketListString, err := c.GetMarketList()
+	if err != nil {
+		log.Printf("❌ Failed to get market list for quote currencies: %v", err)
+		return quoteMarkets
+	}
+
+	var marketList map[string]interface{}
+	err = json.Unmarshal([]byte(marketListString), &marketList)
+	if err != nil {
+		log.Printf("❌ Failed to unmarshal market list: %v", err)
+		return quoteMarkets
+	}
+
+	markets := marketList["data"].([]interface{})
+
+	// Find markets for configured quote currencies
+	for _, market := range markets {
+		marketStr := market.(string)
+		for _, quote := range c.allowedMarkets {
+			if strings.HasSuffix(marketStr, quote) {
+				quoteMarkets = append(quoteMarkets, marketStr)
+				break
+			}
+		}
+	}
+
+	log.Printf("📊 Found %d markets for quote currencies %v", len(quoteMarkets), c.allowedMarkets)
+	return quoteMarkets
 }

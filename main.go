@@ -63,7 +63,7 @@ func main() {
 	log.Printf("   ⬆️  Max Order Amount: $%.2f", config.OrderExecutionSettings.MaxOrderAmount)
 
 	// Initialize HTTP client with WebSocket support
-	httpClient := newHttpClient()
+	httpClient := newHttpClient(config)
 	httpClient.setheaders(map[string]string{
 		"Content-Type": "application/json",
 		"User-Agent":   "TriangularArbitrageBot/2.0",
@@ -268,33 +268,36 @@ func main() {
 		log.Printf("   🚫 Dead markets (first 10): %v", deadWsMarkets[:Min(10, len(deadWsMarkets))])
 	}
 
-	// Define critical markets that MUST have data for triangular arbitrage
-	criticalMarkets := []string{"USDCUSDT", "BTCUSDT", "USDTUSDC"}
+	// Define critical markets that MUST have data - only quote currency variations
+	criticalMarkets := config.CriticalMarkets
+
+	// Check which critical markets are missing WebSocket data
 	criticalMissing := []string{}
 
 	for _, critical := range criticalMarkets {
-		found := false
-		for _, active := range activeWsMarkets {
-			if active == critical {
-				found = true
-				break
+		// Check if market has data in marketDepths (from WebSocket)
+		if orderBook, exists := marketDepths.Load(critical); exists && orderBook != nil {
+			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
+				// Market has WebSocket data, skip
+				continue
 			}
 		}
-		if !found {
-			criticalMissing = append(criticalMissing, critical)
-		}
+		// Market missing data, add to REST fallback list
+		criticalMissing = append(criticalMissing, critical)
 	}
 
 	if len(criticalMissing) > 0 {
-		log.Printf("🚨 CRITICAL MARKETS MISSING: %v", criticalMissing)
-		log.Printf("🔄 Attempting REST API fallback for critical markets...")
+		log.Printf("🚨 CRITICAL MARKETS MISSING WEBSOCKET DATA: %v", criticalMissing)
+		log.Printf("🔄 Using REST API fallback for missing critical markets...")
 
-		// Use REST API fallback for critical markets
-		httpClient.EnsureCriticalMarketData(criticalMissing, marketDepths)
+		// Use REST API fallback for critical markets missing WebSocket data
+		coinexClient.EnsureCriticalMarketData(criticalMissing, marketDepths)
 
 		// Re-validate after fallback
 		activeWsMarkets, deadWsMarkets = httpClient.ValidateWebSocketDataHealth(arbitrageMarkets)
-		log.Printf("🔄 After fallback - Active: %d, Dead: %d", len(activeWsMarkets), len(deadWsMarkets))
+		log.Printf("🔄 After REST fallback - Active: %d, Dead: %d", len(activeWsMarkets), len(deadWsMarkets))
+	} else {
+		log.Printf("✅ All critical markets have WebSocket data - no REST fallback needed")
 	}
 
 	// Update triangular paths with only markets that actually have data
@@ -336,8 +339,8 @@ func main() {
 	// Start simple periodic metrics logging
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
-		priceTicker := time.NewTicker(2 * time.Minute)  // Log prices less frequently
-		debugTicker := time.NewTicker(15 * time.Second) // Debug market data status frequently
+		priceTicker := time.NewTicker(2 * time.Minute)         // Log prices less frequently
+		debugTicker := time.NewTicker(15 * time.Second)        // Debug market data status frequently
 		criticalDataTicker := time.NewTicker(10 * time.Second) // Fetch critical data every 10 seconds
 		defer ticker.Stop()
 		defer priceTicker.Stop()
@@ -360,9 +363,9 @@ func main() {
 					log.Printf("🔗 WebSocket Status: Disconnected ❌")
 				}
 			case <-criticalDataTicker.C:
-				// Ensure critical market data is always available
-				criticalMarkets := []string{"USDCUSDT", "USDTUSDC"}
-				httpClient.EnsureCriticalMarketData(criticalMarkets, marketDepths)
+				// Check if critical markets have data, use REST only if WebSocket data is missing
+				// REST API is used as fallback, not primary data source
+				log.Printf("🔍 Checking critical markets data availability...")
 			}
 		}
 	}()

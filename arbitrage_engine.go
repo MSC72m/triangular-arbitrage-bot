@@ -718,8 +718,7 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 					log.Printf("✅ Market data ready with %d markets", len(availableMarkets))
 
 					// Check critical quote pairs
-					criticalPairs := []string{"USDCUSDT", "USDTUSDC"}
-					for _, pair := range criticalPairs {
+					for _, pair := range ae.config.CriticalMarkets {
 						if orderBook, exists := ae.marketDepths.Load(pair); exists && orderBook != nil {
 							if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
 								log.Printf("   ✅ %s has order book data (bids: %d, asks: %d)",

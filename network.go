@@ -26,6 +26,7 @@ type HttpClient struct {
 	client  *http.Client
 	headers map[string]string
 	mu      sync.RWMutex
+	config  *Config
 
 	// WebSocket fields
 	wsConn          *websocket.Conn
@@ -39,8 +40,9 @@ type HttpClient struct {
 	marketDataMu sync.RWMutex
 }
 
-func newHttpClient() *HttpClient {
+func newHttpClient(config *Config) *HttpClient {
 	return &HttpClient{
+		config:          config,
 		headers:         make(map[string]string),
 		wsSubscriptions: make(map[string]bool),
 		wsDataFeed:      make(chan []byte, 2000), // Buffered channel

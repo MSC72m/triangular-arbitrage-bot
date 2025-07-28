@@ -736,7 +736,7 @@ func (c *coinexClient) TestConnection() (string, error) {
 	// Test with a public endpoint that doesn't require authentication
 	// Use the market list endpoint which is simpler and doesn't need market parameter
 	params := map[string]string{
-		"url":    c.config.APIBaseURL + "/market/list",
+		"url":    c.baseUrl + "/market/list",
 		"method": "GET",
 	}
 

@@ -131,6 +131,12 @@ func (alm *AssetLockManager) MarkAssetInExecution(path TriangularPath) bool {
 
 	// Mark as executing
 	alm.executingAssets[baseAsset] = true
+
+	// ALSO increment the locked assets count for maxConcurrentOrdersPerAsset tracking
+	alm.lockMutex.Lock()
+	alm.lockedAssets[baseAsset]++
+	alm.lockMutex.Unlock()
+
 	log.Printf("🚀 EXECUTION STARTED | Asset: %s | Path: %s→%s→%s",
 		baseAsset, path.Market1, path.Market2, path.Market3)
 	return true
@@ -148,6 +154,17 @@ func (alm *AssetLockManager) UnmarkAssetInExecution(path TriangularPath) {
 	defer alm.executionMutex.Unlock()
 
 	delete(alm.executingAssets, baseAsset)
+
+	// ALSO decrement the locked assets count
+	alm.lockMutex.Lock()
+	if count, exists := alm.lockedAssets[baseAsset]; exists && count > 0 {
+		alm.lockedAssets[baseAsset]--
+		if alm.lockedAssets[baseAsset] == 0 {
+			delete(alm.lockedAssets, baseAsset)
+		}
+	}
+	alm.lockMutex.Unlock()
+
 	log.Printf("✅ EXECUTION COMPLETED | Asset: %s | Available for new opportunities", baseAsset)
 }
 
@@ -162,6 +179,18 @@ func (alm *AssetLockManager) GetExecutionStats() (int, []string) {
 	}
 
 	return len(alm.executingAssets), executingAssets
+}
+
+// GetAssetOrderCount returns the current number of orders for a specific asset
+func (alm *AssetLockManager) GetAssetOrderCount(asset string) int {
+	if !alm.config.EnableAssetLocking {
+		return 0 // Asset locking disabled, no orders
+	}
+
+	alm.lockMutex.RLock()
+	defer alm.lockMutex.RUnlock()
+
+	return alm.lockedAssets[asset]
 }
 
 // extractAssetsFromPath extracts the specific markets/trading pairs that should be locked
@@ -534,35 +563,6 @@ func (oem *OrderExecutionManager) getTradingFee(market string) float64 {
 	return oem.config.DefaultTradingFee
 }
 
-// calculateMaxVolume calculates the maximum safe volume for the arbitrage
-func (ae *ArbitrageEngine) calculateMaxVolume(vol1, vol2, vol3, price1, price2, price3 float64) float64 {
-	// Apply volume fraction limit
-	maxVol1 := vol1 * ae.config.MaxVolumeFraction
-	maxVol2 := vol2 * ae.config.MaxVolumeFraction
-	maxVol3 := vol3 * ae.config.MaxVolumeFraction
-
-	// Convert all volumes to base currency equivalent
-	baseVol1 := maxVol1 * price1
-	baseVol2 := maxVol2 * price2
-	baseVol3 := maxVol3 * price3
-
-	// Take minimum of all three
-	minVolume := baseVol1
-	if baseVol2 < minVolume {
-		minVolume = baseVol2
-	}
-	if baseVol3 < minVolume {
-		minVolume = baseVol3
-	}
-
-	// Apply position size limit
-	if minVolume > ae.config.MaxPositionSize {
-		minVolume = ae.config.MaxPositionSize
-	}
-
-	return minVolume
-}
-
 // executionWorker handles the execution of arbitrage opportunities
 func (ae *ArbitrageEngine) executionWorker() {
 	for {
@@ -803,7 +803,7 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 	}
 
 	log.Printf("   ✅ Valid markets: %d", len(validMarkets))
-	log.Printf("   💧 Liquid markets: %d", len(liquidMarkets))
+	log.Printf("   �� Liquid markets: %d", len(liquidMarkets))
 	log.Printf("   ❌ Missing markets: %d", len(missingMarkets))
 
 	if len(missingMarkets) > 0 {
@@ -1120,31 +1120,26 @@ func (ae *ArbitrageEngine) scanForOpportunities(scannerID int, scanCount int) {
 		pathsChecked++
 
 		// Extract assets for this path
-		markets := ae.assetLockManager.extractAssetsFromPath(path)
 		baseAsset := path.Asset1 // The main asset being arbitraged (e.g., GMT, ONE, etc.)
 
-		// Check if this asset is already in execution (PRIORITY CHECK)
-		if ae.assetLockManager.IsPathInExecution(path) {
-			pathsInExecution++
-			assetsExecuting[baseAsset]++
-
-			// Log execution blocking occasionally for debugging
-			if pathsInExecution <= 3 && scanCount%500 == 0 && scannerID == 0 {
-				log.Printf("🔄 ASSET IN EXECUTION | %s | Skipping recalculation", baseAsset)
-			}
+		// FIRST PRIORITY: Check maxConcurrentOrdersPerAsset limit
+		if ae.assetLockManager.GetAssetOrderCount(baseAsset) >= ae.config.MaxConcurrentOrdersPerAsset {
+			pathsBlocked++
+			assetsBlocked[baseAsset]++
 			continue
 		}
 
-		// Check if this path is blocked by asset locking
+		// Check if this asset is already in execution (SECOND PRIORITY)
+		if ae.assetLockManager.IsPathInExecution(path) {
+			pathsInExecution++
+			assetsExecuting[baseAsset]++
+			continue
+		}
+
+		// Check if this path is blocked by asset locking (THIRD PRIORITY)
 		if ae.assetLockManager.IsPathLocked(path) {
 			pathsBlocked++
 			assetsBlocked[baseAsset]++
-
-			// Log blocked paths occasionally for debugging
-			if pathsBlocked <= 5 && scanCount%100 == 0 && scannerID == 0 {
-				log.Printf("🚫 PATH BLOCKED | %s→%s→%s | Markets locked: %v",
-					path.Market1, path.Market2, path.Market3, markets)
-			}
 			continue
 		}
 
@@ -1236,61 +1231,113 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 
 	// This should no longer happen since we now filter to only valid markets
 	if !ok1 || !ok2 || !ok3 {
-		// Only log this as a warning since it could be a temporary issue
+		// Check if any of the missing markets are critical markets (should be ignored)
 		missing := []string{}
+		hasCriticalMissing := false
+
 		if !ok1 {
-			missing = append(missing, path.Market1)
+			if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market1) {
+				hasCriticalMissing = true
+			} else {
+				missing = append(missing, path.Market1)
+			}
 		}
 		if !ok2 {
-			missing = append(missing, path.Market2)
+			if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market2) {
+				hasCriticalMissing = true
+			} else {
+				missing = append(missing, path.Market2)
+			}
 		}
 		if !ok3 {
-			missing = append(missing, path.Market3)
+			if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market3) {
+				hasCriticalMissing = true
+			} else {
+				missing = append(missing, path.Market3)
+			}
 		}
 
-		// Reduced logging frequency to avoid spam
-		if detectionStart.UnixNano()%10000 == 0 { // Log ~0.01% of these
-			log.Printf("⚠️  TEMP MISSING | Path: %s→%s→%s | Missing: %v (temporary data gap)",
-				path.Market1, path.Market2, path.Market3, missing)
+		// If only critical markets are missing, ignore the check
+		if hasCriticalMissing && len(missing) == 0 {
+			// Critical markets assumed to exist - continue processing
+		} else if len(missing) > 0 {
+			// Reduced logging frequency to avoid spam
+			if detectionStart.UnixNano()%10000 == 0 { // Log ~0.01% of these
+				log.Printf("⚠️  TEMP MISSING | Path: %s→%s→%s | Missing: %v (temporary data gap)",
+					path.Market1, path.Market2, path.Market3, missing)
+			}
+			return nil
 		}
-		return nil
 	}
 
 	if len(market1Data.Asks) == 0 || len(market1Data.Bids) == 0 ||
 		len(market2Data.Asks) == 0 || len(market2Data.Bids) == 0 ||
 		len(market3Data.Asks) == 0 || len(market3Data.Bids) == 0 {
 
-		// Detailed debugging for empty orderbooks
+		// Check if any of the empty markets are critical markets (should be ignored)
 		emptyMarkets := []string{}
+		hasCriticalEmpty := false
+
 		if len(market1Data.Asks) == 0 || len(market1Data.Bids) == 0 {
-			emptyMarkets = append(emptyMarkets, path.Market1)
+			if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market1) {
+				hasCriticalEmpty = true
+			} else {
+				emptyMarkets = append(emptyMarkets, path.Market1)
+			}
 		}
 		if len(market2Data.Asks) == 0 || len(market2Data.Bids) == 0 {
-			emptyMarkets = append(emptyMarkets, path.Market2)
+			if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market2) {
+				hasCriticalEmpty = true
+			} else {
+				emptyMarkets = append(emptyMarkets, path.Market2)
+			}
 		}
 		if len(market3Data.Asks) == 0 || len(market3Data.Bids) == 0 {
-			emptyMarkets = append(emptyMarkets, path.Market3)
+			if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market3) {
+				hasCriticalEmpty = true
+			} else {
+				emptyMarkets = append(emptyMarkets, path.Market3)
+			}
 		}
 
-		// Reduce logging frequency for empty orderbooks to avoid spam
-		if detectionStart.UnixNano()%50000 == 0 { // Log only ~0.002% of these
-			log.Printf("⚠️  EMPTY ORDERBOOK | Path: %s→%s→%s | Empty markets: %v",
-				path.Market1, path.Market2, path.Market3, emptyMarkets)
+		// If only critical markets are empty, ignore the check and continue processing
+		if hasCriticalEmpty && len(emptyMarkets) == 0 {
+			// Critical markets assumed to exist - continue processing without logging
+		} else if len(emptyMarkets) > 0 {
+			// Reduce logging frequency for empty orderbooks to avoid spam
+			if detectionStart.UnixNano()%50000 == 0 { // Log only ~0.002% of these
+				log.Printf("⚠️  EMPTY ORDERBOOK | Path: %s→%s→%s | Empty markets: %v",
+					path.Market1, path.Market2, path.Market3, emptyMarkets)
+			}
+			return nil
 		}
-		return nil
 	}
 
 	// Get relevant prices based on direction
 	var price1, price2, price3 float64
-	var volume1, volume2, volume3 float64
 	var err error
 
+	// Check bounds before accessing array elements
 	if path.Direction1 == "buy" {
+		if len(market1Data.Asks) == 0 {
+			// Skip check for critical markets
+			if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market1) {
+				log.Printf("⚠️  EMPTY ASKS | Path: %s→%s→%s | Market1: %s has no asks",
+					path.Market1, path.Market2, path.Market3, path.Market1)
+				return nil
+			}
+		}
 		price1, err = strconv.ParseFloat(market1Data.Asks[0].Price, 64)
-		volume1, _ = strconv.ParseFloat(market1Data.Asks[0].Amount, 64)
 	} else {
+		if len(market1Data.Bids) == 0 {
+			// Skip check for critical markets
+			if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market1) {
+				log.Printf("⚠️  EMPTY BIDS | Path: %s→%s→%s | Market1: %s has no bids",
+					path.Market1, path.Market2, path.Market3, path.Market1)
+				return nil
+			}
+		}
 		price1, err = strconv.ParseFloat(market1Data.Bids[0].Price, 64)
-		volume1, _ = strconv.ParseFloat(market1Data.Bids[0].Amount, 64)
 	}
 	if err != nil || price1 <= 0 {
 		log.Printf("⚠️  INVALID PRICE | Path: %s→%s→%s | Invalid price1: %s (error: %v)",
@@ -1299,11 +1346,25 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 	}
 
 	if path.Direction2 == "buy" {
+		if len(market2Data.Asks) == 0 {
+			// Skip check for critical markets
+			if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market2) {
+				log.Printf("⚠️  EMPTY ASKS | Path: %s→%s→%s | Market2: %s has no asks",
+					path.Market1, path.Market2, path.Market3, path.Market2)
+				return nil
+			}
+		}
 		price2, err = strconv.ParseFloat(market2Data.Asks[0].Price, 64)
-		volume2, _ = strconv.ParseFloat(market2Data.Asks[0].Amount, 64)
 	} else {
+		if len(market2Data.Bids) == 0 {
+			// Skip check for critical markets
+			if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market2) {
+				log.Printf("⚠️  EMPTY BIDS | Path: %s→%s→%s | Market2: %s has no bids",
+					path.Market1, path.Market2, path.Market3, path.Market2)
+				return nil
+			}
+		}
 		price2, err = strconv.ParseFloat(market2Data.Bids[0].Price, 64)
-		volume2, _ = strconv.ParseFloat(market2Data.Bids[0].Amount, 64)
 	}
 	if err != nil || price2 <= 0 {
 		log.Printf("⚠️  INVALID PRICE | Path: %s→%s→%s | Invalid price2: %s (error: %v)",
@@ -1312,11 +1373,25 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 	}
 
 	if path.Direction3 == "buy" {
+		if len(market3Data.Asks) == 0 {
+			// Skip check for critical markets
+			if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market3) {
+				log.Printf("⚠️  EMPTY ASKS | Path: %s→%s→%s | Market3: %s has no asks",
+					path.Market1, path.Market2, path.Market3, path.Market3)
+				return nil
+			}
+		}
 		price3, err = strconv.ParseFloat(market3Data.Asks[0].Price, 64)
-		volume3, _ = strconv.ParseFloat(market3Data.Asks[0].Amount, 64)
 	} else {
+		if len(market3Data.Bids) == 0 {
+			// Skip check for critical markets
+			if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market3) {
+				log.Printf("⚠️  EMPTY BIDS | Path: %s→%s→%s | Market3: %s has no bids",
+					path.Market1, path.Market2, path.Market3, path.Market3)
+				return nil
+			}
+		}
 		price3, err = strconv.ParseFloat(market3Data.Bids[0].Price, 64)
-		volume3, _ = strconv.ParseFloat(market3Data.Bids[0].Amount, 64)
 	}
 	if err != nil || price3 <= 0 {
 		log.Printf("⚠️  INVALID PRICE | Path: %s→%s→%s | Invalid price3: %s (error: %v)",
@@ -1358,13 +1433,15 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 
 	netProfit := estimatedProfit - totalFees
 
-	// Determine volume (use fixed volume or calculate from order book depth)
+	// Determine volume based on order execution settings
 	var volume float64
-	if ae.config.FixedVolume > 0 {
-		volume = ae.config.FixedVolume
+	if ae.config.OrderExecutionSettings.OrderAmountType == "static" {
+		// Use static order amount from config
+		volume = ae.config.OrderExecutionSettings.StaticOrderAmount
 	} else {
-		// Calculate max volume based on order book depth and risk limits
-		volume = ae.calculateMaxVolume(volume1, volume2, volume3, price1, price2, price3)
+		// Use dynamic percentage of available balance
+		availableBalance := ae.config.OrderExecutionSettings.AccountBalance
+		volume = availableBalance * ae.config.OrderExecutionSettings.DynamicOrderPercentage
 	}
 
 	if volume <= 0 {

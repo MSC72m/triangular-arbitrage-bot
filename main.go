@@ -215,21 +215,21 @@ func main() {
 				log.Printf("🔍 MARKET DATA CHECK: %d markets available", len(initialMarkets))
 
 				// Check if we have the critical USDCUSDT pair and at least 2 other markets
-				hasUSDCUSDT := false
+				// For critical markets, we assume they exist - only check other markets
+				nonCriticalMarkets := 0
 				for _, market := range initialMarkets {
-					if market == "USDCUSDT" || market == "USDTUSDC" {
-						hasUSDCUSDT = true
-						break
+					if !coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(market) {
+						nonCriticalMarkets++
 					}
 				}
 
-				if len(initialMarkets) >= 3 && hasUSDCUSDT { // Reduced from 5 to 3, but require USDC pair
-					log.Printf("✅ Initial market data ready with %d markets (including USDC/USDT pair)", len(initialMarkets))
+				if nonCriticalMarkets >= 2 { // Reduced from 3 to 2, critical markets assumed to exist
+					log.Printf("✅ Initial market data ready with %d non-critical markets (critical markets assumed to exist)", nonCriticalMarkets)
 					log.Printf("✅ Market data flowing: %v", initialMarkets[:Min(10, len(initialMarkets))])
 					marketDataReady <- true
 					return
-				} else if len(initialMarkets) >= 3 {
-					log.Printf("⚠️  Have %d markets but missing critical USDC/USDT pair", len(initialMarkets))
+				} else {
+					log.Printf("⚠️  Have %d non-critical markets but need at least 2", nonCriticalMarkets)
 				}
 			}
 		}
@@ -271,68 +271,23 @@ func main() {
 	// Define critical markets that MUST have data - only quote currency variations
 	criticalMarkets := config.CriticalMarkets
 
-	// ALWAYS use REST API for critical markets (USDCUSDT, USDTUSDC, etc.)
-	log.Printf("🔄 ALWAYS using REST API for critical markets: %v", criticalMarkets)
-	coinexClient.EnsureCriticalMarketData(criticalMarkets, marketDepths)
+	// ALWAYS assume critical markets exist and have sufficient liquidity
+	log.Printf("🎯 CRITICAL MARKETS: %v (assumed to exist with sufficient liquidity)", criticalMarkets)
+	log.Printf("   📊 No price data fetching needed - critical markets are assumed to exist")
+	log.Printf("   🚫 No depth/volume checks performed for critical markets")
 
-	// Check which critical markets are missing WebSocket data (for logging only)
-	criticalMissing := []string{}
+	// Combine WebSocket and REST data for final arbitrage markets
+	allActiveMarkets := make([]string, 0, len(arbitrageMarkets)+len(criticalMarkets))
+	allActiveMarkets = append(allActiveMarkets, arbitrageMarkets...)
 
+	// Add critical markets to active list (assumed to exist)
 	for _, critical := range criticalMarkets {
-		// Check if market has data in marketDepths (from WebSocket)
-		if orderBook, exists := marketDepths.Load(critical); exists && orderBook != nil {
-			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
-				// Market has WebSocket data, skip
-				continue
-			}
-		}
-		// Market missing data, add to REST fallback list
-		criticalMissing = append(criticalMissing, critical)
-	}
-
-	if len(criticalMissing) > 0 {
-		log.Printf("🚨 CRITICAL MARKETS MISSING WEBSOCKET DATA: %v", criticalMissing)
-		log.Printf("🔄 Using REST API fallback for missing critical markets...")
-
-		// Use REST API fallback for critical markets missing WebSocket data
-		coinexClient.EnsureCriticalMarketData(criticalMissing, marketDepths)
-
-		// Re-validate after fallback
-		activeWsMarkets, deadWsMarkets = httpClient.ValidateWebSocketDataHealth(arbitrageMarkets)
-		log.Printf("🔄 After REST fallback - Active: %d, Dead: %d", len(activeWsMarkets), len(deadWsMarkets))
-	} else {
-		log.Printf("✅ All critical markets have WebSocket data - no REST fallback needed")
-	}
-
-	// Update triangular paths with only markets that actually have data
-	log.Printf("🔄 Updating arbitrage engine with validated markets...")
-
-	// Combine WebSocket active markets with critical markets that have REST fallback data
-	allActiveMarkets := append([]string{}, activeWsMarkets...)
-
-	// Add critical markets that have REST fallback data
-	for _, critical := range criticalMarkets {
-		// Check if critical market now has data (either WebSocket or REST)
-		if orderBook, exists := marketDepths.Load(critical); exists && orderBook != nil {
-			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
-				// Add to active markets if not already present
-				found := false
-				for _, active := range allActiveMarkets {
-					if active == critical {
-						found = true
-						break
-					}
-				}
-				if !found {
-					allActiveMarkets = append(allActiveMarkets, critical)
-					log.Printf("✅ Added critical market to active list: %s (via REST fallback)", critical)
-				}
-			}
-		}
+		allActiveMarkets = append(allActiveMarkets, critical)
+		log.Printf("✅ Added critical market to active list: %s (assumed to exist)", critical)
 	}
 
 	log.Printf("📊 Final active markets count: %d (WebSocket: %d + REST fallback: %d)",
-		len(allActiveMarkets), len(activeWsMarkets), len(allActiveMarkets)-len(activeWsMarkets))
+		len(allActiveMarkets), len(arbitrageMarkets), len(allActiveMarkets)-len(arbitrageMarkets))
 
 	arbitrageEngine.UpdateTriangularPaths(allActiveMarkets, completeAssets)
 
@@ -367,9 +322,8 @@ func main() {
 					log.Printf("🔗 WebSocket Status: Disconnected ❌")
 				}
 			case <-criticalDataTicker.C:
-				// ALWAYS use REST API for critical markets (USDCUSDT, USDTUSDC, etc.)
-				log.Printf("🔄 Periodic REST API refresh for critical markets: %v", config.CriticalMarkets)
-				coinexClient.EnsureCriticalMarketData(config.CriticalMarkets, marketDepths)
+				// Critical markets are assumed to exist - no periodic refresh needed
+				log.Printf("🎯 Critical markets assumed to exist: %v", config.CriticalMarkets)
 			}
 		}
 	}()

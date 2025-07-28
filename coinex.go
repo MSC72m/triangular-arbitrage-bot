@@ -129,13 +129,14 @@ func (otm *OrderTrackingManager) GetActiveTrackers() []*FOKOrderTracker {
 }
 
 type coinexClient struct {
-	httpClient           *HttpClient
-	apiKey               string
-	secretKey            string
-	baseUrl              string
-	allowedMarkets       []string
-	config               *Config // Add reference to config
-	orderTrackingManager *OrderTrackingManager
+	httpClient                 *HttpClient
+	apiKey                     string
+	secretKey                  string
+	baseUrl                    string
+	allowedMarkets             []string
+	config                     *Config // Add reference to config
+	orderTrackingManager       *OrderTrackingManager
+	criticalMarketPriceManager *CriticalMarketPriceManager
 
 	// Order execution tracking
 	lastOrderTime    time.Time
@@ -146,7 +147,7 @@ type coinexClient struct {
 
 func NewCoinexClient(httpClient *HttpClient, config *Config) *coinexClient {
 	fmt.Printf("Loading CoinEx client with quote currencies from config: %v\n", config.QuoteCurrencies)
-	return &coinexClient{
+	client := &coinexClient{
 		httpClient:           httpClient,
 		apiKey:               config.APIKey,
 		secretKey:            config.SecretKey,
@@ -155,6 +156,11 @@ func NewCoinexClient(httpClient *HttpClient, config *Config) *coinexClient {
 		config:               config,            // Store config reference
 		orderTrackingManager: NewOrderTrackingManager(config),
 	}
+
+	// Initialize critical market price manager after client is created
+	client.criticalMarketPriceManager = NewCriticalMarketPriceManager(client, config)
+
+	return client
 }
 
 func (c *coinexClient) GetApiKey() string {
@@ -1713,4 +1719,38 @@ func (c *coinexClient) GetQuoteCurrencyMarkets() []string {
 
 	log.Printf("📊 Found %d markets for quote currencies %v", len(quoteMarkets), c.allowedMarkets)
 	return quoteMarkets
+}
+
+// CriticalMarketPriceManager handles critical market data efficiently
+type CriticalMarketPriceManager struct {
+	config *Config
+}
+
+// NewCriticalMarketPriceManager creates a new critical market price manager
+func NewCriticalMarketPriceManager(coinexClient *coinexClient, config *Config) *CriticalMarketPriceManager {
+	return &CriticalMarketPriceManager{
+		config: config,
+	}
+}
+
+// IsCriticalMarket checks if a market is critical (should be assumed to exist)
+func (cmm *CriticalMarketPriceManager) IsCriticalMarket(market string) bool {
+	for _, critical := range cmm.config.CriticalMarkets {
+		if market == critical {
+			return true
+		}
+	}
+	return false
+}
+
+// AssumeCriticalMarketExists returns true for critical markets (no checks needed)
+func (cmm *CriticalMarketPriceManager) AssumeCriticalMarketExists(market string) bool {
+	return cmm.IsCriticalMarket(market)
+}
+
+// GetCriticalMarketSnapshot returns empty snapshot for critical markets (we don't need price data)
+func (cmm *CriticalMarketPriceManager) GetCriticalMarketSnapshot() map[string]*OrderBook {
+	// Return empty snapshot - we don't need price data for critical markets
+	// The arbitrage engine will handle critical markets differently
+	return make(map[string]*OrderBook)
 }

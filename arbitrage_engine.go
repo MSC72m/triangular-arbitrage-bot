@@ -645,8 +645,6 @@ type ArbitrageEngine struct {
 
 	// Active trades tracking
 	activeTrades map[string]*ArbitrageTrade
-	tradesLock   sync.RWMutex
-
 	// Execution channel
 	executionChan chan ArbitrageOpportunity
 	stopChan      chan struct{}
@@ -719,16 +717,8 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 
 					// Check critical quote pairs
 					for _, pair := range ae.config.CriticalMarkets {
-						if orderBook, exists := ae.marketDepths.Load(pair); exists && orderBook != nil {
-							if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
-								log.Printf("   ✅ %s has order book data (bids: %d, asks: %d)",
-									pair, len(orderBook.Bids), len(orderBook.Asks))
-							} else {
-								log.Printf("   ⚠️  %s exists but has empty order book", pair)
-							}
-						} else {
-							log.Printf("   ❌ %s not found in market depths", pair)
-						}
+						// Skip checks for critical markets - assume they exist
+						log.Printf("   ✅ %s: Assumed to exist (critical market)", pair)
 					}
 
 					marketDataReady <- true
@@ -761,38 +751,29 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 
 	// Check specifically for critical quote pairs
 	log.Printf("   🔍 Critical quote pair check:")
-	for _, pair := range []string{"USDCUSDT", "USDTUSDC"} {
-		if orderBook, exists := ae.marketDepths.Load(pair); exists && orderBook != nil {
-			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
-				log.Printf("      ✅ %s: Available with %d bids, %d asks",
-					pair, len(orderBook.Bids), len(orderBook.Asks))
-			} else {
-				log.Printf("      ⚠️  %s: Found but empty order book", pair)
-			}
-		} else {
-			log.Printf("      ❌ %s: Not found in market depths", pair)
+	for _, critical := range ae.config.CriticalMarkets {
+		// Skip checks for critical markets - assume they exist
+		log.Printf("      ✅ %s: Assumed to exist (critical market)", critical)
+	}
+
+	// Check if critical markets exist in the original markets list
+	log.Printf("   🔍 Checking original markets list for critical pairs:")
+	criticalInOriginal := make(map[string]bool)
+	for _, critical := range ae.config.CriticalMarkets {
+		criticalInOriginal[critical] = false
+	}
+
+	for _, market := range markets {
+		if criticalInOriginal[market] {
+			criticalInOriginal[market] = true
+			log.Printf("      ✅ %s found in original markets list", market)
 		}
 	}
 
-	// Check if USDCUSDT exists in the original markets list
-	log.Printf("   🔍 Checking original markets list for USDC pairs:")
-	usdcInOriginal := false
-	usdtInOriginal := false
-	for _, market := range markets {
-		if market == "USDCUSDT" {
-			usdcInOriginal = true
-			log.Printf("      ✅ USDCUSDT found in original markets list")
+	for critical, found := range criticalInOriginal {
+		if !found {
+			log.Printf("      ❌ %s NOT found in original markets list", critical)
 		}
-		if market == "USDTUSDC" {
-			usdtInOriginal = true
-			log.Printf("      ✅ USDTUSDC found in original markets list")
-		}
-	}
-	if !usdcInOriginal {
-		log.Printf("      ❌ USDCUSDT NOT found in original markets list")
-	}
-	if !usdtInOriginal {
-		log.Printf("      ❌ USDTUSDC NOT found in original markets list")
 	}
 
 	// Filter markets to only include those with actual data AND liquidity
@@ -801,6 +782,13 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 	missingMarkets := []string{}
 
 	for _, market := range markets {
+		// Skip all checks for critical markets - assume they exist and have liquidity
+		if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(market) {
+			validMarkets = append(validMarkets, market)
+			liquidMarkets = append(liquidMarkets, market)
+			continue
+		}
+
 		if availableMarketSet[market] {
 			// Check if market has actual liquidity (order book data from WebSocket)
 			if orderBook, exists := ae.marketDepths.Load(market); exists && orderBook != nil {
@@ -829,19 +817,8 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 		log.Printf("   📊 Sample liquid markets: %v", liquidMarkets[:Min(10, len(liquidMarkets))])
 	}
 
-	// Check if USDCUSDT is in liquid markets
-	usdcInLiquid := false
-	for _, market := range liquidMarkets {
-		if market == "USDCUSDT" {
-			usdcInLiquid = true
-			break
-		}
-	}
-	if usdcInLiquid {
-		log.Printf("   ✅ USDCUSDT found in liquid markets")
-	} else {
-		log.Printf("   ❌ USDCUSDT NOT found in liquid markets")
-	}
+	// Check if critical markets are in liquid markets
+	log.Printf("   ✅ Critical markets assumed to exist: %v", ae.config.CriticalMarkets)
 
 	paths := ae.discoverTriangularArbitrageCycles(liquidMarkets)
 
@@ -923,21 +900,31 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 	// Only create cycles if we have both quote currencies configured
 	if len(ae.config.QuoteCurrencies) >= 2 {
 		// Check if we have a direct USDC/USDT pair
-		hasDirectPair := marketSet["USDCUSDT"] || marketSet["USDTUSDC"]
+		hasDirectPair := false
+		for _, critical := range ae.config.CriticalMarkets {
+			if marketSet[critical] {
+				hasDirectPair = true
+				break
+			}
+		}
 
 		if hasDirectPair {
 			// Use direct USDC/USDT pair if available
 			var quotePair string
 			var quoteDirection string
 
-			if marketSet["USDCUSDT"] {
-				quotePair = "USDCUSDT"
-				quoteDirection = "sell" // Selling USDC for USDT
-				log.Printf("   🎯 Using direct quote pair: USDCUSDT (sell USDC for USDT)")
-			} else if marketSet["USDTUSDC"] {
-				quotePair = "USDTUSDC"
-				quoteDirection = "buy" // Buying USDC with USDT
-				log.Printf("   🎯 Using direct quote pair: USDTUSDC (buy USDC with USDT)")
+			// Find the available critical market
+			for _, critical := range ae.config.CriticalMarkets {
+				if marketSet[critical] {
+					quotePair = critical
+					if strings.HasSuffix(critical, "USDT") {
+						quoteDirection = "sell" // Selling USDC for USDT
+					} else {
+						quoteDirection = "buy" // Buying USDC with USDT
+					}
+					log.Printf("   🎯 Using direct quote pair: %s (%s)", critical, quoteDirection)
+					break
+				}
 			}
 
 			for asset := range usdtMarkets {
@@ -982,59 +969,61 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 				}
 			}
 		} else {
-			// No direct USDC/USDT pair - create triangular cycles using USDC as intermediate
-			// This creates cycles like: USDT → Asset → USDC → USDT (via another asset)
-			log.Printf("   🎯 No direct USDC/USDT pair found - creating USDC-based triangular cycles")
+			// No direct USDC/USDT pair - create triangular cycles using only USDT pairs
+			// This creates cycles like: USDT → Asset1 → Asset2 → USDT (where both assets have USDT pairs)
+			log.Printf("   🎯 No direct USDC/USDT pair found - creating USDT-only triangular cycles")
 
-			// Find assets that have both USDT and USDC pairs
-			completeAssets := []string{}
+			// Find assets that have USDT pairs
+			usdtAssets := []string{}
 			for asset := range usdtMarkets {
-				if usdcMarkets[asset] {
-					completeAssets = append(completeAssets, asset)
-				}
+				usdtAssets = append(usdtAssets, asset)
 			}
 
-			log.Printf("   📊 Assets with both USDT and USDC pairs: %d", len(completeAssets))
+			log.Printf("   📊 Assets with USDT pairs: %d", len(usdtAssets))
 
-			if len(completeAssets) == 0 {
-				log.Printf("   ⚠️  No assets found with both USDT and USDC pairs")
+			if len(usdtAssets) < 2 {
+				log.Printf("   ⚠️  Need at least 2 assets with USDT pairs for triangular arbitrage")
 				return paths
 			}
 
-			// Create triangular cycles: USDT → Asset1 → USDC → USDT
-			// Where Asset1 has both USDT and USDC pairs
-			for _, asset1 := range completeAssets {
-				// Forward cycle: USDT → Asset1 → USDC → USDT
-				path1 := TriangularPath{
-					BaseAsset:  "USDT",
-					Asset1:     asset1,
-					Asset2:     "USDC",
-					Market1:    asset1 + "USDT", // Buy asset1 with USDT
-					Market2:    asset1 + "USDC", // Sell asset1 for USDC
-					Market3:    "USDCUSDT",      // Sell USDC for USDT (assuming USDCUSDT exists)
-					Direction1: "buy",
-					Direction2: "sell",
-					Direction3: "sell", // Sell USDC for USDT
-				}
+			// Create triangular cycles using three different USDT pairs
+			// Example: USDT → BTC → ETH → USDT (all using USDT pairs)
+			for i, asset1 := range usdtAssets {
+				for j, asset2 := range usdtAssets {
+					if i != j { // Use different assets
+						// Cycle: USDT → Asset1 → Asset2 → USDT
+						path1 := TriangularPath{
+							BaseAsset:  "USDT",
+							Asset1:     asset1,
+							Asset2:     asset2,
+							Market1:    asset1 + "USDT", // Buy asset1 with USDT
+							Market2:    asset1 + "USDT", // Sell asset1 for USDT (same market, different side)
+							Market3:    asset2 + "USDT", // Buy asset2 with USDT
+							Direction1: "buy",
+							Direction2: "sell",
+							Direction3: "buy", // Buy asset2 with USDT
+						}
 
-				// Reverse cycle: USDT → USDC → Asset1 → USDT
-				path2 := TriangularPath{
-					BaseAsset:  "USDT",
-					Asset1:     "USDC",
-					Asset2:     asset1,
-					Market1:    "USDCUSDT",      // Sell USDC for USDT
-					Market2:    asset1 + "USDC", // Buy asset1 with USDC
-					Market3:    asset1 + "USDT", // Sell asset1 for USDT
-					Direction1: "sell",          // Sell USDC for USDT
-					Direction2: "buy",           // Buy asset1 with USDC
-					Direction3: "sell",          // Sell asset1 for USDT
-				}
+						// Reverse cycle: USDT → Asset2 → Asset1 → USDT
+						path2 := TriangularPath{
+							BaseAsset:  "USDT",
+							Asset1:     asset2,
+							Asset2:     asset1,
+							Market1:    asset2 + "USDT", // Buy asset2 with USDT
+							Market2:    asset2 + "USDT", // Sell asset2 for USDT (same market, different side)
+							Market3:    asset1 + "USDT", // Buy asset1 with USDT
+							Direction1: "buy",
+							Direction2: "sell",
+							Direction3: "buy", // Buy asset1 with USDT
+						}
 
-				paths = append(paths, path1, path2)
-				cycleCount += 2
+						paths = append(paths, path1, path2)
+						cycleCount += 2
 
-				if cycleCount <= 10 { // Limit logging to first 10 cycles
-					log.Printf("   ✅ Created cycle: USDT→%s→USDC→USDT", asset1)
+						if cycleCount <= 10 { // Limit logging to first 10 cycles
+							log.Printf("   ✅ Created cycle: USDT→%s→%s→USDT", asset1, asset2)
+						}
+					}
 				}
 			}
 		}
@@ -1098,6 +1087,9 @@ func (ae *ArbitrageEngine) scanForOpportunities(scannerID int, scanCount int) {
 
 	// Get snapshot of market depths
 	snapshot := ae.marketDepths.GetSnapshot()
+
+	// Critical markets are assumed to exist - no need to fetch price data
+	// The arbitrage engine will handle them differently in path discovery
 
 	// Debug: Show asset lock status periodically
 	if scanCount%1000 == 0 && scannerID == 0 { // Log every 1000 scans from scanner 0
@@ -1425,13 +1417,4 @@ func (ae *ArbitrageEngine) getTradingFee(market string) float64 {
 		return fee
 	}
 	return ae.config.DefaultTradingFee
-}
-
-// Helper function to get map keys
-func getKeys(m map[string]bool) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
 }

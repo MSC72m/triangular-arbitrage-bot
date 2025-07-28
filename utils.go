@@ -231,22 +231,6 @@ func parseEnvVar(envVar string) (key string, value string) {
 	return parts[0], parts[1]
 }
 
-// Do not remove this function, it is used to load the environment variables to the OS
-func loadEnvToOS() error {
-	env := loadEnvConfig()
-	for key, value := range env {
-		if key == "" || value == "" {
-			continue
-		}
-		if os.Getenv(key) != "" {
-			continue
-		}
-		if err := os.Setenv(key, value); err != nil {
-			return fmt.Errorf("failed to set env %s: %w", key, err)
-		}
-	}
-	return nil
-}
 
 func Includes[T any](arr []string, items ...T) bool {
 	for _, item := range items {

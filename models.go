@@ -212,15 +212,29 @@ func (m *Metrics) AddPnL(pnl float64) {
 }
 
 // GetSnapshot returns a snapshot of current metrics
-func (m *Metrics) GetSnapshot() Metrics {
+func (m *Metrics) GetSnapshot() *Metrics {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	snapshot := *m
+	
+	// Create a new metrics instance for the snapshot
+	snapshot := &Metrics{
+		StartTime:             m.StartTime,
+		OpportunitiesDetected: m.OpportunitiesDetected,
+		TradesExecuted:        m.TradesExecuted,
+		TotalPnL:             m.TotalPnL,
+		AvgExecutionTime:      m.AvgExecutionTime,
+		LastUpdateTime:        m.LastUpdateTime,
+		ActiveConnections:     m.ActiveConnections,
+		MessagesProcessed:     m.MessagesProcessed,
+		ErrorCount:           m.ErrorCount,
+		CurrentBalance:        make(map[string]float64),
+	}
+	
 	// Deep copy the balance map
-	snapshot.CurrentBalance = make(map[string]float64)
 	for k, v := range m.CurrentBalance {
 		snapshot.CurrentBalance[k] = v
 	}
+	
 	return snapshot
 }
 

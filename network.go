@@ -642,10 +642,6 @@ func (c *HttpClient) GetOrderBookREST(market string) (*OrderBook, error) {
 		return nil, err
 	}
 
-	log.Printf("📊 REST API response received for %s", market)
-
-	// Debug: Log the actual response structure
-	log.Printf("🔍 DEBUG: Response keys: %v", getMapKeys(response))
 
 	// Parse CoinEx depth response
 	data, ok := response["data"].(map[string]interface{})
@@ -660,7 +656,6 @@ func (c *HttpClient) GetOrderBookREST(market string) (*OrderBook, error) {
 	asks, ok := data["asks"].([]interface{})
 	if !ok {
 		log.Printf("❌ Invalid asks format for %s", market)
-		log.Printf("🔍 DEBUG: Asks type: %T, value: %+v", data["asks"], data["asks"])
 		return nil, fmt.Errorf("invalid asks format")
 	}
 
@@ -756,7 +751,7 @@ func (c *HttpClient) EnsureCriticalMarketData(criticalMarkets []string, marketDe
 
 // HTTP Methods (existing functionality)
 
-func (c HttpClient) getQueryString(urlStr string, params map[string]string) string {
+func (c *HttpClient) getQueryString(urlStr string, params map[string]string) string {
 	var sb strings.Builder
 	sb.WriteString(urlStr)
 	if len(params) == 0 {

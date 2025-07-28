@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -138,9 +139,63 @@ func main() {
 		}
 	}()
 
-	// Wait for initial market data
+	// Wait for initial market data and verify it's flowing with proper synchronization
 	log.Println("⏳ Waiting for initial market data...")
-	time.Sleep(3 * time.Second)
+
+	var wg sync.WaitGroup
+	marketDataReady := make(chan bool, 1)
+
+	// Start goroutine to monitor market data availability
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		timeout := time.After(30 * time.Second) // 30 second timeout
+
+		for {
+			select {
+			case <-timeout:
+				log.Printf("⚠️  Timeout waiting for initial market data")
+				marketDataReady <- false
+				return
+			case <-ticker.C:
+				initialMarkets := marketDepths.GetAvailableMarkets()
+				log.Printf("🔍 MARKET DATA CHECK: %d markets available", len(initialMarkets))
+
+				// Check if we have the critical USDCUSDT pair and at least 2 other markets
+				hasUSDCUSDT := false
+				for _, market := range initialMarkets {
+					if market == "USDCUSDT" || market == "USDTUSDC" {
+						hasUSDCUSDT = true
+						break
+					}
+				}
+
+				if len(initialMarkets) >= 3 && hasUSDCUSDT { // Reduced from 5 to 3, but require USDC pair
+					log.Printf("✅ Initial market data ready with %d markets (including USDC/USDT pair)", len(initialMarkets))
+					log.Printf("✅ Market data flowing: %v", initialMarkets[:min(10, len(initialMarkets))])
+					marketDataReady <- true
+					return
+				} else if len(initialMarkets) >= 3 {
+					log.Printf("⚠️  Have %d markets but missing critical USDC/USDT pair", len(initialMarkets))
+				}
+			}
+		}
+	}()
+
+	// Wait for market data to be ready
+	wg.Wait()
+	ready := <-marketDataReady
+	if !ready {
+		log.Printf("❌ WARNING: Proceeding without sufficient market data...")
+		retryMarkets := marketDepths.GetAvailableMarkets()
+		log.Printf("   📊 Available markets: %d", len(retryMarkets))
+		if len(retryMarkets) > 0 {
+			log.Printf("   📈 Available: %v", retryMarkets[:min(5, len(retryMarkets))])
+		}
+	}
 
 	// Update triangular paths in the arbitrage engine
 	arbitrageEngine.UpdateTriangularPaths(arbitrageMarkets, completeAssets)

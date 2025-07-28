@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -63,18 +64,92 @@ func (ae *ArbitrageEngine) Stop() {
 
 // UpdateTriangularPaths updates the cache of triangular arbitrage paths
 func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAssets []string) {
-	paths := ae.discoverTriangularPaths(markets, completeAssets)
+	// Use WaitGroup to wait for market data to become available
+	log.Printf("⏳ Waiting for market data before creating triangular paths...")
+
+	var wg sync.WaitGroup
+	marketDataReady := make(chan bool, 1)
+
+	// Start goroutine to monitor market data availability
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
+		timeout := time.After(30 * time.Second) // 30 second timeout
+
+		for {
+			select {
+			case <-timeout:
+				log.Printf("⚠️  Timeout waiting for market data")
+				marketDataReady <- false
+				return
+			case <-ticker.C:
+				availableMarkets := ae.marketDepths.GetAvailableMarkets()
+				if len(availableMarkets) >= 3 { // Reduced from 10 to 3 - many markets are illiquid
+					log.Printf("✅ Market data ready with %d markets", len(availableMarkets))
+					marketDataReady <- true
+					return
+				}
+			}
+		}
+	}()
+
+	// Wait for market data to be ready
+	wg.Wait()
+	ready := <-marketDataReady
+	if !ready {
+		log.Printf("❌ Failed to get sufficient market data, proceeding anyway...")
+	}
+
+	// Get available markets from market depths (markets that actually have data)
+	availableMarkets := ae.marketDepths.GetAvailableMarkets()
+	availableMarketSet := make(map[string]bool)
+	for _, market := range availableMarkets {
+		availableMarketSet[market] = true
+	}
+
+	log.Printf("🔍 MARKET VALIDATION:")
+	log.Printf("   📊 Expected markets: %d", len(markets))
+	log.Printf("   ✅ Available markets with data: %d", len(availableMarkets))
+
+	// Show some examples of available vs expected
+	log.Printf("   📈 Available markets (first 10): %v", availableMarkets[:min(10, len(availableMarkets))])
+
+	// Filter markets to only include those with actual data
+	validMarkets := []string{}
+	missingMarkets := []string{}
+
+	for _, market := range markets {
+		if availableMarketSet[market] {
+			validMarkets = append(validMarkets, market)
+		} else {
+			missingMarkets = append(missingMarkets, market)
+		}
+	}
+
+	log.Printf("   ✅ Valid markets: %d", len(validMarkets))
+	log.Printf("   ❌ Missing markets: %d", len(missingMarkets))
+
+	if len(missingMarkets) > 0 {
+		log.Printf("   🚫 Missing markets (first 10): %v", missingMarkets[:min(10, len(missingMarkets))])
+	}
+
+	// Create triangular arbitrage paths using a different strategy
+	// Look for cycles like USDT → Asset1 → Asset2 → USDT
+	paths := ae.discoverTriangularArbitrageCycles(validMarkets)
 
 	ae.pathsLock.Lock()
 	ae.triangularPaths = paths
 	ae.pathsLock.Unlock()
 
-	log.Printf("🔄 Updated triangular paths: %d paths discovered for %d complete assets", len(paths), len(completeAssets))
+	log.Printf("🔄 Updated triangular paths: %d arbitrage cycles discovered", len(paths))
 
 	// Log first few paths for debugging
 	for i, path := range paths {
 		if i < 5 { // Show first 5 paths
-			log.Printf("   📊 Path %d: %s (%s) → %s (%s) → %s (%s) → %s",
+			log.Printf("   📊 Cycle %d: %s (%s) → %s (%s) → %s (%s) → %s",
 				i+1,
 				path.BaseAsset,
 				path.Direction1,
@@ -87,95 +162,135 @@ func (ae *ArbitrageEngine) UpdateTriangularPaths(markets []string, completeAsset
 	}
 
 	if len(paths) > 5 {
-		log.Printf("   ... and %d more paths", len(paths)-5)
+		log.Printf("   ... and %d more cycles", len(paths)-5)
+	}
+
+	if len(paths) == 0 {
+		log.Printf("⚠️  WARNING: No valid triangular arbitrage cycles found!")
+		log.Printf("   This might be due to:")
+		log.Printf("   1. Insufficient market data")
+		log.Printf("   2. No suitable asset combinations for triangular arbitrage")
+		log.Printf("   3. WebSocket data not fully synchronized")
 	}
 }
 
-// discoverTriangularPaths discovers triangular arbitrage paths for verified complete assets only
-func (ae *ArbitrageEngine) discoverTriangularPaths(markets []string, completeAssets []string) []TriangularPath {
+// discoverTriangularArbitrageCycles discovers triangular arbitrage cycles like USDT → Asset → USDC → USDT
+func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []string) []TriangularPath {
 	var paths []TriangularPath
 
-	log.Printf("🔍 Creating triangular paths for %d verified complete assets", len(completeAssets))
+	log.Printf("🔍 Discovering triangular arbitrage cycles from %d available markets", len(availableMarkets))
 
-	// Create a set of complete assets for fast lookup
-	completeAssetSet := make(map[string]bool)
-	for _, asset := range completeAssets {
-		completeAssetSet[asset] = true
-	}
-
-	// Create a set of available markets for fast lookup
+	// Create market lookup sets for configured quote currencies only
 	marketSet := make(map[string]bool)
-	for _, market := range markets {
+	usdtMarkets := make(map[string]bool) // Asset/USDT pairs
+	usdcMarkets := make(map[string]bool) // Asset/USDC pairs
+
+	for _, market := range availableMarkets {
 		marketSet[market] = true
+
+		// Only process markets for configured quote currencies
+		for _, quote := range ae.config.QuoteCurrencies {
+			if strings.HasSuffix(market, quote) {
+				asset := strings.TrimSuffix(market, quote)
+				if asset != "" {
+					if quote == "USDT" && asset != "USDC" {
+						usdtMarkets[asset] = true
+					} else if quote == "USDC" && asset != "USDT" {
+						usdcMarkets[asset] = true
+					}
+				}
+				break
+			}
+		}
 	}
 
-	// Create triangular paths only for complete assets
-	for _, baseQuote := range ae.config.QuoteCurrencies {
-		for _, secondQuote := range ae.config.QuoteCurrencies {
-			if baseQuote == secondQuote {
-				continue
+	log.Printf("   📊 USDT pairs: %d, USDC pairs: %d", len(usdtMarkets), len(usdcMarkets))
+
+	// Find triangular cycles: USDT → Asset → USDC → USDT
+	cycleCount := 0
+
+	// Only create cycles if we have both quote currencies configured
+	if len(ae.config.QuoteCurrencies) >= 2 {
+		// USDT → Asset → USDC → USDT (requires USDCUSDT pair)
+		if marketSet["USDCUSDT"] || marketSet["USDTUSDC"] {
+			quotePair := "USDCUSDT"
+			if marketSet["USDTUSDC"] {
+				quotePair = "USDTUSDC"
 			}
 
-			// Only work with verified complete assets
-			for _, asset := range completeAssets {
-				market1 := asset + baseQuote                                  // e.g., BTCUSDT
-				market2 := asset + secondQuote                                // e.g., BTCUSDC
-				market3 := ae.findDirectPair(baseQuote, secondQuote, markets) // e.g., USDCUSDT
-
-				// Verify all markets exist
-				if market3 != "" && marketSet[market1] && marketSet[market2] && marketSet[market3] {
-					// Create forward path
-					path := TriangularPath{
-						BaseAsset:  baseQuote,
+			for asset := range usdtMarkets {
+				if usdcMarkets[asset] { // Asset has both USDT and USDC pairs
+					// Forward cycle: USDT → Asset → USDC → USDT
+					path1 := TriangularPath{
+						BaseAsset:  "USDT",
 						Asset1:     asset,
-						Asset2:     secondQuote,
-						Market1:    market1,
-						Market2:    market2,
-						Market3:    market3,
-						Direction1: "buy",  // Buy asset with base
-						Direction2: "sell", // Sell asset for second quote
-						Direction3: "sell", // Sell second quote for base
+						Asset2:     "USDC",
+						Market1:    asset + "USDT", // Buy asset with USDT
+						Market2:    asset + "USDC", // Sell asset for USDC
+						Market3:    quotePair,      // Sell USDC for USDT
+						Direction1: "buy",
+						Direction2: "sell",
+						Direction3: "sell",
 					}
 
-					// Create reverse path
-					reversePath := TriangularPath{
-						BaseAsset:  baseQuote,
-						Asset1:     asset,
-						Asset2:     secondQuote,
-						Market1:    market1,
-						Market2:    market2,
-						Market3:    market3,
-						Direction1: "sell", // Sell asset for base
-						Direction2: "buy",  // Buy asset with second quote
-						Direction3: "buy",  // Buy second quote with base
+					// Reverse cycle: USDT → USDC → Asset → USDT
+					path2 := TriangularPath{
+						BaseAsset:  "USDT",
+						Asset1:     "USDC",
+						Asset2:     asset,
+						Market1:    quotePair,      // Buy USDC with USDT
+						Market2:    asset + "USDC", // Buy asset with USDC
+						Market3:    asset + "USDT", // Sell asset for USDT
+						Direction1: "buy",
+						Direction2: "buy",
+						Direction3: "sell",
 					}
 
-					paths = append(paths, path, reversePath)
-				} else {
-					log.Printf("⚠️  Skipping %s: missing markets %s=%v, %s=%v, %s=%v",
-						asset, market1, marketSet[market1], market2, marketSet[market2], market3, marketSet[market3])
+					paths = append(paths, path1, path2)
+					cycleCount += 2
+
+					log.Printf("   ✅ Created cycles for %s: USDT→%s→USDC→USDT and reverse", asset, asset)
 				}
 			}
+		} else {
+			log.Printf("   ⚠️  Missing USDC/USDT pair - cannot create triangular cycles")
+		}
+	} else {
+		log.Printf("   ⚠️  Need at least 2 quote currencies for triangular arbitrage (configured: %v)", ae.config.QuoteCurrencies)
+	}
+
+	log.Printf("✅ Created %d triangular arbitrage cycles", cycleCount)
+
+	// Log discovered assets for debugging
+	if len(usdtMarkets) > 0 && len(usdcMarkets) > 0 {
+		completeAssets := []string{}
+		for asset := range usdtMarkets {
+			if usdcMarkets[asset] {
+				completeAssets = append(completeAssets, asset)
+			}
+		}
+
+		log.Printf("   💰 Assets with both USDT and USDC pairs: %v", completeAssets)
+
+		if len(completeAssets) == 0 {
+			log.Printf("   ⚠️  No assets found with both USDT and USDC pairs")
+
+			// Show what we do have
+			usdtAssets := make([]string, 0, len(usdtMarkets))
+			for asset := range usdtMarkets {
+				usdtAssets = append(usdtAssets, asset)
+			}
+			usdcAssets := make([]string, 0, len(usdcMarkets))
+			for asset := range usdcMarkets {
+				usdcAssets = append(usdcAssets, asset)
+			}
+
+			log.Printf("   📈 USDT-only assets: %v", usdtAssets[:min(10, len(usdtAssets))])
+			log.Printf("   💎 USDC-only assets: %v", usdcAssets[:min(10, len(usdcAssets))])
 		}
 	}
 
-	log.Printf("✅ Created %d triangular paths for verified assets", len(paths))
 	return paths
-}
-
-// findDirectPair finds a direct trading pair between two currencies
-func (ae *ArbitrageEngine) findDirectPair(currency1, currency2 string, markets []string) string {
-	// Try both directions
-	pair1 := currency1 + currency2
-	pair2 := currency2 + currency1
-
-	for _, market := range markets {
-		if market == pair1 || market == pair2 {
-			return market
-		}
-	}
-
-	return ""
 }
 
 // arbitrageScanner continuously scans for arbitrage opportunities
@@ -213,8 +328,17 @@ func (ae *ArbitrageEngine) scanForOpportunities(scannerID int, scanCount int) {
 	ae.pathsLock.RUnlock()
 
 	if len(paths) == 0 {
-		if scanCount%1000 == 0 { // Log occasionally
-			log.Printf("⚠️  NO PATHS | Scanner %d | No triangular paths available for scanning", scannerID)
+		if scanCount%1000 == 0 && scannerID == 0 { // Log occasionally from scanner 0 only
+			log.Printf("⚠️  NO PATHS | Scanner %d | No valid triangular paths available for scanning", scannerID)
+
+			// Get available markets for debugging
+			availableMarkets := ae.marketDepths.GetAvailableMarkets()
+			log.Printf("   📊 Available markets with data: %d", len(availableMarkets))
+			if len(availableMarkets) > 0 {
+				log.Printf("   📈 Sample available markets: %v", availableMarkets[:min(5, len(availableMarkets))])
+			} else {
+				log.Printf("   ❌ No market data available at all - WebSocket may be disconnected")
+			}
 		}
 		return
 	}
@@ -288,8 +412,9 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 	market2Data, ok2 := snapshot[path.Market2]
 	market3Data, ok3 := snapshot[path.Market3]
 
-	// This should NEVER happen with verified complete assets - log as error if it does
+	// This should no longer happen since we now filter to only valid markets
 	if !ok1 || !ok2 || !ok3 {
+		// Only log this as a warning since it could be a temporary issue
 		missing := []string{}
 		if !ok1 {
 			missing = append(missing, path.Market1)
@@ -301,8 +426,11 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 			missing = append(missing, path.Market3)
 		}
 
-		log.Printf("❌ ERROR | Verified asset missing market data! Path: %s→%s→%s | Missing: %v",
-			path.Market1, path.Market2, path.Market3, missing)
+		// Reduced logging frequency to avoid spam
+		if detectionStart.UnixNano()%10000 == 0 { // Log ~0.01% of these
+			log.Printf("⚠️  TEMP MISSING | Path: %s→%s→%s | Missing: %v (temporary data gap)",
+				path.Market1, path.Market2, path.Market3, missing)
+		}
 		return nil
 	}
 
@@ -362,11 +490,17 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 	// Calculate round-trip rate based on direction
 	var roundTripRate float64
 	if path.Direction1 == "buy" && path.Direction2 == "sell" && path.Direction3 == "sell" {
-		// USDT -> Asset -> Quote -> USDT
+		// USDT → Asset → USDC → USDT
 		roundTripRate = (1.0 / price1) * price2 * price3
 	} else if path.Direction1 == "sell" && path.Direction2 == "buy" && path.Direction3 == "buy" {
-		// USDT -> Quote -> Asset -> USDT
+		// USDT → USDC → Asset → USDT (reverse)
 		roundTripRate = (1.0 / price3) * (1.0 / price2) * price1
+	} else if path.Direction1 == "buy" && path.Direction2 == "buy" && path.Direction3 == "sell" {
+		// USDT → USDC → Asset → USDT
+		roundTripRate = (1.0 / price1) * (1.0 / price2) * price3
+	} else if path.Direction1 == "sell" && path.Direction2 == "sell" && path.Direction3 == "buy" {
+		// USDT → Asset → USDC → USDT (reverse)
+		roundTripRate = price1 * price2 * (1.0 / price3)
 	} else {
 		log.Printf("⚠️  INVALID DIRECTION | Path: %s→%s→%s | Invalid direction combination: %s, %s, %s",
 			path.Market1, path.Market2, path.Market3,

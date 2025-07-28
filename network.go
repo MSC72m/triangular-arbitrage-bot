@@ -176,11 +176,11 @@ func (c *HttpClient) readWebSocketMessages() {
 
 		messageCount++
 
-		// Log first few messages for debugging
-		if messageCount <= 10 {
+		// Log only first few messages and periodic summaries
+		if messageCount <= 3 {
 			fmt.Printf("📨 WebSocket Message #%d: %s\n", messageCount, string(message))
-		} else if messageCount%100 == 0 {
-			// Log every 100th message after first 10
+		} else if messageCount%1000 == 0 {
+			// Log every 1000th message
 			fmt.Printf("📨 WebSocket Message #%d received\n", messageCount)
 		}
 
@@ -188,7 +188,7 @@ func (c *HttpClient) readWebSocketMessages() {
 		select {
 		case c.wsDataFeed <- message:
 		default:
-			fmt.Printf("⚠️  WebSocket data feed channel full, dropping message\n")
+			fmt.Printf("⚠️  WebSocket data feed channel full, dropping message #%d\n", messageCount)
 		}
 	}
 }

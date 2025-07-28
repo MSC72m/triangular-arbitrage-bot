@@ -191,19 +191,20 @@ func (c *coinexClient) GetArbitrageMarkets() ([]string, []string, error) {
 	markets := marketList["data"].([]interface{})
 	fmt.Printf("📊 Total markets from CoinEx: %d\n", len(markets))
 
-	// Find complete assets and their markets in one pass
-	finalMarkets, completeAssets := c.findCompleteTriangularMarkets(markets)
-	return finalMarkets, completeAssets, nil
+	// Find markets suitable for triangular arbitrage (focus on USDT-based cycles)
+	finalMarkets, suitableAssets := c.findTriangularArbitrageMarkets(markets)
+	return finalMarkets, suitableAssets, nil
 }
 
-// findCompleteTriangularMarkets finds assets that have markets for ALL quote currencies and returns both markets and assets
-func (c *coinexClient) findCompleteTriangularMarkets(markets []interface{}) ([]string, []string) {
-	// Group markets by asset and quote currency
-	assetMarkets := make(map[string]map[string]string) // asset -> quote -> market
+// findTriangularArbitrageMarkets finds markets suitable for triangular arbitrage cycles
+func (c *coinexClient) findTriangularArbitrageMarkets(markets []interface{}) ([]string, []string) {
+	// Group markets by the configured quote currencies only
+	usdtMarkets := make(map[string]string) // asset -> market (e.g., BTC -> BTCUSDT)
+	usdcMarkets := make(map[string]string) // asset -> market (e.g., BTC -> BTCUSDC)
 
-	fmt.Printf("🔍 Analyzing markets for quote currencies: %v\n", c.allowedMarkets)
+	fmt.Printf("🔍 Analyzing markets for triangular arbitrage with quote currencies: %v\n", c.allowedMarkets)
 
-	// Parse all markets and group by asset
+	// Parse all markets and categorize them by configured quote currencies
 	for _, market := range markets {
 		marketStr := market.(string)
 
@@ -211,93 +212,65 @@ func (c *coinexClient) findCompleteTriangularMarkets(markets []interface{}) ([]s
 			if strings.HasSuffix(marketStr, quote) {
 				asset := strings.TrimSuffix(marketStr, quote)
 				if asset != "" {
-					if assetMarkets[asset] == nil {
-						assetMarkets[asset] = make(map[string]string)
+					// Store by quote currency
+					if quote == "USDT" && asset != "USDC" {
+						usdtMarkets[asset] = marketStr
+					} else if quote == "USDC" && asset != "USDT" {
+						usdcMarkets[asset] = marketStr
 					}
-					assetMarkets[asset][quote] = marketStr
 				}
 				break
 			}
 		}
 	}
 
-	// Find assets that have ALL required quote currency pairs
+	fmt.Printf("✅ Market Analysis Results:\n")
+	fmt.Printf("   📈 USDT pairs: %d\n", len(usdtMarkets))
+	fmt.Printf("   💎 USDC pairs: %d\n", len(usdcMarkets))
+
+	// Debug: Show actual USDC markets found
+	if len(usdcMarkets) > 0 {
+		fmt.Printf("   🔍 USDC markets found: ")
+		for _, market := range usdcMarkets {
+			fmt.Printf("%s ", market)
+		}
+		fmt.Printf("\n")
+	} else {
+		fmt.Printf("   ⚠️  NO USDC markets found in CoinEx market list!\n")
+	}
+
+	// Find assets that have BOTH quote currency pairs (required for triangular arbitrage)
 	completeAssets := []string{}
-	incompleteAssets := []string{}
-
-	for asset, quotes := range assetMarkets {
-		hasAllQuotes := true
-		for _, requiredQuote := range c.allowedMarkets {
-			if _, exists := quotes[requiredQuote]; !exists {
-				hasAllQuotes = false
-				break
-			}
-		}
-
-		if hasAllQuotes {
-			completeAssets = append(completeAssets, asset)
-		} else {
-			incompleteAssets = append(incompleteAssets, asset)
-		}
-	}
-
-	fmt.Printf("✅ Assets with ALL quote pairs (%d): %v\n", len(completeAssets), completeAssets)
-	if len(incompleteAssets) > 0 {
-		maxShow := 10
-		if len(incompleteAssets) < maxShow {
-			maxShow = len(incompleteAssets)
-		}
-		fmt.Printf("⚠️  Assets with PARTIAL quote pairs (%d): %v\n", len(incompleteAssets), incompleteAssets[:maxShow])
-	}
-
-	// Build final market list ONLY for complete assets + direct quote pairs
 	finalMarkets := []string{}
 
-	// Add all markets for complete assets only
-	for _, asset := range completeAssets {
-		for _, quote := range c.allowedMarkets {
-			market := asset + quote
-			finalMarkets = append(finalMarkets, market)
-			fmt.Printf("   📈 Added: %s\n", market)
+	for asset := range usdtMarkets {
+		if _, hasUSDC := usdcMarkets[asset]; hasUSDC {
+			completeAssets = append(completeAssets, asset)
+			// Add both markets for this asset
+			finalMarkets = append(finalMarkets, usdtMarkets[asset])
+			finalMarkets = append(finalMarkets, usdcMarkets[asset])
+			fmt.Printf("   ✅ Complete asset: %s (has %s and %s)\n", asset, usdtMarkets[asset], usdcMarkets[asset])
 		}
 	}
 
-	// Add direct quote currency pairs if they exist (e.g., USDCUSDT, USDTUSDC)
-	directPairs := c.findDirectQuotePairs(markets)
-	for _, pair := range directPairs {
-		finalMarkets = append(finalMarkets, pair)
-		fmt.Printf("   🔗 Added direct pair: %s\n", pair)
+	// Add the direct quote pair if it exists (USDC/USDT)
+	for _, market := range markets {
+		marketStr := market.(string)
+		if marketStr == "USDCUSDT" || marketStr == "USDTUSDC" {
+			finalMarkets = append(finalMarkets, marketStr)
+			fmt.Printf("   🎯 Added critical quote pair: %s\n", marketStr)
+		}
 	}
 
-	fmt.Printf("🎯 Final market list: %d markets for %d complete assets\n", len(finalMarkets), len(completeAssets))
+	fmt.Printf("🎯 Final results:\n")
+	fmt.Printf("   📈 Complete assets for triangular arbitrage: %d\n", len(completeAssets))
+	fmt.Printf("   📊 Total markets to subscribe: %d\n", len(finalMarkets))
+
+	if len(completeAssets) > 0 {
+		fmt.Printf("   🔄 Assets with both pairs: %v\n", completeAssets[:min(10, len(completeAssets))])
+	} else {
+		fmt.Printf("   ⚠️  No assets found with both USDT and USDC pairs\n")
+	}
 
 	return finalMarkets, completeAssets
-}
-
-// findDirectQuotePairs finds direct trading pairs between quote currencies
-func (c *coinexClient) findDirectQuotePairs(markets []interface{}) []string {
-	directPairs := []string{}
-
-	// Check all combinations of quote currencies
-	for i, quote1 := range c.allowedMarkets {
-		for j, quote2 := range c.allowedMarkets {
-			if i >= j { // Avoid duplicates
-				continue
-			}
-
-			// Try both directions
-			pair1 := quote1 + quote2
-			pair2 := quote2 + quote1
-
-			for _, market := range markets {
-				marketStr := market.(string)
-				if marketStr == pair1 || marketStr == pair2 {
-					directPairs = append(directPairs, marketStr)
-					break
-				}
-			}
-		}
-	}
-
-	return directPairs
 }

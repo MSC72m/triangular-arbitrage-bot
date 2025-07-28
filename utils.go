@@ -84,44 +84,23 @@ func processWebSocketMessage(msg []byte, marketDepths *MarketDepths, metrics *Me
 	// Update message counter
 	metrics.mu.Lock()
 	metrics.MessagesProcessed++
-	currentCount := metrics.MessagesProcessed
 	metrics.mu.Unlock()
-
-	// Log all message types for debugging (first 20 messages)
-	if currentCount <= 20 {
-		log.Printf("🔍 WebSocket Message #%d Type: %+v", currentCount, wsResponse)
-	}
 
 	// Handle different message types
 	method, hasMethod := wsResponse["method"].(string)
 	if !hasMethod {
-		// Log messages without method field
-		if currentCount <= 10 {
-			log.Printf("📝 Message without method: %s", string(msg))
-		}
-		return nil // Ignore messages without method
-	}
-
-	// Log method types we receive
-	if currentCount <= 20 {
-		log.Printf("📋 Message method: %s", method)
+		// Ignore messages without method (subscription confirmations, etc.)
+		return nil
 	}
 
 	switch method {
 	case "depth.update":
-		log.Printf("📊 Processing depth.update message")
 		return handleDepthUpdate(wsResponse, marketDepths)
 	case "server.ping":
 		// Ping response - no action needed
-		if currentCount <= 5 {
-			log.Printf("🏓 Received server.ping")
-		}
 		return nil
 	default:
-		// Unknown method - log for debugging
-		if currentCount <= 20 {
-			log.Printf("❓ Unknown method: %s", method)
-		}
+		// Unknown method - ignore
 		return nil
 	}
 }
@@ -129,33 +108,24 @@ func processWebSocketMessage(msg []byte, marketDepths *MarketDepths, metrics *Me
 // handleDepthUpdate processes order book depth updates
 func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDepths) error {
 	params, ok := wsResponse["params"].([]interface{})
-	if !ok || len(params) < 2 {
-		return fmt.Errorf("invalid depth.update params - expected at least 2 parameters")
+	if !ok || len(params) < 3 {
+		return fmt.Errorf("invalid depth.update params - expected 3 parameters [full_flag, order_book_data, market_name], got: %+v", wsResponse)
 	}
 
 	// CoinEx depth.update format: [full_flag, order_book_data, market_name]
 	// params[0] = full/incremental flag (boolean)
 	// params[1] = order book data (object)
-	// params[2] = market name (string) - but this might not always be present
+	// params[2] = market name (string)
 
 	orderBookData, ok := params[1].(map[string]interface{})
 	if !ok {
-		return fmt.Errorf("invalid order book data in depth update - params[1] should be object")
+		return fmt.Errorf("invalid order book data in depth update - params[1] should be object, got: %+v", params[1])
 	}
 
-	// Try to get market name from params[2], but have fallback
-	var marketName string
-	if len(params) >= 3 {
-		if marketStr, ok := params[2].(string); ok {
-			marketName = marketStr
-		}
-	}
-
-	// If market name not in params, we might need to track it differently
-	// For now, log this case for debugging
-	if marketName == "" {
-		log.Printf("⚠️  Received depth update without market name in params[2]")
-		return fmt.Errorf("missing market name in depth update")
+	// Extract market name from params[2]
+	marketName, ok := params[2].(string)
+	if !ok {
+		return fmt.Errorf("invalid market name in depth update - params[2] should be string, got: %+v", params[2])
 	}
 
 	// Convert to OrderBook struct
@@ -169,12 +139,12 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 		return fmt.Errorf("failed to unmarshal order book: %w", err)
 	}
 
-	// Store in market depths
+	// Store in market depths with the correct market name
 	marketDepths.Store(marketName, &orderBook)
 
 	// Debug: Log first few successful data updates to verify WebSocket is working
 	wsDataReceivedCounter++
-	if wsDataReceivedCounter <= 10 {
+	if wsDataReceivedCounter <= 5 {
 		log.Printf("📊 WebSocket Data Received | Market: %s | Bids: %d | Asks: %d",
 			marketName, len(orderBook.Bids), len(orderBook.Asks))
 	}

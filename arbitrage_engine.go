@@ -1423,20 +1423,30 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 
 	// Calculate round-trip rate based on direction
 	var roundTripRate float64
+
+	// Forward cycle: USDT → Asset → USDC → USDT
+	// Direction1: "buy" (buy asset with USDT), Direction2: "sell" (sell asset for USDC), Direction3: "sell" (sell USDC for USDT)
 	if path.Direction1 == "buy" && path.Direction2 == "sell" && path.Direction3 == "sell" {
-		// USDT → Asset → USDC → USDT
+		// Start with 1 USDT, buy asset, sell asset for USDC, sell USDC for USDT
+		// 1 USDT → (1/price1) asset → (1/price1) * price2 USDC → (1/price1) * price2 * price3 USDT
 		roundTripRate = (1.0 / price1) * price2 * price3
-	} else if path.Direction1 == "sell" && path.Direction2 == "buy" && path.Direction3 == "buy" {
-		// USDT → USDC → Asset → USDT (reverse)
-		roundTripRate = (1.0 / price3) * (1.0 / price2) * price1
 	} else if path.Direction1 == "buy" && path.Direction2 == "buy" && path.Direction3 == "sell" {
-		// USDT → USDC → Asset → USDT
+		// Reverse cycle: USDT → USDC → Asset → USDT
+		// Direction1: "buy" (buy USDC with USDT), Direction2: "buy" (buy asset with USDC), Direction3: "sell" (sell asset for USDT)
+		// Start with 1 USDT, buy USDC, buy asset with USDC, sell asset for USDT
+		// 1 USDT → (1/price1) USDC → (1/price1) * (1/price2) asset → (1/price1) * (1/price2) * price3 USDT
 		roundTripRate = (1.0 / price1) * (1.0 / price2) * price3
 	} else if path.Direction1 == "sell" && path.Direction2 == "sell" && path.Direction3 == "buy" {
-		// USDT → Asset → USDC → USDT (reverse)
+		// Alternative reverse cycle: USDT → Asset → USDC → USDT (different direction)
+		// Direction1: "sell" (sell USDT for asset), Direction2: "sell" (sell asset for USDC), Direction3: "buy" (buy USDT with USDC)
+		// Start with 1 USDT, sell USDT for asset, sell asset for USDC, buy USDT with USDC
+		// 1 USDT → price1 asset → price1 * price2 USDC → price1 * price2 * (1/price3) USDT
 		roundTripRate = price1 * price2 * (1.0 / price3)
 	} else if path.Direction1 == "sell" && path.Direction2 == "buy" && path.Direction3 == "sell" {
-		// USDT → USDC → Asset → USDT (alternative reverse)
+		// Alternative forward cycle: USDT → USDC → Asset → USDT (different direction)
+		// Direction1: "sell" (sell USDT for USDC), Direction2: "buy" (buy asset with USDC), Direction3: "sell" (sell asset for USDT)
+		// Start with 1 USDT, sell USDT for USDC, buy asset with USDC, sell asset for USDT
+		// 1 USDT → price1 USDC → price1 * (1/price2) asset → price1 * (1/price2) * price3 USDT
 		roundTripRate = price1 * (1.0 / price2) * price3
 	} else {
 		log.Printf("⚠️  INVALID DIRECTION | Path: %s→%s→%s | Invalid direction combination: %s, %s, %s",
@@ -1487,7 +1497,7 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 	} else {
 		// This is a losing trade - log occasionally for debugging
 		if detectionStart.UnixNano()%10000 == 0 { // Log ~0.01% of these
-			log.Printf("📉 LOSING PATH | %s→%s→%s | Loss: %.8f%% | Volume: $%.2f | Prices: %.8f, %.8f, %.8f",
+			log.Printf("📉 LOSING PATH | %s→%s→%s | Loss: %.8f%% | Volume: $%.2f | Name to Prices: %s: %.8f, %s: %.8f, %s: %.8f",
 				path.Market1, path.Market2, path.Market3,
 				netProfit*100, volume, price1, price2, price3)
 		}
@@ -1498,14 +1508,14 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 		EstimatedProfit: estimatedProfit,
 		NetProfit:       netProfit,
 		Volume:          volume,
-		Timestamp:       time.Now(),
-		DetectionTime:   time.Since(detectionStart),
-		Market1Data:     *market1Data,
-		Market2Data:     *market2Data,
-		Market3Data:     *market3Data,
 		Price1:          price1,
 		Price2:          price2,
 		Price3:          price3,
+		Timestamp:       time.Now(),
+		DetectionTime:   time.Since(detectionStart),
+		Market1Data:     *market1Data,
+		Market2Data:     *market2Data, 
+		Market3Data:     *market3Data,
 	}
 }
 

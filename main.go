@@ -343,7 +343,7 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Stop arbitrage engine
+	// Stop arbitrage engine FIRST to prevent new opportunities from being queued
 	log.Println("Stopping arbitrage engine...")
 	arbitrageEngine.Stop()
 
@@ -387,9 +387,6 @@ func main() {
 	} else {
 		log.Println("No active FOK orders to wait for")
 	}
-
-	// Check if we have any pending opportunities in the execution channel
-	arbitrageEngine.Stop() // This should stop new opportunities from being queued
 
 	// Wait a moment for any in-flight opportunities to complete
 	time.Sleep(2 * time.Second)

@@ -647,6 +647,10 @@ type ArbitrageEngine struct {
 	executionChan chan ArbitrageOpportunity
 	stopChan      chan struct{}
 
+	// Stop flag to prevent double-closing
+	stopped   bool
+	stopMutex sync.Mutex
+
 	// Loop detection
 	lastOpportunityTime time.Time
 	opportunityCount    int
@@ -687,7 +691,13 @@ func (ae *ArbitrageEngine) Start() {
 
 // Stop stops the arbitrage engine
 func (ae *ArbitrageEngine) Stop() {
-	close(ae.stopChan)
+	ae.stopMutex.Lock()
+	defer ae.stopMutex.Unlock()
+
+	if !ae.stopped {
+		ae.stopped = true
+		close(ae.stopChan)
+	}
 }
 
 // UpdateTriangularPaths updates the cache of triangular arbitrage paths
@@ -939,10 +949,10 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 						Asset2:     "USDC",
 						Market1:    asset + "USDT", // Buy asset with USDT
 						Market2:    asset + "USDC", // Sell asset for USDC
-						Market3:    quotePair,      // Buy USDT with USDC
-						Direction1: "buy",
-						Direction2: "sell",
-						Direction3: quoteDirection, // Correct direction based on available pair
+						Market3:    quotePair,      // Sell USDC for USDT
+						Direction1: "buy",          // Buy asset with USDT
+						Direction2: "sell",         // Sell asset for USDC
+						Direction3: "sell",         // Sell USDC for USDT
 					}
 
 					paths = append(paths, path1)
@@ -1401,16 +1411,12 @@ func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, mar
 	getPrice := func(market string, marketData *OrderBook, direction string) (float64, error) {
 		// Check if this is a critical market with empty order book
 		if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(market) {
-			if direction == "buy" && len(marketData.Asks) == 0 {
-				// Use assumed price for critical market
-				if assumedPrice, exists := ae.coinexClient.criticalMarketPriceManager.GetAssumedPrice(market); exists {
-					return assumedPrice, nil
+			// For critical markets, always use the assumed price
+			if assumedPrice, exists := ae.coinexClient.criticalMarketPriceManager.GetAssumedPrice(market); exists {
+				if detectionStart.UnixNano()%100000 == 0 { // Log occasionally
+					log.Printf("  CRITICAL MARKET PRICE | %s | Using assumed price: %.8f", market, assumedPrice)
 				}
-			} else if direction == "sell" && len(marketData.Bids) == 0 {
-				// Use assumed price for critical market
-				if assumedPrice, exists := ae.coinexClient.criticalMarketPriceManager.GetAssumedPrice(market); exists {
-					return assumedPrice, nil
-				}
+				return assumedPrice, nil
 			}
 		}
 
@@ -1419,12 +1425,26 @@ func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, mar
 			if len(marketData.Asks) == 0 {
 				return 0, fmt.Errorf("no asks available for %s", market)
 			}
-			return strconv.ParseFloat(marketData.Asks[0].Price, 64)
+			price, err := strconv.ParseFloat(marketData.Asks[0].Price, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid ask price for %s: %v", market, err)
+			}
+			if detectionStart.UnixNano()%100000 == 0 { // Log occasionally
+				log.Printf("  ORDER BOOK PRICE | %s | Buy direction | Ask price: %.8f", market, price)
+			}
+			return price, nil
 		} else {
 			if len(marketData.Bids) == 0 {
 				return 0, fmt.Errorf("no bids available for %s", market)
 			}
-			return strconv.ParseFloat(marketData.Bids[0].Price, 64)
+			price, err := strconv.ParseFloat(marketData.Bids[0].Price, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid bid price for %s: %v", market, err)
+			}
+			if detectionStart.UnixNano()%100000 == 0 { // Log occasionally
+				log.Printf("  ORDER BOOK PRICE | %s | Sell direction | Bid price: %.8f", market, price)
+			}
+			return price, nil
 		}
 	}
 

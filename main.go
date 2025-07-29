@@ -388,6 +388,40 @@ func main() {
 		log.Println("✅ No active FOK orders to wait for")
 	}
 
+	// Check if we have any pending opportunities in the execution channel
+	arbitrageEngine.Stop() // This should stop new opportunities from being queued
+
+	// Wait a moment for any in-flight opportunities to complete
+	time.Sleep(2 * time.Second)
+
+	// Check if there are any remaining active trackers after stopping
+	finalActiveTrackers := coinexClient.GetActiveTrackers()
+	if len(finalActiveTrackers) > 0 {
+		log.Printf("⚠️  %d FOK orders still active after engine stop - waiting for completion...", len(finalActiveTrackers))
+
+		// Wait up to 10 seconds for remaining orders
+		remainingWaitCtx, remainingCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer remainingCancel()
+
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-remainingWaitCtx.Done():
+				log.Printf("⚠️  Timeout waiting for %d remaining orders - forcing shutdown", len(coinexClient.GetActiveTrackers()))
+				break
+			case <-ticker.C:
+				remaining := coinexClient.GetActiveTrackers()
+				if len(remaining) == 0 {
+					log.Println("✅ All remaining orders completed")
+					break
+				}
+				log.Printf("⏳ Still waiting for %d orders...", len(remaining))
+			}
+		}
+	}
+
 	// Close WebSocket connection
 	log.Println("📪 Closing WebSocket connection...")
 	if err := httpClient.CloseWebSocket(); err != nil {

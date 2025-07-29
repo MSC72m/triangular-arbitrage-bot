@@ -17,14 +17,19 @@ type AssetLockManager struct {
 	lockMutex       sync.RWMutex    // RW mutex for efficient read access
 	executionMutex  sync.RWMutex    // separate mutex for execution cache
 	config          *Config
+
+	// Cooldown tracking to prevent repeated execution of same opportunities
+	lastExecutionTime map[string]time.Time // asset -> last execution time
+	cooldownMutex     sync.RWMutex
 }
 
 // NewAssetLockManager creates a new asset lock manager
 func NewAssetLockManager(config *Config) *AssetLockManager {
 	return &AssetLockManager{
-		lockedAssets:    make(map[string]int),
-		executingAssets: make(map[string]bool),
-		config:          config,
+		lockedAssets:      make(map[string]int),
+		executingAssets:   make(map[string]bool),
+		config:            config,
+		lastExecutionTime: make(map[string]time.Time),
 	}
 }
 
@@ -121,6 +126,18 @@ func (alm *AssetLockManager) MarkAssetInExecution(path TriangularPath) bool {
 
 	baseAsset := path.Asset1
 
+	// Check cooldown period to prevent repeated execution
+	alm.cooldownMutex.RLock()
+	lastExec, exists := alm.lastExecutionTime[baseAsset]
+	cooldownPeriod := 5 * time.Second // 5 second cooldown between executions
+	alm.cooldownMutex.RUnlock()
+
+	if exists && time.Since(lastExec) < cooldownPeriod {
+		log.Printf("⏳ COOLDOWN ACTIVE | Asset: %s | Last execution: %v ago | Skipping opportunity",
+			baseAsset, time.Since(lastExec))
+		return false
+	}
+
 	alm.executionMutex.Lock()
 	defer alm.executionMutex.Unlock()
 
@@ -136,6 +153,11 @@ func (alm *AssetLockManager) MarkAssetInExecution(path TriangularPath) bool {
 	alm.lockMutex.Lock()
 	alm.lockedAssets[baseAsset]++
 	alm.lockMutex.Unlock()
+
+	// Update last execution time
+	alm.cooldownMutex.Lock()
+	alm.lastExecutionTime[baseAsset] = time.Now()
+	alm.cooldownMutex.Unlock()
 
 	log.Printf("🚀 EXECUTION STARTED | Asset: %s | Path: %s→%s→%s",
 		baseAsset, path.Market1, path.Market2, path.Market3)
@@ -443,6 +465,9 @@ func (oem *OrderExecutionManager) analyzeFOKResultsAndDecide(opportunity Arbitra
 		log.Printf("✅ FOK ARBITRAGE COMPLETE | Attempt %d | Expected: $%.4f | Actual: $%.4f | Net: $%.4f",
 			attemptNumber+1, opportunity.NetProfit*opportunity.Volume, totalPnL, netPnL)
 
+		// Reset rejection count on success
+		oem.coinexClient.resetRejectionCount()
+
 		// Unlock markets - arbitrage completed successfully
 		oem.assetLockManager.UnlockAssets(markets)
 		return
@@ -629,7 +654,7 @@ func (ae *ArbitrageEngine) simulateExecution(opportunity ArbitrageOpportunity) {
 		markets)
 }
 
-// ArbitrageEngine handles triangular arbitrage detection and execution
+// ArbitrageEngine manages triangular arbitrage detection and execution
 type ArbitrageEngine struct {
 	config                *Config
 	marketDepths          *MarketDepths
@@ -648,6 +673,11 @@ type ArbitrageEngine struct {
 	// Execution channel
 	executionChan chan ArbitrageOpportunity
 	stopChan      chan struct{}
+
+	// Loop detection
+	lastOpportunityTime time.Time
+	opportunityCount    int
+	loopMutex           sync.RWMutex
 }
 
 // NewArbitrageEngine creates a new arbitrage engine
@@ -1156,6 +1186,9 @@ func (ae *ArbitrageEngine) scanForOpportunities(scannerID int, scanCount int) {
 				opportunitiesFound++
 				ae.metrics.IncrementOpportunities()
 
+				// Detect potential loops
+				ae.detectLoop()
+
 				log.Printf("🚨 OPPORTUNITY FOUND | Scanner %d | Path: %s→%s→%s | Profit: +%.6f%% | Volume: $%.2f | Prices: %.8f, %.8f, %.8f",
 					scannerID,
 					path.Market1, path.Market2, path.Market3,
@@ -1482,4 +1515,21 @@ func (ae *ArbitrageEngine) getTradingFee(market string) float64 {
 		return fee
 	}
 	return ae.config.DefaultTradingFee
+}
+
+// detectLoop checks if the bot is stuck in a loop and logs warnings
+func (ae *ArbitrageEngine) detectLoop() {
+	ae.loopMutex.Lock()
+	defer ae.loopMutex.Unlock()
+
+	now := time.Now()
+	ae.opportunityCount++
+
+	// If we've had more than 10 opportunities in the last 10 seconds, we might be stuck
+	if ae.opportunityCount >= 10 && now.Sub(ae.lastOpportunityTime) < 10*time.Second {
+		log.Printf("⚠️  LOOP DETECTED | %d opportunities in last 10s | Consider checking balance/configuration", ae.opportunityCount)
+		ae.opportunityCount = 0 // Reset counter
+	}
+
+	ae.lastOpportunityTime = now
 }

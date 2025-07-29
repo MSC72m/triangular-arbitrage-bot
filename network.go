@@ -8,11 +8,10 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"strconv"
 
 	"github.com/gorilla/websocket"
 )
@@ -51,7 +50,11 @@ type HttpClient struct {
 	wsReconnecting  bool
 	wsLastPong      time.Time
 	wsPongTimeout   time.Duration
-	wsWriteMu       sync.Mutex // Add write mutex to prevent concurrent writes
+
+	// WebSocket background processes
+	wsReadDone   chan bool
+	wsPingDone   chan bool
+	wsHealthDone chan bool
 }
 
 func newHttpClient(config *Config) *HttpClient {
@@ -62,10 +65,13 @@ func newHttpClient(config *Config) *HttpClient {
 		wsDataFeed:      make(chan []byte, 2000), // Buffered channel
 		marketData:      make(map[string]*OrderBook),
 		rateLimiter:     NewRateLimiter(config.RateLimitPerSecond, config.RateLimitPerSecond),
-		wsUrl:           "wss://socket.coinex.com/v2/spot", // Correct CoinEx spot WebSocket URL
+		wsUrl:           "wss://socket.coinex.com/v2/spot", // Original CoinEx spot WebSocket URL
 		wsReconnectChan: make(chan bool, 1),
 		wsStopChan:      make(chan bool, 1),
 		wsPongTimeout:   60 * time.Second, // 60 second pong timeout
+		wsReadDone:      make(chan bool, 1),
+		wsPingDone:      make(chan bool, 1),
+		wsHealthDone:    make(chan bool, 1),
 	}
 }
 
@@ -126,8 +132,7 @@ func (c *HttpClient) mergeHeaders(newHeaders map[string]string) *HttpClient {
 func (c *HttpClient) SetWebSocketUrl(host string) *HttpClient {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Try different WebSocket URL formats for CoinEx
-	c.wsUrl = "wss://socket.coinex.com/v1"
+	c.wsUrl = fmt.Sprintf("wss://%s/", host)
 	return c
 }
 
@@ -159,19 +164,25 @@ func (c *HttpClient) ConnectWebSocket() error {
 	conn, response, err := dialer.Dial(c.wsUrl, wsHeaders)
 	if err != nil {
 		fmt.Printf("❌ WebSocket dial failed. Response: %+v\n", response)
-		fmt.Printf("❌ WebSocket dial error: %v\n", err)
 		return fmt.Errorf("websocket dial error: %w", err)
 	}
+
+	fmt.Printf("🔗 WebSocket dial successful, setting up handlers...\n")
 
 	// Set up connection handlers
 	conn.SetPongHandler(func(string) error {
 		c.wsLastPong = time.Now()
+		fmt.Printf("🏓 Pong received at %v\n", c.wsLastPong)
 		return nil
 	})
 
 	conn.SetCloseHandler(func(code int, text string) error {
 		fmt.Printf("🔌 WebSocket close handler called: code=%d, text=%s\n", code, text)
-		c.wsReconnectChan <- true
+		select {
+		case c.wsReconnectChan <- true:
+		default:
+			// Channel full, ignore
+		}
 		return nil
 	})
 
@@ -180,10 +191,28 @@ func (c *HttpClient) ConnectWebSocket() error {
 	c.wsLastPong = time.Now()
 	fmt.Printf("✅ WebSocket connected successfully to %s\n", c.wsUrl)
 
+	// Clear any pending done signals before starting new goroutines
+	select {
+	case <-c.wsReadDone:
+	default:
+	}
+	select {
+	case <-c.wsPingDone:
+	default:
+	}
+	select {
+	case <-c.wsHealthDone:
+	default:
+	}
+
 	// Start background processes
 	go c.readWebSocketMessages()
 	go c.pingWebSocketLoop()
 	go c.connectionHealthMonitor()
+
+	// Wait a moment for connection to stabilize before allowing subscriptions
+	fmt.Printf("⏳ Waiting for connection to stabilize...\n")
+	time.Sleep(5 * time.Second)
 
 	return nil
 }
@@ -199,6 +228,20 @@ func (c *HttpClient) ReconnectWebSocket() error {
 
 	c.wsReconnecting = true
 	c.mu.Unlock()
+
+	// Stop existing goroutines
+	select {
+	case c.wsReadDone <- true:
+	default:
+	}
+	select {
+	case c.wsPingDone <- true:
+	default:
+	}
+	select {
+	case c.wsHealthDone <- true:
+	default:
+	}
 
 	// Close existing connection if any
 	c.mu.Lock()
@@ -232,7 +275,6 @@ func (c *HttpClient) ReconnectWebSocket() error {
 		c.wsReconnecting = false
 		c.mu.Unlock()
 		fmt.Printf("❌ WebSocket reconnection failed. Response: %+v\n", response)
-		fmt.Printf("❌ WebSocket reconnection error: %v\n", err)
 		return fmt.Errorf("websocket reconnection error: %w", err)
 	}
 
@@ -244,7 +286,11 @@ func (c *HttpClient) ReconnectWebSocket() error {
 
 	conn.SetCloseHandler(func(code int, text string) error {
 		fmt.Printf("🔌 WebSocket close handler called: code=%d, text=%s\n", code, text)
-		c.wsReconnectChan <- true
+		select {
+		case c.wsReconnectChan <- true:
+		default:
+			// Channel full, ignore
+		}
 		return nil
 	})
 
@@ -262,94 +308,98 @@ func (c *HttpClient) ReconnectWebSocket() error {
 	c.wsSubscriptions = make(map[string]bool)
 	c.mu.Unlock()
 
+	// Clear any pending done signals before starting new goroutines
+	select {
+	case <-c.wsReadDone:
+	default:
+	}
+	select {
+	case <-c.wsPingDone:
+	default:
+	}
+	select {
+	case <-c.wsHealthDone:
+	default:
+	}
+
 	// Start background processes
 	go c.readWebSocketMessages()
 	go c.pingWebSocketLoop()
+	go c.connectionHealthMonitor()
 
 	return nil
 }
 
 func (c *HttpClient) readWebSocketMessages() {
 	defer func() {
-		c.mu.Lock()
-		if c.wsConn != nil {
-			c.wsConn.Close()
-			c.wsConn = nil
-		}
-		c.wsConnected = false
-		c.mu.Unlock()
-		fmt.Println("❌ WebSocket connection closed")
-
-		// Trigger reconnection
-		select {
-		case c.wsReconnectChan <- true:
-		default:
+		// Only close connection if there was an actual error
+		if r := recover(); r != nil {
+			fmt.Printf("❌ WebSocket read panic: %v\n", r)
 		}
 	}()
 
 	messageCount := 0
 
 	for {
+		select {
+		case <-c.wsReadDone:
+			fmt.Printf("📨 WebSocket read loop stopped by done signal\n")
+			return
+		default:
+		}
+
 		c.mu.RLock()
 		conn := c.wsConn
 		connected := c.wsConnected
 		c.mu.RUnlock()
 
 		if !connected || conn == nil {
-			fmt.Println("❌ WebSocket not connected, exiting read loop")
+			fmt.Printf("📨 WebSocket read loop exiting - connection not available\n")
 			return
 		}
 
-		// Set read deadline to detect stale connections
+		// Set read deadline
 		if err := conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
 			fmt.Printf("❌ Failed to set read deadline: %v\n", err)
 			return
 		}
 
-		messageType, message, err := conn.ReadMessage()
+		_, message, err := conn.ReadMessage()
 		if err != nil {
-			fmt.Printf("❌ WebSocket read error: %v\n", err)
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				fmt.Printf("❌ WebSocket read error: %v\n", err)
+			} else {
+				fmt.Printf("📨 WebSocket connection closed normally\n")
+			}
+
+			// Update connection state when read fails
+			c.mu.Lock()
+			c.wsConnected = false
+			c.mu.Unlock()
+
+            // Attempt to reconnect
+            c.handleReconnection()
 			return
 		}
 
 		messageCount++
 
-		// Handle different message types
-		var processedMessage []byte
-		switch messageType {
-		case websocket.TextMessage:
-			// Text message - use as is
-			processedMessage = message
-		case websocket.BinaryMessage:
-			// Binary message - might be compressed
-			if len(message) > 2 && message[0] == 0x1f && message[1] == 0x8b {
-				// This is gzip compressed data
-				decompressed, err := decompressGzip(message)
-				if err != nil {
-					fmt.Printf("❌ Failed to decompress gzip data: %v\n", err)
-					continue
-				}
-				processedMessage = decompressed
-			} else {
-				// Not compressed, use as is
-				processedMessage = message
-			}
-		default:
-			fmt.Printf("⚠️  Unknown message type: %d\n", messageType)
-			continue
-		}
-
 		// Log only first few messages and periodic summaries
 		if messageCount <= 3 {
-			fmt.Printf("📨 WebSocket Message #%d (type: %d): %s\n", messageCount, messageType, string(processedMessage)[:Min(200, len(processedMessage))])
+			fmt.Printf("📨 WebSocket Message #%d: %s\n", messageCount, string(message))
 		} else if messageCount%1000 == 0 {
 			// Log every 1000th message
-			fmt.Printf("📨 WebSocket Message #%d received (type: %d)\n", messageCount, messageType)
+			fmt.Printf("📨 WebSocket Message #%d received\n", messageCount)
+		}
+
+		// Also log any error messages or subscription responses
+		if messageCount <= 10 {
+			fmt.Printf("📨 WebSocket Message #%d (first 10): %s\n", messageCount, string(message))
 		}
 
 		// Send to data feed channel (non-blocking)
 		select {
-		case c.wsDataFeed <- processedMessage:
+		case c.wsDataFeed <- message:
 		default:
 			fmt.Printf("⚠️  WebSocket data feed channel full, dropping message #%d\n", messageCount)
 		}
@@ -360,7 +410,14 @@ func (c *HttpClient) pingWebSocketLoop() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for {
+		select {
+		case <-ticker.C:
+			// Continue with ping
+		case <-c.wsPingDone:
+			return
+		}
+
 		c.mu.RLock()
 		conn := c.wsConn
 		connected := c.wsConnected
@@ -377,8 +434,7 @@ func (c *HttpClient) pingWebSocketLoop() {
 			"id":     time.Now().UnixNano(),
 		}
 
-		// Use safe write method
-		if err := c.safeWriteJSON(pingMsg); err != nil {
+		if err := conn.WriteJSON(pingMsg); err != nil {
 			fmt.Printf("❌ Failed to send WebSocket ping: %v\n", err)
 			return
 		}
@@ -397,6 +453,8 @@ func (c *HttpClient) connectionHealthMonitor() {
 		case <-c.wsReconnectChan:
 			c.handleReconnection()
 		case <-c.wsStopChan:
+			return
+		case <-c.wsHealthDone:
 			return
 		}
 	}
@@ -436,7 +494,11 @@ func (c *HttpClient) checkConnectionHealth() {
 	// Check if we haven't received a pong in too long
 	if time.Since(lastPong) > c.wsPongTimeout {
 		fmt.Printf("⚠️  WebSocket connection appears stale (no pong for %v), triggering reconnection\n", time.Since(lastPong))
-		c.wsReconnectChan <- true
+		select {
+		case c.wsReconnectChan <- true:
+		default:
+			// Channel full, ignore
+		}
 		return
 	}
 
@@ -446,29 +508,21 @@ func (c *HttpClient) checkConnectionHealth() {
 	c.mu.RUnlock()
 
 	if conn != nil {
-		// Set a short write deadline
-		if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
-			fmt.Printf("⚠️  Failed to set write deadline: %v\n", err)
-			c.wsReconnectChan <- true
-			return
-		}
-
-		// Try to write a ping
+		// Try to write a ping using direct method
 		pingMsg := map[string]interface{}{
 			"method": "server.ping",
 			"params": []interface{}{},
 			"id":     time.Now().UnixNano(),
 		}
 
-		if err := c.safeWriteJSON(pingMsg); err != nil {
+		if err := conn.WriteJSON(pingMsg); err != nil {
 			fmt.Printf("⚠️  Failed to write ping, connection may be dead: %v\n", err)
-			c.wsReconnectChan <- true
+			select {
+			case c.wsReconnectChan <- true:
+			default:
+				// Channel full, ignore
+			}
 			return
-		}
-
-		// Reset write deadline
-		if err := conn.SetWriteDeadline(time.Time{}); err != nil {
-			fmt.Printf("⚠️  Failed to reset write deadline: %v\n", err)
 		}
 	}
 }
@@ -479,26 +533,6 @@ func (c *HttpClient) isConnectionHealthy() bool {
 	defer c.mu.RUnlock()
 
 	return c.wsConnected && c.wsConn != nil && !c.wsReconnecting
-}
-
-// safeWriteJSON safely writes JSON to the WebSocket connection with proper synchronization
-func (c *HttpClient) safeWriteJSON(msg interface{}) error {
-	if !c.isConnectionHealthy() {
-		return fmt.Errorf("websocket not connected or unhealthy")
-	}
-
-	c.wsWriteMu.Lock()
-	defer c.wsWriteMu.Unlock()
-
-	c.mu.RLock()
-	conn := c.wsConn
-	c.mu.RUnlock()
-
-	if conn == nil {
-		return fmt.Errorf("websocket connection is nil")
-	}
-
-	return conn.WriteJSON(msg)
 }
 
 func (c *HttpClient) handleReconnection() {
@@ -512,6 +546,12 @@ func (c *HttpClient) handleReconnection() {
 	}
 
 	fmt.Printf("🔄 Handling WebSocket reconnection...\n")
+
+	// Stop health monitor to prevent concurrent operations
+	select {
+	case c.wsHealthDone <- true:
+	default:
+	}
 
 	// Try to reconnect with exponential backoff
 	maxRetries := 5
@@ -559,24 +599,23 @@ func (c *HttpClient) SubscribeWebSocket(market string) error {
 		return nil // Already subscribed
 	}
 
-	// CoinEx WebSocket API format: market_list array with [market, limit, interval, if_full]
+	// Try a simple subscription format
 	subMsg := map[string]interface{}{
 		"method": "depth.subscribe",
-		"params": map[string]interface{}{
-			"market_list": [][]interface{}{
-				{market, 5, "0", true}, // market, limit=10, interval=0 (continuous), if_full=true
-			},
-		},
-		"id": time.Now().UnixNano(),
+		"params": []interface{}{market}, // Just the market name
+		"id":     time.Now().UnixNano(),
 	}
 
 	fmt.Printf("🔍 DEBUG: Subscribing to %s with ID %d\n", market, subMsg["id"])
 
-	// Send subscription message
-	if err := c.safeWriteJSON(subMsg); err != nil {
+	// Send subscription message using direct WriteJSON
+	if err := c.wsConn.WriteJSON(subMsg); err != nil {
 		c.mu.Unlock()
+		fmt.Printf("❌ DEBUG: Failed to send subscription for %s: %v\n", market, err)
 		return fmt.Errorf("websocket write error for %s: %w", market, err)
 	}
+
+	fmt.Printf("✅ DEBUG: Subscription sent successfully for %s\n", market)
 
 	c.mu.Unlock()
 
@@ -693,19 +732,15 @@ func (c *HttpClient) SubscribeWebSocketOptimistic(market string) error {
 	// Generate ID but don't track it (just for CoinEx compatibility)
 	id := time.Now().UnixNano()
 
-	// CoinEx WebSocket API format: market_list array with [market, limit, interval, if_full]
+	// Try a simple subscription format
 	subMsg := map[string]interface{}{
 		"method": "depth.subscribe",
-		"params": map[string]interface{}{
-			"market_list": [][]interface{}{
-				{market, 10, "0", true}, // market, limit=10, interval=0 (continuous), if_full=true
-			},
-		},
-		"id": id, // Required by CoinEx but we don't track it
+		"params": []interface{}{market}, // Just the market name
+		"id":     id,                    // Required by CoinEx but we don't track it
 	}
 
-	// Send subscription message
-	if err := c.safeWriteJSON(subMsg); err != nil {
+	// Send subscription message using direct WriteJSON
+	if err := c.wsConn.WriteJSON(subMsg); err != nil {
 		c.mu.Unlock()
 		return fmt.Errorf("websocket write error for %s: %w", market, err)
 	}
@@ -991,6 +1026,28 @@ func (c *HttpClient) SubscribeWebSocketProgressive(markets []string, batchSize i
 	return successful, failed
 }
 
+func (c *HttpClient) SubscribeWebSocketSequentially(markets []string) ([]string, []string) {
+    successful := []string{}
+    failed := []string{}
+
+    log.Printf("Subscribing to %d markets sequentially...\n", len(markets))
+
+    for _, market := range markets {
+        if err := c.SubscribeWebSocketWithRetry(market, 3); err != nil {
+            log.Printf("Failed to subscribe to %s: %v\n", market, err)
+            failed = append(failed, market)
+        } else {
+            log.Printf("Successfully subscribed to %s\n", market)
+            successful = append(successful, market)
+        }
+        // Add a small delay between subscriptions to avoid overwhelming the server
+        time.Sleep(250 * time.Millisecond)
+    }
+
+    log.Printf("Sequential subscription complete: %d successful, %d failed\n", len(successful), len(failed))
+    return successful, failed
+}
+
 func (c *HttpClient) GetWebSocketDataFeed() <-chan []byte {
 	return c.wsDataFeed
 }
@@ -1005,7 +1062,19 @@ func (c *HttpClient) CloseWebSocket() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Signal health monitor to stop
+	// Stop all goroutines
+	select {
+	case c.wsReadDone <- true:
+	default:
+	}
+	select {
+	case c.wsPingDone <- true:
+	default:
+	}
+	select {
+	case c.wsHealthDone <- true:
+	default:
+	}
 	select {
 	case c.wsStopChan <- true:
 	default:
@@ -1048,6 +1117,67 @@ func (c *HttpClient) ValidateWebSocketDataHealth(expectedMarkets []string) ([]st
 	}
 
 	return activeMarkets, deadMarkets
+}
+
+// ResubscribeToMarkets resubscribes to all previously subscribed markets
+func (c *HttpClient) ResubscribeToMarkets() error {
+	c.mu.RLock()
+	subscribedMarkets := make([]string, 0, len(c.wsSubscriptions))
+	for market := range c.wsSubscriptions {
+		subscribedMarkets = append(subscribedMarkets, market)
+	}
+	c.mu.RUnlock()
+
+	if len(subscribedMarkets) == 0 {
+		return nil // No markets to resubscribe
+	}
+
+	fmt.Printf("🔄 Resubscribing to %d markets after reconnection...\n", len(subscribedMarkets))
+
+	successful := []string{}
+	failed := []string{}
+
+	// Resubscribe in larger batches for faster processing
+	batchSize := 10 // Increased from 5 to 10
+	for i := 0; i < len(subscribedMarkets); i += batchSize {
+		end := i + batchSize
+		if end > len(subscribedMarkets) {
+			end = len(subscribedMarkets)
+		}
+
+		batch := subscribedMarkets[i:end]
+		fmt.Printf("   📡 Resubscribing batch %d-%d (%d markets)...\n", i+1, end, len(batch))
+
+		for _, market := range batch {
+			if err := c.SubscribeWebSocketWithRetry(market, 2); err != nil {
+				failed = append(failed, market)
+				fmt.Printf("   ❌ Failed to resubscribe to %s: %v\n", market, err)
+			} else {
+				successful = append(successful, market)
+			}
+
+			// Shorter delay between resubscriptions
+			time.Sleep(150 * time.Millisecond) // Reduced from 200ms to 150ms
+		}
+
+		// Shorter wait between batches
+		if end < len(subscribedMarkets) {
+			time.Sleep(500 * time.Millisecond) // Reduced from 1s to 500ms
+		}
+	}
+
+	fmt.Printf("🔄 Resubscription complete: %d successful, %d failed\n", len(successful), len(failed))
+
+	if len(failed) > 0 {
+		// Remove failed markets from subscription cache
+		c.mu.Lock()
+		for _, market := range failed {
+			delete(c.wsSubscriptions, market)
+		}
+		c.mu.Unlock()
+	}
+
+	return nil
 }
 
 // Add method to get order book via REST API as fallback
@@ -1179,43 +1309,6 @@ func getMapKeys(m map[string]interface{}) []string {
 	return keys
 }
 
-// EnsureCriticalMarketData ensures critical markets have data via REST API fallback
-func (c *HttpClient) EnsureCriticalMarketData(criticalMarkets []string, marketDepths *MarketDepths) {
-	for _, market := range criticalMarkets {
-		c.marketDataMu.RLock()
-		orderBook, exists := c.marketData[market]
-		hasData := exists && orderBook != nil && len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0
-		c.marketDataMu.RUnlock()
-
-		if !hasData {
-			fmt.Printf("🔄 Critical market %s missing data, fetching via REST API...\n", market)
-
-			restOrderBook, err := c.GetOrderBookREST(market)
-			if err != nil {
-				fmt.Printf("❌ Failed to get %s via REST: %v\n", market, err)
-				continue
-			}
-
-			if len(restOrderBook.Bids) > 0 && len(restOrderBook.Asks) > 0 {
-				// Store in both caches with proper synchronization
-				c.marketDataMu.Lock()
-				c.marketData[market] = restOrderBook
-				c.marketDataMu.Unlock()
-
-				// Also store in marketDepths so arbitrage engine can find it
-				if marketDepths != nil {
-					marketDepths.Store(market, restOrderBook)
-				}
-
-				fmt.Printf("✅ Critical market %s data restored via REST | Bids: %d | Asks: %d\n",
-					market, len(restOrderBook.Bids), len(restOrderBook.Asks))
-			} else {
-				fmt.Printf("⚠️  Critical market %s has empty order book even via REST\n", market)
-			}
-		}
-	}
-}
-
 // HTTP Methods (existing functionality)
 
 func (c *HttpClient) getQueryString(urlStr string, params map[string]string) string {
@@ -1304,6 +1397,73 @@ func (c *HttpClient) performRequest(params map[string]string, method string) (ma
 	return body, nil
 }
 
+// TestWebSocketConnection tests the WebSocket connection with a single subscription
+func (c *HttpClient) TestWebSocketConnection() error {
+	fmt.Printf("🧪 Testing WebSocket connection...\n")
+
+	// Connect to WebSocket
+	if err := c.ConnectWebSocket(); err != nil {
+		return fmt.Errorf("failed to connect: %w", err)
+	}
+
+	// Wait a moment for connection to stabilize
+	time.Sleep(2 * time.Second)
+
+	// Check if connection is still alive
+	if !c.IsWebSocketConnected() {
+		return fmt.Errorf("websocket disconnected after initial connection")
+	}
+
+	fmt.Printf("🧪 Connection test successful - WebSocket is connected and stable\n")
+
+	// Try a single subscription with a valid CoinEx market
+	testMarket := "SUIUSDT" // Back to SUIUSDT which should be available based on the codebase
+	fmt.Printf("🧪 Testing subscription to %s...\n", testMarket)
+
+	// Use simple subscription format
+	testMsg := map[string]interface{}{
+		"method": "depth.subscribe",
+		"params": []interface{}{testMarket}, // Just the market name
+		"id":     time.Now().UnixNano(),
+	}
+
+	fmt.Printf("🧪 Sending subscription message...\n")
+
+	// Check connection health before sending
+	if !c.isConnectionHealthy() {
+		return fmt.Errorf("websocket not healthy before sending subscription")
+	}
+
+	// Use direct write method
+	if err := c.wsConn.WriteJSON(testMsg); err != nil {
+		return fmt.Errorf("failed to send test subscription: %w", err)
+	}
+
+	fmt.Printf("🧪 Test subscription sent successfully, waiting for response...\n")
+
+	// Wait for response and monitor for messages
+	timeout := time.After(10 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
+			fmt.Printf("🧪 Test timeout - no response received\n")
+			return nil
+		case <-ticker.C:
+			// Check if we received any messages
+			select {
+			case msg := <-c.wsDataFeed:
+				fmt.Printf("🧪 Received message: %s\n", string(msg)[:Min(200, len(msg))])
+				return nil
+			default:
+				// No message received yet
+			}
+		}
+	}
+}
+
 // ValidateWebSocketDataAccuracy validates WebSocket data accuracy by comparing with REST API
 func (c *HttpClient) ValidateWebSocketDataAccuracy(markets []string) {
 	log.Printf(" Validating WebSocket data accuracy for %d markets...", len(markets))
@@ -1341,109 +1501,4 @@ func (c *HttpClient) ValidateWebSocketDataAccuracy(markets []string) {
 			validationCount++
 		}
 	}
-}
-
-// TestWebSocketConnection tests the WebSocket connection with a single subscription
-func (c *HttpClient) TestWebSocketConnection() error {
-	fmt.Printf("🧪 Testing WebSocket connection...\n")
-
-	// Connect to WebSocket
-	if err := c.ConnectWebSocket(); err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
-	}
-
-	// Wait a moment for connection to stabilize
-	time.Sleep(2 * time.Second)
-
-	// Try a single subscription
-	testMarket := "BTCUSDT"
-	fmt.Printf("🧪 Testing subscription to %s...\n", testMarket)
-
-	// Try simpler subscription format
-	testMsg := map[string]interface{}{
-		"method": "depth.subscribe",
-		"params": map[string]interface{}{
-			"market_list": [][]interface{}{
-				{testMarket, 5, "0", true},
-			},
-		},
-		"id": time.Now().UnixNano(),
-	}
-
-	fmt.Printf("🧪 Sending test message: %+v\n", testMsg)
-
-	c.mu.Lock()
-	if err := c.safeWriteJSON(testMsg); err != nil {
-		c.mu.Unlock()
-		return fmt.Errorf("failed to send test subscription: %w", err)
-	}
-	c.mu.Unlock()
-
-	fmt.Printf("🧪 Test subscription sent, waiting for response...\n")
-
-	// Wait for response
-	time.Sleep(5 * time.Second)
-
-	return nil
-}
-
-// ResubscribeToMarkets resubscribes to all previously subscribed markets
-func (c *HttpClient) ResubscribeToMarkets() error {
-	c.mu.RLock()
-	subscribedMarkets := make([]string, 0, len(c.wsSubscriptions))
-	for market := range c.wsSubscriptions {
-		subscribedMarkets = append(subscribedMarkets, market)
-	}
-	c.mu.RUnlock()
-
-	if len(subscribedMarkets) == 0 {
-		return nil // No markets to resubscribe
-	}
-
-	fmt.Printf("🔄 Resubscribing to %d markets after reconnection...\n", len(subscribedMarkets))
-
-	successful := []string{}
-	failed := []string{}
-
-	// Resubscribe in larger batches for faster processing
-	batchSize := 10 // Increased from 5 to 10
-	for i := 0; i < len(subscribedMarkets); i += batchSize {
-		end := i + batchSize
-		if end > len(subscribedMarkets) {
-			end = len(subscribedMarkets)
-		}
-
-		batch := subscribedMarkets[i:end]
-		fmt.Printf("   📡 Resubscribing batch %d-%d (%d markets)...\n", i+1, end, len(batch))
-
-		for _, market := range batch {
-			if err := c.SubscribeWebSocketWithRetry(market, 2); err != nil {
-				failed = append(failed, market)
-				fmt.Printf("   ❌ Failed to resubscribe to %s: %v\n", market, err)
-			} else {
-				successful = append(successful, market)
-			}
-
-			// Shorter delay between resubscriptions
-			time.Sleep(150 * time.Millisecond) // Reduced from 200ms to 150ms
-		}
-
-		// Shorter wait between batches
-		if end < len(subscribedMarkets) {
-			time.Sleep(500 * time.Millisecond) // Reduced from 1s to 500ms
-		}
-	}
-
-	fmt.Printf("🔄 Resubscription complete: %d successful, %d failed\n", len(successful), len(failed))
-
-	if len(failed) > 0 {
-		// Remove failed markets from subscription cache
-		c.mu.Lock()
-		for _, market := range failed {
-			delete(c.wsSubscriptions, market)
-		}
-		c.mu.Unlock()
-	}
-
-	return nil
 }

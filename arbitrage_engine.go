@@ -1021,37 +1021,80 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 			for i, asset1 := range usdtAssets {
 				for j, asset2 := range usdtAssets {
 					if i != j { // Use different assets
-						// Cycle: USDT → Asset1 → Asset2 → USDT
-						path1 := TriangularPath{
-							BaseAsset:  "USDT",
-							Asset1:     asset1,
-							Asset2:     asset2,
-							Market1:    asset1 + "USDT", // Buy asset1 with USDT
-							Market2:    asset1 + "USDT", // Sell asset1 for USDT (same market, different side)
-							Market3:    asset2 + "USDT", // Buy asset2 with USDT
-							Direction1: "buy",
-							Direction2: "sell",
-							Direction3: "buy", // Buy asset2 with USDT
-						}
+						// Check if we have the cross-market (asset1/asset2)
+						crossMarket := asset1 + asset2
+						reverseCrossMarket := asset2 + asset1
 
-						// Reverse cycle: USDT → Asset2 → Asset1 → USDT
-						path2 := TriangularPath{
-							BaseAsset:  "USDT",
-							Asset1:     asset2,
-							Asset2:     asset1,
-							Market1:    asset2 + "USDT", // Buy asset2 with USDT
-							Market2:    asset2 + "USDT", // Sell asset2 for USDT (same market, different side)
-							Market3:    asset1 + "USDT", // Buy asset1 with USDT
-							Direction1: "buy",
-							Direction2: "sell",
-							Direction3: "buy", // Buy asset1 with USDT
-						}
+						// Only create cycles if we have the cross-market
+						if _, hasCrossMarket := marketSet[crossMarket]; hasCrossMarket {
+							// Cycle: USDT → Asset1 → Asset2 → USDT
+							// Correct path: Buy Asset1 with USDT, Sell Asset1 for Asset2, Sell Asset2 for USDT
+							path1 := TriangularPath{
+								BaseAsset:  "USDT",
+								Asset1:     asset1,
+								Asset2:     asset2,
+								Market1:    asset1 + "USDT", // Buy asset1 with USDT
+								Market2:    crossMarket,     // Sell asset1 for asset2
+								Market3:    asset2 + "USDT", // Sell asset2 for USDT
+								Direction1: "buy",           // Buy asset1 with USDT
+								Direction2: "sell",          // Sell asset1 for asset2
+								Direction3: "sell",          // Sell asset2 for USDT
+							}
 
-						paths = append(paths, path1, path2)
-						cycleCount += 2
+							// Reverse cycle: USDT → Asset2 → Asset1 → USDT
+							// Correct path: Buy Asset2 with USDT, Sell Asset2 for Asset1, Sell Asset1 for USDT
+							path2 := TriangularPath{
+								BaseAsset:  "USDT",
+								Asset1:     asset2,
+								Asset2:     asset1,
+								Market1:    asset2 + "USDT",    // Buy asset2 with USDT
+								Market2:    reverseCrossMarket, // Sell asset2 for asset1
+								Market3:    asset1 + "USDT",    // Sell asset1 for USDT
+								Direction1: "buy",              // Buy asset2 with USDT
+								Direction2: "sell",             // Sell asset2 for asset1
+								Direction3: "sell",             // Sell asset1 for USDT
+							}
 
-						if cycleCount <= 10 { // Limit logging to first 10 cycles
-							log.Printf("   ✅ Created cycle: USDT→%s→%s→USDT", asset1, asset2)
+							paths = append(paths, path1, path2)
+							cycleCount += 2
+
+							if cycleCount <= 10 { // Limit logging to first 10 cycles
+								log.Printf("   ✅ Created cycle: USDT→%s→%s→USDT (using %s)", asset1, asset2, crossMarket)
+							}
+						} else if _, hasReverseCrossMarket := marketSet[reverseCrossMarket]; hasReverseCrossMarket {
+							// Try reverse cross-market
+							// Cycle: USDT → Asset1 → Asset2 → USDT
+							path1 := TriangularPath{
+								BaseAsset:  "USDT",
+								Asset1:     asset1,
+								Asset2:     asset2,
+								Market1:    asset1 + "USDT",    // Buy asset1 with USDT
+								Market2:    reverseCrossMarket, // Buy asset2 with asset1
+								Market3:    asset2 + "USDT",    // Sell asset2 for USDT
+								Direction1: "buy",
+								Direction2: "buy",
+								Direction3: "sell",
+							}
+
+							// Reverse cycle: USDT → Asset2 → Asset1 → USDT
+							path2 := TriangularPath{
+								BaseAsset:  "USDT",
+								Asset1:     asset2,
+								Asset2:     asset1,
+								Market1:    asset2 + "USDT",    // Buy asset2 with USDT
+								Market2:    reverseCrossMarket, // Buy asset1 with asset2
+								Market3:    asset1 + "USDT",    // Sell asset1 for USDT
+								Direction1: "buy",
+								Direction2: "buy",
+								Direction3: "sell",
+							}
+
+							paths = append(paths, path1, path2)
+							cycleCount += 2
+
+							if cycleCount <= 10 { // Limit logging to first 10 cycles
+								log.Printf("   ✅ Created cycle: USDT→%s→%s→USDT (using %s)", asset1, asset2, reverseCrossMarket)
+							}
 						}
 					}
 				}
@@ -1464,6 +1507,13 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 
 	netProfit := estimatedProfit - totalFees
 
+	// Debug logging for profit calculation
+	if detectionStart.UnixNano()%10000 == 0 { // Log ~0.01% of calculations
+		log.Printf("🔍 DEBUG CALC | Path: %s→%s→%s | RoundTrip: %.8f | EstProfit: %.8f%% | Fees: %.8f%% (%.4f%% + %.4f%% + %.4f%%) | NetProfit: %.8f%% | Threshold: %.8f%% | Prices: %.8f, %.8f, %.8f",
+			path.Market1, path.Market2, path.Market3,
+			roundTripRate, estimatedProfit*100, totalFees*100, fee1*100, fee2*100, fee3*100, netProfit*100, ae.config.ProfitThreshold*100, price1, price2, price3)
+	}
+
 	// Determine volume based on order execution settings
 	var volume float64
 	if ae.config.OrderExecutionSettings.OrderAmountType == "static" {
@@ -1496,8 +1546,8 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 		}
 	} else {
 		// This is a losing trade - log occasionally for debugging
-		if detectionStart.UnixNano()%10000 == 0 { // Log ~0.01% of these
-			log.Printf("📉 LOSING PATH | %s→%s→%s | Loss: %.8f%% | Volume: $%.2f | Name to Prices: %s: %.8f, %s: %.8f, %s: %.8f",
+		if detectionStart.UnixNano()%100000 == 0 { // Log ~0.0001% of these
+			log.Printf("📉 LOSING PATH | %s→%s→%s | Loss: %.8f%% | Volume: $%.2f | Prices: %.8f, %.8f, %.8f",
 				path.Market1, path.Market2, path.Market3,
 				netProfit*100, volume, price1, price2, price3)
 		}
@@ -1514,7 +1564,7 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 		Timestamp:       time.Now(),
 		DetectionTime:   time.Since(detectionStart),
 		Market1Data:     *market1Data,
-		Market2Data:     *market2Data, 
+		Market2Data:     *market2Data,
 		Market3Data:     *market3Data,
 	}
 }

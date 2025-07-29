@@ -1,22 +1,22 @@
 {
-  "profitThreshold": 0.001,
-  "simulationMode": false,
-  "concurrentScans": 250,
+  "profitThreshold": 0.0001,
+  "simulationMode": true,
+  "concurrentScans": 500,
   "maxLatencyMs": 200,
-  "rateLimitPerSecond": 20,
+  "rateLimitPerSecond": 50,
   "quoteCurrencies": ["USDT", "USDC"],
   "criticalMarkets": ["USDCUSDT", "USDTUSDC"],
   "enableAssetLocking": true,
   "orderExecutionTimeMs": 1500,
   "maxConcurrentOrdersPerAsset": 1,
   "orderTimeoutSeconds": 30,
-  "enableOrderSimulation": false,
+  "enableOrderSimulation": true,
   "logLevel": "debug",
   "tradingFees": {
-    "USDT": 0.002,
-    "USDC": 0.002
+    "USDT": 0.0015,
+    "USDC": 0.0015
   },
-  "defaultTradingFee": 0.002,
+  "defaultTradingFee": 0.0015,
   "fokOrderSettings": {
     "pollingFrequencyHz": 2.5,
     "orderTimeoutSeconds": 2,

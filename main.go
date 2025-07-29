@@ -69,7 +69,7 @@ func main() {
 		"User-Agent":   "TriangularArbitrageBot/2.0",
 	}).setClient(&http.Client{
 		Timeout: 30 * time.Second,
-	}).SetWebSocketUrl("socket.coinex.com")
+	})
 
 	// Initialize exchange client
 	coinexClient := NewCoinexClient(httpClient, config)
@@ -106,6 +106,13 @@ func main() {
 		log.Fatalf("Failed to connect to WebSocket: %v", err)
 	}
 	log.Println("WebSocket connected successfully")
+
+	// Test WebSocket connection with a single subscription
+	log.Println("Testing WebSocket connection...")
+	if err := httpClient.TestWebSocketConnection(); err != nil {
+		log.Printf("WebSocket test failed: %v", err)
+		log.Println("Continuing anyway...")
+	}
 
 	// Get markets suitable for triangular arbitrage
 	log.Println("Discovering arbitrage markets...")
@@ -298,13 +305,20 @@ func main() {
 	// Start simple periodic metrics logging
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
-		priceTicker := time.NewTicker(2 * time.Minute)         // Log prices less frequently
-		debugTicker := time.NewTicker(15 * time.Second)        // Debug market data status frequently
-		criticalDataTicker := time.NewTicker(10 * time.Second) // Fetch critical data every 10 seconds
+		priceTicker := time.NewTicker(2 * time.Minute)          // Log prices less frequently
+		debugTicker := time.NewTicker(15 * time.Second)         // Debug market data status frequently
+		criticalDataTicker := time.NewTicker(10 * time.Second)  // Fetch critical data every 10 seconds
+		dataValidationTicker := time.NewTicker(1 * time.Minute) // Validate data accuracy every minute
+		wsHealthTicker := time.NewTicker(30 * time.Second)      // Monitor WebSocket health
 		defer ticker.Stop()
 		defer priceTicker.Stop()
 		defer debugTicker.Stop()
 		defer criticalDataTicker.Stop()
+		defer dataValidationTicker.Stop()
+		defer wsHealthTicker.Stop()
+
+		lastMessageCount := int64(0)
+		lastHealthCheck := time.Now()
 
 		for {
 			select {
@@ -324,6 +338,19 @@ func main() {
 			case <-criticalDataTicker.C:
 				// Critical markets are assumed to exist - no periodic refresh needed
 				log.Printf("Critical markets assumed to exist: %v", config.CriticalMarkets)
+			case <-dataValidationTicker.C:
+				// Validate WebSocket data accuracy against REST API
+				httpClient.ValidateWebSocketDataAccuracy(arbitrageMarkets)
+			case <-wsHealthTicker.C:
+				// Monitor WebSocket data flow
+				currentMessageCount := metrics.GetSnapshot().MessagesProcessed
+				if currentMessageCount == lastMessageCount && time.Since(lastHealthCheck) > 2*time.Minute {
+					log.Printf(" WARNING: No WebSocket messages received in last 2 minutes!")
+					log.Printf("   Last message count: %d | Current: %d", lastMessageCount, currentMessageCount)
+					log.Printf("   WebSocket connected: %v", httpClient.IsWebSocketConnected())
+				}
+				lastMessageCount = currentMessageCount
+				lastHealthCheck = time.Now()
 			}
 		}
 	}()

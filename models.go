@@ -31,6 +31,7 @@ func (d *Depth) UnmarshalJSON(data []byte) error {
 type OrderBook struct {
 	Asks      []Depth   `json:"asks"`
 	Bids      []Depth   `json:"bids"`
+	Latest    float64   `json:"latest"` // Latest price from ticker API
 	Timestamp time.Time `json:"timestamp"`
 	Market    string    `json:"market"`
 }
@@ -215,26 +216,26 @@ func (m *Metrics) AddPnL(pnl float64) {
 func (m *Metrics) GetSnapshot() *Metrics {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	// Create a new metrics instance for the snapshot
 	snapshot := &Metrics{
 		StartTime:             m.StartTime,
 		OpportunitiesDetected: m.OpportunitiesDetected,
 		TradesExecuted:        m.TradesExecuted,
-		TotalPnL:             m.TotalPnL,
+		TotalPnL:              m.TotalPnL,
 		AvgExecutionTime:      m.AvgExecutionTime,
 		LastUpdateTime:        m.LastUpdateTime,
 		ActiveConnections:     m.ActiveConnections,
 		MessagesProcessed:     m.MessagesProcessed,
-		ErrorCount:           m.ErrorCount,
+		ErrorCount:            m.ErrorCount,
 		CurrentBalance:        make(map[string]float64),
 	}
-	
+
 	// Deep copy the balance map
 	for k, v := range m.CurrentBalance {
 		snapshot.CurrentBalance[k] = v
 	}
-	
+
 	return snapshot
 }
 

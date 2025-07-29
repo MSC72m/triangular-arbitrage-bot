@@ -319,7 +319,7 @@ func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity Arbit
 	log.Printf("📤 EXECUTING FOK ORDERS SEQUENTIALLY | Attempt: %d/%d", attemptNumber, oem.config.FOKOrderSettings.MaxRetryAttempts)
 
 	// Execute Leg-1: First order
-	log.Printf(" ATTEMPTING LEG-1 | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
+	log.Printf(" ATTEMPTING LEG-1 | Market: %s | Type: %s | Amount: %.6f | Latest Price: %.8f",
 		opportunity.Path.Market1, "buy", opportunity.Volume, opportunity.Price1)
 
 	orderResultChan1 := make(chan *OrderResult, 1)
@@ -343,7 +343,7 @@ func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity Arbit
 	}
 
 	// Execute Leg-2: Second order
-	log.Printf(" ATTEMPTING LEG-2 | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
+	log.Printf(" ATTEMPTING LEG-2 | Market: %s | Type: %s | Amount: %.6f | Latest Price: %.8f",
 		opportunity.Path.Market2, "sell", opportunity.Volume, opportunity.Price2)
 
 	orderResultChan2 := make(chan *OrderResult, 1)
@@ -367,7 +367,7 @@ func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity Arbit
 	}
 
 	// Execute Leg-3: Third order
-	log.Printf(" ATTEMPTING LEG-3 | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
+	log.Printf(" ATTEMPTING LEG-3 | Market: %s | Type: %s | Amount: %.6f | Latest Price: %.8f",
 		opportunity.Path.Market3, "buy", opportunity.Volume, opportunity.Price3)
 
 	orderResultChan3 := make(chan *OrderResult, 1)
@@ -543,7 +543,7 @@ func (oem *OrderExecutionManager) reEvaluateOpportunity(originalOpportunity Arbi
 	newOpportunity.NetProfit = estimatedProfit - totalFees
 	newOpportunity.Timestamp = time.Now()
 
-	log.Printf(" PROFIT RE-EVALUATION | Original: %.6f%% | New: %.6f%% | Change: %+.6f%% | Prices: %.8f→%.8f, %.8f→%.8f, %.8f→%.8f",
+	log.Printf(" PROFIT RE-EVALUATION | Original: %.6f%% | New: %.6f%% | Change: %+.6f%% | Latest Prices: %.8f→%.8f, %.8f→%.8f, %.8f→%.8f",
 		originalOpportunity.NetProfit*100, newOpportunity.NetProfit*100,
 		(newOpportunity.NetProfit-originalOpportunity.NetProfit)*100,
 		originalOpportunity.Price1, newOpportunity.Price1,
@@ -593,19 +593,20 @@ func (ae *ArbitrageEngine) simulateExecution(opportunity ArbitrageOpportunity) {
 		return
 	}
 
-	log.Printf(" SIMULATION TRADE | Path: %s→%s→%s | Expected Profit: %.6f%% | Volume: $%.2f | Est. PnL: $%.4f | Markets: %v",
+	log.Printf(" SIMULATION TRADE | Path: %s→%s→%s | Expected Profit: %.6f%% | Volume: $%.2f | Est. PnL: $%.4f | Markets: %v | Latest Prices: %.8f, %.8f, %.8f",
 		opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3,
 		opportunity.NetProfit*100,
 		opportunity.Volume,
 		opportunity.NetProfit*opportunity.Volume,
-		markets)
+		markets,
+		opportunity.Price1, opportunity.Price2, opportunity.Price3)
 
 	// Log the three legs of the trade
-	log.Printf("    Leg 1: %s %s at price %.8f",
+	log.Printf("    Leg 1: %s %s at latest price %.8f",
 		opportunity.Path.Direction1, opportunity.Path.Market1, opportunity.Price1)
-	log.Printf("    Leg 2: %s %s at price %.8f",
+	log.Printf("    Leg 2: %s %s at latest price %.8f",
 		opportunity.Path.Direction2, opportunity.Path.Market2, opportunity.Price2)
-	log.Printf("    Leg 3: %s %s at price %.8f",
+	log.Printf("    Leg 3: %s %s at latest price %.8f",
 		opportunity.Path.Direction3, opportunity.Path.Market3, opportunity.Price3)
 
 	// Simulate execution time
@@ -1196,7 +1197,7 @@ func (ae *ArbitrageEngine) scanForOpportunities(scannerID int, scanCount int) {
 				// Detect potential loops
 				ae.detectLoop()
 
-				log.Printf("🚨 OPPORTUNITY FOUND | Scanner %d | Path: %s→%s→%s | Profit: +%.6f%% | Volume: $%.2f | Prices: %.8f, %.8f, %.8f",
+				log.Printf("🚨 OPPORTUNITY FOUND | Scanner %d | Path: %s→%s→%s | Profit: +%.6f%% | Volume: $%.2f | Latest Prices: %.8f, %.8f, %.8f",
 					scannerID,
 					path.Market1, path.Market2, path.Market3,
 					profitPercent,
@@ -1278,10 +1279,10 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 	}
 
 	// Calculate profit using the correct formula
-	roundTripRate, netProfit := ae.calculateProfit(path, price1, price2, price3, detectionStart)
+	roundTripRate, netProfit := ae.calculateProfit(path, price1, price2, price3, detectionStart, snapshot)
 
 	// Calculate volume based on configuration
-	volume := ae.calculateVolume(path, snapshot, price1, price2, price3)
+	volume := ae.calculateVolume(path, snapshot)
 	if volume <= 0 {
 		log.Printf("  INVALID VOLUME | Path: %s→%s→%s | Invalid volume: %.6f",
 			path.Market1, path.Market2, path.Market3, volume)
@@ -1291,12 +1292,13 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 	// Log calculation results based on profitability
 	if netProfit >= ae.config.ProfitThreshold {
 		// This is a profitable opportunity
-		log.Printf(" PROFITABLE PATH | %s→%s→%s | Profit: +%.8f%% | Volume: $%.2f | Prices: %.8f, %.8f, %.8f",
+		log.Printf(" PROFITABLE PATH | %s→%s→%s | Profit: +%.8f%% | Volume: $%.2f | Latest Prices: %.8f, %.8f, %.8f",
 			path.Market1, path.Market2, path.Market3,
 			netProfit*100, volume, price1, price2, price3)
 	}
 
-	return &ArbitrageOpportunity{
+	// Create opportunity with nil checks for market data
+	opportunity := &ArbitrageOpportunity{
 		Path:            path,
 		EstimatedProfit: roundTripRate - 1.0, // Estimated profit is the profit before fees
 		NetProfit:       netProfit,
@@ -1306,10 +1308,20 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 		Price3:          price3,
 		Timestamp:       time.Now(),
 		DetectionTime:   time.Since(detectionStart),
-		Market1Data:     *market1Data,
-		Market2Data:     *market2Data,
-		Market3Data:     *market3Data,
 	}
+
+	// Only set market data if it's not nil
+	if market1Data != nil {
+		opportunity.Market1Data = *market1Data
+	}
+	if market2Data != nil {
+		opportunity.Market2Data = *market2Data
+	}
+	if market3Data != nil {
+		opportunity.Market3Data = *market3Data
+	}
+
+	return opportunity
 }
 
 // validateMarketData validates that all required market data is available
@@ -1318,7 +1330,7 @@ func (ae *ArbitrageEngine) validateMarketData(path TriangularPath, snapshot map[
 	market2Data, ok2 := snapshot[path.Market2]
 	market3Data, ok3 := snapshot[path.Market3]
 
-	// This should no longer happen since we now filter to only valid markets
+	// Check if markets exist in snapshot
 	if !ok1 || !ok2 || !ok3 {
 		// Check if any of the missing markets are critical markets (should be ignored)
 		missing := []string{}
@@ -1359,56 +1371,63 @@ func (ae *ArbitrageEngine) validateMarketData(path TriangularPath, snapshot map[
 		}
 	}
 
-	if len(market1Data.Asks) == 0 || len(market1Data.Bids) == 0 ||
-		len(market2Data.Asks) == 0 || len(market2Data.Bids) == 0 ||
-		len(market3Data.Asks) == 0 || len(market3Data.Bids) == 0 {
+	// For opportunity detection, we only need latest prices
+	// Bid/ask data is only needed for dynamic volume calculation
+	// Check if we have latest prices or can fetch them
+	hasLatestPrices := true
 
-		// Check if any of the empty markets are critical markets (should be ignored)
-		emptyMarkets := []string{}
-		hasCriticalEmpty := false
+	if market1Data == nil || market1Data.Latest <= 0 {
+		// Try to fetch latest price for market1
+		if latestPrice, err := ae.coinexClient.httpClient.GetMarketTicker(path.Market1); err == nil {
+			if market1Data == nil {
+				market1Data = &OrderBook{Market: path.Market1}
+			}
+			market1Data.Latest = latestPrice
+		} else {
+			hasLatestPrices = false
+		}
+	}
 
-		if len(market1Data.Asks) == 0 || len(market1Data.Bids) == 0 {
-			if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market1) {
-				hasCriticalEmpty = true
-			} else {
-				emptyMarkets = append(emptyMarkets, path.Market1)
+	if market2Data == nil || market2Data.Latest <= 0 {
+		// Try to fetch latest price for market2
+		if latestPrice, err := ae.coinexClient.httpClient.GetMarketTicker(path.Market2); err == nil {
+			if market2Data == nil {
+				market2Data = &OrderBook{Market: path.Market2}
 			}
+			market2Data.Latest = latestPrice
+		} else {
+			hasLatestPrices = false
 		}
-		if len(market2Data.Asks) == 0 || len(market2Data.Bids) == 0 {
-			if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market2) {
-				hasCriticalEmpty = true
-			} else {
-				emptyMarkets = append(emptyMarkets, path.Market2)
-			}
-		}
-		if len(market3Data.Asks) == 0 || len(market3Data.Bids) == 0 {
-			if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market3) {
-				hasCriticalEmpty = true
-			} else {
-				emptyMarkets = append(emptyMarkets, path.Market3)
-			}
-		}
+	}
 
-		// If only critical markets are empty, ignore the check and continue processing
-		if hasCriticalEmpty && len(emptyMarkets) == 0 {
-			// Critical markets assumed to exist - continue processing without logging
-		} else if len(emptyMarkets) > 0 {
-			// Reduce logging frequency for empty orderbooks to avoid spam
-			if detectionStart.UnixNano()%50000 == 0 { // Log only ~0.002% of these
-				log.Printf("  EMPTY ORDERBOOK | Path: %s→%s→%s | Empty markets: %v",
-					path.Market1, path.Market2, path.Market3, emptyMarkets)
+	if market3Data == nil || market3Data.Latest <= 0 {
+		// Try to fetch latest price for market3
+		if latestPrice, err := ae.coinexClient.httpClient.GetMarketTicker(path.Market3); err == nil {
+			if market3Data == nil {
+				market3Data = &OrderBook{Market: path.Market3}
 			}
-			return nil, nil, nil, false
+			market3Data.Latest = latestPrice
+		} else {
+			hasLatestPrices = false
 		}
+	}
+
+	if !hasLatestPrices {
+		// Reduce logging frequency for missing latest prices to avoid spam
+		if detectionStart.UnixNano()%50000 == 0 { // Log only ~0.002% of these
+			log.Printf("  MISSING LATEST PRICES | Path: %s→%s→%s | Cannot fetch latest prices",
+				path.Market1, path.Market2, path.Market3)
+		}
+		return nil, nil, nil, false
 	}
 
 	return market1Data, market2Data, market3Data, true
 }
 
-// calculatePrices calculates the prices for each market in the arbitrage path
+// calculatePrices calculates the prices for each market in the arbitrage path using latest prices
 func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, market2Data, market3Data *OrderBook, detectionStart time.Time) (float64, float64, float64, error) {
-	// Helper function to get price for a market, handling critical markets with assumed prices
-	getPrice := func(market string, marketData *OrderBook, direction string) (float64, error) {
+	// Helper function to get latest price for a market
+	getLatestPrice := func(market string, marketData *OrderBook) (float64, error) {
 		// Check if this is a critical market with empty order book
 		if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(market) {
 			// For critical markets, always use the assumed price
@@ -1417,43 +1436,50 @@ func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, mar
 					log.Printf("  CRITICAL MARKET PRICE | %s | Using assumed price: %.8f", market, assumedPrice)
 				}
 				return assumedPrice, nil
+			} else {
+				// Debug: Log when critical market doesn't have assumed price
+				if detectionStart.UnixNano()%100000 == 0 { // Log occasionally
+					log.Printf("  CRITICAL MARKET MISSING PRICE | %s | No assumed price found", market)
+				}
+			}
+		} else {
+			// Debug: Log when market is not considered critical
+			if detectionStart.UnixNano()%100000 == 0 { // Log occasionally
+				log.Printf("  NOT CRITICAL MARKET | %s | Will use REST API", market)
 			}
 		}
 
-		// Use actual order book data
-		if direction == "buy" {
-			if len(marketData.Asks) == 0 {
-				return 0, fmt.Errorf("no asks available for %s", market)
-			}
-			price, err := strconv.ParseFloat(marketData.Asks[0].Price, 64)
+		// Use latest price from market data
+		if marketData == nil || marketData.Latest <= 0 {
+			// Try to fetch latest price via REST API
+			latestPrice, err := ae.coinexClient.httpClient.GetMarketTicker(market)
 			if err != nil {
-				return 0, fmt.Errorf("invalid ask price for %s: %v", market, err)
+				return 0, fmt.Errorf("failed to get latest price for %s: %v", market, err)
 			}
+
+			// Update the market data with the latest price
+			if marketData != nil {
+				marketData.Latest = latestPrice
+			}
+
 			if detectionStart.UnixNano()%100000 == 0 { // Log occasionally
-				log.Printf("  ORDER BOOK PRICE | %s | Buy direction | Ask price: %.8f", market, price)
+				log.Printf("  LATEST PRICE | %s | Fetched via API: %.8f", market, latestPrice)
 			}
-			return price, nil
-		} else {
-			if len(marketData.Bids) == 0 {
-				return 0, fmt.Errorf("no bids available for %s", market)
-			}
-			price, err := strconv.ParseFloat(marketData.Bids[0].Price, 64)
-			if err != nil {
-				return 0, fmt.Errorf("invalid bid price for %s: %v", market, err)
-			}
-			if detectionStart.UnixNano()%100000 == 0 { // Log occasionally
-				log.Printf("  ORDER BOOK PRICE | %s | Sell direction | Bid price: %.8f", market, price)
-			}
-			return price, nil
+			return latestPrice, nil
 		}
+
+		if detectionStart.UnixNano()%100000 == 0 { // Log occasionally
+			log.Printf("  LATEST PRICE | %s | From cache: %.8f", market, marketData.Latest)
+		}
+		return marketData.Latest, nil
 	}
 
-	// Get relevant prices based on direction
+	// Get latest prices for all markets
 	var price1, price2, price3 float64
 	var err error
 
-	// Get price for market 1
-	price1, err = getPrice(path.Market1, market1Data, path.Direction1)
+	// Get latest price for market 1
+	price1, err = getLatestPrice(path.Market1, market1Data)
 	if err != nil {
 		// Only log for non-critical markets
 		if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market1) {
@@ -1463,8 +1489,8 @@ func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, mar
 		return 0, 0, 0, err
 	}
 
-	// Get price for market 2
-	price2, err = getPrice(path.Market2, market2Data, path.Direction2)
+	// Get latest price for market 2
+	price2, err = getLatestPrice(path.Market2, market2Data)
 	if err != nil {
 		// Only log for non-critical markets
 		if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market2) {
@@ -1474,8 +1500,8 @@ func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, mar
 		return 0, 0, 0, err
 	}
 
-	// Get price for market 3
-	price3, err = getPrice(path.Market3, market3Data, path.Direction3)
+	// Get latest price for market 3
+	price3, err = getLatestPrice(path.Market3, market3Data)
 	if err != nil {
 		// Only log for non-critical markets
 		if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market3) {
@@ -1496,14 +1522,25 @@ func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, mar
 }
 
 // calculateProfit calculates the profit using the correct formula
-func (ae *ArbitrageEngine) calculateProfit(path TriangularPath, price1, price2, price3 float64, detectionStart time.Time) (float64, float64) {
+func (ae *ArbitrageEngine) calculateProfit(path TriangularPath, price1, price2, price3 float64, detectionStart time.Time, snapshot map[string]*OrderBook) (float64, float64) {
 	// Use the correct formula: profit := (qty1 * price1) * price2 * price3 / initialQty - 1
 	// For triangular arbitrage, we need to calculate the actual quantities at each step
+	var initialQty float64
 
 	// Start with initial quantity (1 unit of base currency)
-	initialQty := 1.0
+	if ae.config.OrderExecutionSettings.OrderAmountType == "static" {
+		initialQty = ae.calculateVolume(path, snapshot)
+	} else {
+		// Dynamic mode: calculate based on order book depth and available balance
+		initialQty = ae.calculateVolume(path, snapshot)
+	}
 
-	// Calculate quantities at each step based on direction
+	// Get trading fees for each market
+	fee1 := ae.getTradingFee(path.Market1)
+	fee2 := ae.getTradingFee(path.Market2)
+	fee3 := ae.getTradingFee(path.Market3)
+
+	// Calculate quantities at each step based on direction, accounting for fees
 	var qty1, qty2, qty3 float64
 
 	// For triangular arbitrage paths like USDT→Asset→USDC→USDT:
@@ -1513,58 +1550,60 @@ func (ae *ArbitrageEngine) calculateProfit(path TriangularPath, price1, price2, 
 
 	if path.Direction1 == "buy" {
 		// Buy: spend initialQty to get qty1 = initialQty / price1
-		qty1 = initialQty / price1
+		// Apply fee: qty1 = (initialQty * (1 - fee1)) / price1
+		qty1 = (initialQty * (1.0 - fee1)) / price1
 	} else {
 		// Sell: sell initialQty to get qty1 = initialQty * price1
-		qty1 = initialQty * price1
+		// Apply fee: qty1 = initialQty * price1 * (1.0 - fee1)
+		qty1 = initialQty * price1 * (1.0 - fee1)
 	}
 
 	if path.Direction2 == "buy" {
 		// Buy: spend qty1 to get qty2 = qty1 / price2
-		qty2 = qty1 / price2
+		// Apply fee: qty2 = (qty1 * (1 - fee2)) / price2
+		qty2 = (qty1 * (1.0 - fee2)) / price2
 	} else {
 		// Sell: sell qty1 to get qty2 = qty1 * price2
-		qty2 = qty1 * price2
+		// Apply fee: qty2 = qty1 * price2 * (1.0 - fee2)
+		qty2 = qty1 * price2 * (1.0 - fee2)
 	}
 
 	if path.Direction3 == "buy" {
 		// Buy: spend qty2 to get qty3 = qty2 / price3
-		qty3 = qty2 / price3
+		// Apply fee: qty3 = (qty2 * (1 - fee3)) / price3
+		qty3 = (qty2 * (1.0 - fee3)) / price3
 	} else {
 		// Sell: sell qty2 to get qty3 = qty2 * price3
-		qty3 = qty2 * price3
+		// Apply fee: qty3 = qty2 * price3 * (1.0 - fee3)
+		qty3 = qty2 * price3 * (1.0 - fee3)
 	}
 
 	// Calculate final profit using the correct formula
-	// qty3 is the final quantity after completing the triangular arbitrage
+	// qty3 is the final quantity after completing the triangular arbitrage (with fees already deducted)
 	roundTripRate := qty3 / initialQty
 
-	// Calculate fees
-	fee1 := ae.getTradingFee(path.Market1)
-	fee2 := ae.getTradingFee(path.Market2)
-	fee3 := ae.getTradingFee(path.Market3)
-	totalFees := fee1 + fee2 + fee3
-
-	netProfit := roundTripRate - 1.0 - totalFees // Net profit is the profit after fees
+	// Net profit is simply the round trip rate minus 1 (since fees are already accounted for in qty3)
+	netProfit := roundTripRate - 1.0
 
 	// Debug logging for profit calculation
 	if detectionStart.UnixNano()%10000 == 0 { // Log ~0.01% of calculations
-		log.Printf("Path: %s→%s→%s | RoundTrip: %.8f | EstProfit: %.8f%% | Fees: %.8f%% (%.4f%% + %.4f%% + %.4f%%) | NetProfit: %.8f%% | Threshold: %.8f%% | Prices: %.8f, %.8f, %.8f | Directions: %s, %s, %s",
+		log.Printf("Path: %s→%s→%s | RoundTrip: %.8f | NetProfit: %.8f%% | Fees: %.4f%%, %.4f%%, %.4f%% | Latest Prices: %.8f, %.8f, %.8f | Directions: %s, %s, %s",
 			path.Market1, path.Market2, path.Market3,
-			roundTripRate, netProfit*100, totalFees*100, fee1*100, fee2*100, fee3*100, netProfit*100, ae.config.ProfitThreshold*100, price1, price2, price3, path.Direction1, path.Direction2, path.Direction3)
+			roundTripRate, netProfit*100, fee1*100, fee2*100, fee3*100, price1, price2, price3, path.Direction1, path.Direction2, path.Direction3)
 	}
 
 	return roundTripRate, netProfit
 }
 
 // calculateVolume calculates the volume based on configuration
-func (ae *ArbitrageEngine) calculateVolume(path TriangularPath, snapshot map[string]*OrderBook, price1, price2, price3 float64) float64 {
+func (ae *ArbitrageEngine) calculateVolume(path TriangularPath, snapshot map[string]*OrderBook) float64 {
 	var volume float64
 	if ae.config.OrderExecutionSettings.OrderAmountType == "static" {
 		// Use static order amount from config - no dynamic calculation needed
 		volume = ae.config.OrderExecutionSettings.StaticOrderAmount
 	} else {
 		// Dynamic mode: calculate based on order book depth and available balance
+		// This is the only place where we still need bid/ask data
 		availableBalance := ae.config.OrderExecutionSettings.AccountBalance
 
 		// Calculate volume based on order book depth at target price levels
@@ -1610,6 +1649,12 @@ func (ae *ArbitrageEngine) calculateMaxVolumeFromOrderBook(path TriangularPath, 
 			availableVolume = ae.calculateAvailableVolumeFromBids(marketData)
 		}
 
+		// If no bid/ask data available, use a default volume based on latest price
+		if availableVolume == 0 && marketData.Latest > 0 {
+			// Use a conservative default volume based on latest price
+			availableVolume = 100.0 / marketData.Latest // $100 worth at latest price
+		}
+
 		// Apply maxVolumeFraction
 		availableVolume *= ae.config.OrderExecutionSettings.MaxVolumeFraction
 
@@ -1630,6 +1675,11 @@ func (ae *ArbitrageEngine) calculateMaxVolumeFromOrderBook(path TriangularPath, 
 // calculateAvailableVolumeFromAsks calculates available volume from ask orders
 func (ae *ArbitrageEngine) calculateAvailableVolumeFromAsks(marketData *OrderBook) float64 {
 	var totalVolume float64
+
+	// Check if we have ask data
+	if marketData == nil || len(marketData.Asks) == 0 {
+		return 0 // No ask data available
+	}
 
 	// Sum up available volume from top ask levels
 	for _, ask := range marketData.Asks {
@@ -1652,6 +1702,11 @@ func (ae *ArbitrageEngine) calculateAvailableVolumeFromAsks(marketData *OrderBoo
 // calculateAvailableVolumeFromBids calculates available volume from bid orders
 func (ae *ArbitrageEngine) calculateAvailableVolumeFromBids(marketData *OrderBook) float64 {
 	var totalVolume float64
+
+	// Check if we have bid data
+	if marketData == nil || len(marketData.Bids) == 0 {
+		return 0 // No bid data available
+	}
 
 	// Sum up available volume from top bid levels
 	for _, bid := range marketData.Bids {

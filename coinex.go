@@ -1791,6 +1791,14 @@ func NewCriticalMarketPriceManager(coinexClient *coinexClient, config *Config) *
 		}
 	}
 
+	// Extract keys for logging
+	keys := make([]string, 0, len(assumedPrices))
+	for key := range assumedPrices {
+		keys = append(keys, key)
+	}
+
+	log.Printf("🔧 CRITICAL MARKET PRICE MANAGER | Initialized with %d markets: %v", len(assumedPrices), keys)
+
 	return &CriticalMarketPriceManager{
 		config:        config,
 		assumedPrices: assumedPrices,

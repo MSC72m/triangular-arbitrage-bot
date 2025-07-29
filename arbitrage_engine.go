@@ -1313,89 +1313,78 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 		}
 	}
 
+	// Helper function to get price for a market, handling critical markets with assumed prices
+	getPrice := func(market string, marketData *OrderBook, direction string) (float64, error) {
+		// Check if this is a critical market with empty order book
+		if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(market) {
+			if direction == "buy" && len(marketData.Asks) == 0 {
+				// Use assumed price for critical market
+				if assumedPrice, exists := ae.coinexClient.criticalMarketPriceManager.GetAssumedPrice(market); exists {
+					return assumedPrice, nil
+				}
+			} else if direction == "sell" && len(marketData.Bids) == 0 {
+				// Use assumed price for critical market
+				if assumedPrice, exists := ae.coinexClient.criticalMarketPriceManager.GetAssumedPrice(market); exists {
+					return assumedPrice, nil
+				}
+			}
+		}
+
+		// Use actual order book data
+		if direction == "buy" {
+			if len(marketData.Asks) == 0 {
+				return 0, fmt.Errorf("no asks available for %s", market)
+			}
+			return strconv.ParseFloat(marketData.Asks[0].Price, 64)
+		} else {
+			if len(marketData.Bids) == 0 {
+				return 0, fmt.Errorf("no bids available for %s", market)
+			}
+			return strconv.ParseFloat(marketData.Bids[0].Price, 64)
+		}
+	}
+
 	// Get relevant prices based on direction
 	var price1, price2, price3 float64
 	var err error
 
-	// Check bounds before accessing array elements
-	if path.Direction1 == "buy" {
-		if len(market1Data.Asks) == 0 {
-			// Skip check for critical markets
-			if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market1) {
-				log.Printf("⚠️  EMPTY ASKS | Path: %s→%s→%s | Market1: %s has no asks",
-					path.Market1, path.Market2, path.Market3, path.Market1)
-				return nil
-			}
+	// Get price for market 1
+	price1, err = getPrice(path.Market1, market1Data, path.Direction1)
+	if err != nil {
+		// Only log for non-critical markets
+		if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market1) {
+			log.Printf("⚠️  PRICE ERROR | Path: %s→%s→%s | Market1: %s - %v",
+				path.Market1, path.Market2, path.Market3, path.Market1, err)
 		}
-		price1, err = strconv.ParseFloat(market1Data.Asks[0].Price, 64)
-	} else {
-		if len(market1Data.Bids) == 0 {
-			// Skip check for critical markets
-			if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market1) {
-				log.Printf("⚠️  EMPTY BIDS | Path: %s→%s→%s | Market1: %s has no bids",
-					path.Market1, path.Market2, path.Market3, path.Market1)
-				return nil
-			}
-		}
-		price1, err = strconv.ParseFloat(market1Data.Bids[0].Price, 64)
-	}
-	if err != nil || price1 <= 0 {
-		log.Printf("⚠️  INVALID PRICE | Path: %s→%s→%s | Invalid price1: %s (error: %v)",
-			path.Market1, path.Market2, path.Market3, market1Data.Asks[0].Price, err)
 		return nil
 	}
 
-	if path.Direction2 == "buy" {
-		if len(market2Data.Asks) == 0 {
-			// Skip check for critical markets
-			if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market2) {
-				log.Printf("⚠️  EMPTY ASKS | Path: %s→%s→%s | Market2: %s has no asks",
-					path.Market1, path.Market2, path.Market3, path.Market2)
-				return nil
-			}
+	// Get price for market 2
+	price2, err = getPrice(path.Market2, market2Data, path.Direction2)
+	if err != nil {
+		// Only log for non-critical markets
+		if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market2) {
+			log.Printf("⚠️  PRICE ERROR | Path: %s→%s→%s | Market2: %s - %v",
+				path.Market1, path.Market2, path.Market3, path.Market2, err)
 		}
-		price2, err = strconv.ParseFloat(market2Data.Asks[0].Price, 64)
-	} else {
-		if len(market2Data.Bids) == 0 {
-			// Skip check for critical markets
-			if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market2) {
-				log.Printf("⚠️  EMPTY BIDS | Path: %s→%s→%s | Market2: %s has no bids",
-					path.Market1, path.Market2, path.Market3, path.Market2)
-				return nil
-			}
-		}
-		price2, err = strconv.ParseFloat(market2Data.Bids[0].Price, 64)
-	}
-	if err != nil || price2 <= 0 {
-		log.Printf("⚠️  INVALID PRICE | Path: %s→%s→%s | Invalid price2: %s (error: %v)",
-			path.Market1, path.Market2, path.Market3, market2Data.Asks[0].Price, err)
 		return nil
 	}
 
-	if path.Direction3 == "buy" {
-		if len(market3Data.Asks) == 0 {
-			// Skip check for critical markets
-			if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market3) {
-				log.Printf("⚠️  EMPTY ASKS | Path: %s→%s→%s | Market3: %s has no asks",
-					path.Market1, path.Market2, path.Market3, path.Market3)
-				return nil
-			}
+	// Get price for market 3
+	price3, err = getPrice(path.Market3, market3Data, path.Direction3)
+	if err != nil {
+		// Only log for non-critical markets
+		if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market3) {
+			log.Printf("⚠️  PRICE ERROR | Path: %s→%s→%s | Market3: %s - %v",
+				path.Market1, path.Market2, path.Market3, path.Market3, err)
 		}
-		price3, err = strconv.ParseFloat(market3Data.Asks[0].Price, 64)
-	} else {
-		if len(market3Data.Bids) == 0 {
-			// Skip check for critical markets
-			if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market3) {
-				log.Printf("⚠️  EMPTY BIDS | Path: %s→%s→%s | Market3: %s has no bids",
-					path.Market1, path.Market2, path.Market3, path.Market3)
-				return nil
-			}
-		}
-		price3, err = strconv.ParseFloat(market3Data.Bids[0].Price, 64)
+		return nil
 	}
-	if err != nil || price3 <= 0 {
-		log.Printf("⚠️  INVALID PRICE | Path: %s→%s→%s | Invalid price3: %s (error: %v)",
-			path.Market1, path.Market2, path.Market3, market3Data.Asks[0].Price, err)
+
+	// Validate prices
+	if price1 <= 0 || price2 <= 0 || price3 <= 0 {
+		log.Printf("⚠️  INVALID PRICE | Path: %s→%s→%s | Prices: %.8f, %.8f, %.8f",
+			path.Market1, path.Market2, path.Market3, price1, price2, price3)
 		return nil
 	}
 
@@ -1418,9 +1407,8 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 		roundTripRate = price1 * (1.0 / price2) * price3
 	} else {
 		log.Printf("⚠️  INVALID DIRECTION | Path: %s→%s→%s | Invalid direction combination: %s, %s, %s",
-			path.Market1, path.Market2, path.Market3,
-			path.Direction1, path.Direction2, path.Direction3)
-		return nil // Invalid direction combination
+			path.Market1, path.Market2, path.Market3, path.Direction1, path.Direction2, path.Direction3)
+		return nil
 	}
 
 	estimatedProfit := roundTripRate - 1.0

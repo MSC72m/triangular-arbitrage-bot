@@ -1723,13 +1723,27 @@ func (c *coinexClient) GetQuoteCurrencyMarkets() []string {
 
 // CriticalMarketPriceManager handles critical market data efficiently
 type CriticalMarketPriceManager struct {
-	config *Config
+	config        *Config
+	assumedPrices map[string]float64 // Critical market -> assumed price
 }
 
 // NewCriticalMarketPriceManager creates a new critical market price manager
 func NewCriticalMarketPriceManager(coinexClient *coinexClient, config *Config) *CriticalMarketPriceManager {
+	// Initialize assumed prices for critical markets
+	assumedPrices := make(map[string]float64)
+	for _, market := range config.CriticalMarkets {
+		// For stablecoin pairs like USDCUSDT, assume price of 1.0
+		if strings.Contains(market, "USDC") && strings.Contains(market, "USDT") {
+			assumedPrices[market] = 1.0
+		} else {
+			// For other critical markets, use a reasonable default
+			assumedPrices[market] = 1.0
+		}
+	}
+
 	return &CriticalMarketPriceManager{
-		config: config,
+		config:        config,
+		assumedPrices: assumedPrices,
 	}
 }
 
@@ -1746,6 +1760,14 @@ func (cmm *CriticalMarketPriceManager) IsCriticalMarket(market string) bool {
 // AssumeCriticalMarketExists returns true for critical markets (no checks needed)
 func (cmm *CriticalMarketPriceManager) AssumeCriticalMarketExists(market string) bool {
 	return cmm.IsCriticalMarket(market)
+}
+
+// GetAssumedPrice returns the assumed price for a critical market
+func (cmm *CriticalMarketPriceManager) GetAssumedPrice(market string) (float64, bool) {
+	if price, exists := cmm.assumedPrices[market]; exists {
+		return price, true
+	}
+	return 0.0, false
 }
 
 // GetCriticalMarketSnapshot returns empty snapshot for critical markets (we don't need price data)

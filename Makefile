@@ -46,6 +46,8 @@ run: build
 	@echo "Running $(BINARY_NAME)..."
 	./$(BUILD_DIR)/$(BINARY_NAME)
 
+
+
 # Run without building (if binary exists)
 .PHONY: run-only
 run-only:

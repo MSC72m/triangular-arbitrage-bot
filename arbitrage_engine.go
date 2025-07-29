@@ -1324,51 +1324,32 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 	return opportunity
 }
 
-// validateMarketData validates that all required market data is available
+// validateMarketData validates that we have sufficient market data for opportunity detection
 func (ae *ArbitrageEngine) validateMarketData(path TriangularPath, snapshot map[string]*OrderBook, detectionStart time.Time) (*OrderBook, *OrderBook, *OrderBook, bool) {
-	market1Data, ok1 := snapshot[path.Market1]
-	market2Data, ok2 := snapshot[path.Market2]
-	market3Data, ok3 := snapshot[path.Market3]
+	// Get market data from snapshot
+	market1Data := snapshot[path.Market1]
+	market2Data := snapshot[path.Market2]
+	market3Data := snapshot[path.Market3]
 
-	// Check if markets exist in snapshot
-	if !ok1 || !ok2 || !ok3 {
-		// Check if any of the missing markets are critical markets (should be ignored)
-		missing := []string{}
-		hasCriticalMissing := false
+	// Check if we have order book data for volume calculation
+	hasOrderBookData := true
+	if market1Data == nil || len(market1Data.Bids) == 0 || len(market1Data.Asks) == 0 {
+		hasOrderBookData = false
+	}
+	if market2Data == nil || len(market2Data.Bids) == 0 || len(market2Data.Asks) == 0 {
+		hasOrderBookData = false
+	}
+	if market3Data == nil || len(market3Data.Bids) == 0 || len(market3Data.Asks) == 0 {
+		hasOrderBookData = false
+	}
 
-		if !ok1 {
-			if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market1) {
-				hasCriticalMissing = true
-			} else {
-				missing = append(missing, path.Market1)
-			}
+	if !hasOrderBookData {
+		// Reduce logging frequency for missing order book data to avoid spam
+		if detectionStart.UnixNano()%50000 == 0 { // Log only ~0.002% of these
+			log.Printf("  MISSING ORDER BOOK DATA | Path: %s→%s→%s | Cannot calculate volume",
+				path.Market1, path.Market2, path.Market3)
 		}
-		if !ok2 {
-			if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market2) {
-				hasCriticalMissing = true
-			} else {
-				missing = append(missing, path.Market2)
-			}
-		}
-		if !ok3 {
-			if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(path.Market3) {
-				hasCriticalMissing = true
-			} else {
-				missing = append(missing, path.Market3)
-			}
-		}
-
-		// If only critical markets are missing, ignore the check
-		if hasCriticalMissing && len(missing) == 0 {
-			// Critical markets assumed to exist - continue processing
-		} else if len(missing) > 0 {
-			// Reduced logging frequency to avoid spam
-			if detectionStart.UnixNano()%10000 == 0 { // Log ~0.01% of these
-				log.Printf("  TEMP MISSING | Path: %s→%s→%s | Missing: %v (temporary data gap)",
-					path.Market1, path.Market2, path.Market3, missing)
-			}
-			return nil, nil, nil, false
-		}
+		return nil, nil, nil, false
 	}
 
 	// For opportunity detection, we only need latest prices
@@ -1376,40 +1357,51 @@ func (ae *ArbitrageEngine) validateMarketData(path TriangularPath, snapshot map[
 	// Check if we have latest prices or can fetch them
 	hasLatestPrices := true
 
-	if market1Data == nil || market1Data.Latest <= 0 {
-		// Try to fetch latest price for market1
-		if latestPrice, err := ae.coinexClient.httpClient.GetMarketTicker(path.Market1); err == nil {
-			if market1Data == nil {
-				market1Data = &OrderBook{Market: path.Market1}
+	// Helper function to get or fetch latest price for a market
+	getOrFetchLatestPrice := func(market string, marketData *OrderBook) (*OrderBook, bool) {
+		// Check if this is a critical market
+		if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(market) {
+			// For critical markets, use assumed price
+			if assumedPrice, exists := ae.coinexClient.criticalMarketPriceManager.GetAssumedPrice(market); exists {
+				if marketData == nil {
+					marketData = &OrderBook{Market: market}
+				}
+				marketData.Latest = assumedPrice
+				return marketData, true
 			}
-			market1Data.Latest = latestPrice
-		} else {
-			hasLatestPrices = false
+			return nil, false
 		}
+
+		// For non-critical markets, try to fetch if missing
+		if marketData == nil || marketData.Latest <= 0 {
+			if latestPrice, err := ae.coinexClient.httpClient.GetMarketTicker(market); err == nil {
+				if marketData == nil {
+					marketData = &OrderBook{Market: market}
+				}
+				marketData.Latest = latestPrice
+				return marketData, true
+			} else {
+				return nil, false
+			}
+		}
+		return marketData, true
 	}
 
-	if market2Data == nil || market2Data.Latest <= 0 {
-		// Try to fetch latest price for market2
-		if latestPrice, err := ae.coinexClient.httpClient.GetMarketTicker(path.Market2); err == nil {
-			if market2Data == nil {
-				market2Data = &OrderBook{Market: path.Market2}
-			}
-			market2Data.Latest = latestPrice
-		} else {
-			hasLatestPrices = false
-		}
+	// Get latest prices for all markets
+	var success bool
+	market1Data, success = getOrFetchLatestPrice(path.Market1, market1Data)
+	if !success {
+		hasLatestPrices = false
 	}
 
-	if market3Data == nil || market3Data.Latest <= 0 {
-		// Try to fetch latest price for market3
-		if latestPrice, err := ae.coinexClient.httpClient.GetMarketTicker(path.Market3); err == nil {
-			if market3Data == nil {
-				market3Data = &OrderBook{Market: path.Market3}
-			}
-			market3Data.Latest = latestPrice
-		} else {
-			hasLatestPrices = false
-		}
+	market2Data, success = getOrFetchLatestPrice(path.Market2, market2Data)
+	if !success {
+		hasLatestPrices = false
+	}
+
+	market3Data, success = getOrFetchLatestPrice(path.Market3, market3Data)
+	if !success {
+		hasLatestPrices = false
 	}
 
 	if !hasLatestPrices {
@@ -1442,30 +1434,31 @@ func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, mar
 					log.Printf("  CRITICAL MARKET MISSING PRICE | %s | No assumed price found", market)
 				}
 			}
-		} else {
-			// Debug: Log when market is not considered critical
-			if detectionStart.UnixNano()%100000 == 0 { // Log occasionally
-				log.Printf("  NOT CRITICAL MARKET | %s | Will use REST API", market)
-			}
 		}
 
 		// Use latest price from market data
 		if marketData == nil || marketData.Latest <= 0 {
-			// Try to fetch latest price via REST API
-			latestPrice, err := ae.coinexClient.httpClient.GetMarketTicker(market)
-			if err != nil {
-				return 0, fmt.Errorf("failed to get latest price for %s: %v", market, err)
-			}
+			// Only try to fetch via REST API for non-critical markets
+			if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(market) {
+				// Try to fetch latest price via REST API
+				latestPrice, err := ae.coinexClient.httpClient.GetMarketTicker(market)
+				if err != nil {
+					return 0, fmt.Errorf("failed to get latest price for %s: %v", market, err)
+				}
 
-			// Update the market data with the latest price
-			if marketData != nil {
-				marketData.Latest = latestPrice
-			}
+				// Update the market data with the latest price
+				if marketData != nil {
+					marketData.Latest = latestPrice
+				}
 
-			if detectionStart.UnixNano()%100000 == 0 { // Log occasionally
-				log.Printf("  LATEST PRICE | %s | Fetched via API: %.8f", market, latestPrice)
+				if detectionStart.UnixNano()%100000 == 0 { // Log occasionally
+					log.Printf("  LATEST PRICE | %s | Fetched via API: %.8f", market, latestPrice)
+				}
+				return latestPrice, nil
+			} else {
+				// Critical market with no data - this shouldn't happen if assumed prices are set correctly
+				return 0, fmt.Errorf("critical market %s has no assumed price", market)
 			}
-			return latestPrice, nil
 		}
 
 		if detectionStart.UnixNano()%100000 == 0 { // Log occasionally

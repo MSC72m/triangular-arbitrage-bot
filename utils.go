@@ -20,7 +20,7 @@ func logBasicMetrics(metrics *Metrics, marketDepths *MarketDepths) {
 
 	uptime := time.Since(snapshot.StartTime)
 
-	log.Printf("📊 METRICS | Uptime: %v | Markets: %d | Opportunities: %d | Trades: %d | PnL: $%.4f | Messages: %d",
+	log.Printf(" METRICS | Uptime: %v | Markets: %d | Opportunities: %d | Trades: %d | PnL: $%.4f | Messages: %d",
 		uptime.Round(time.Second),
 		len(availableMarkets),
 		snapshot.OpportunitiesDetected,
@@ -41,11 +41,11 @@ func logMarketPrices(marketDepths *MarketDepths) {
 	snapshot := marketDepths.GetSnapshot()
 
 	if len(snapshot) == 0 {
-		log.Printf("💰 PRICES | No market data available")
+		log.Printf(" PRICES | No market data available")
 		return
 	}
 
-	log.Printf("💰 MARKET PRICES:")
+	log.Printf(" MARKET PRICES:")
 	for market, orderBook := range snapshot {
 		if len(orderBook.Asks) > 0 && len(orderBook.Bids) > 0 {
 			askPrice := orderBook.Asks[0].Price
@@ -53,11 +53,11 @@ func logMarketPrices(marketDepths *MarketDepths) {
 			askAmount := orderBook.Asks[0].Amount
 			bidAmount := orderBook.Bids[0].Amount
 
-			log.Printf("   📈 %s | Ask: %s (Vol: %s) | Bid: %s (Vol: %s) | Spread: %.4f%%",
+			log.Printf("    %s | Ask: %s (Vol: %s) | Bid: %s (Vol: %s) | Spread: %.4f%%",
 				market, askPrice, askAmount, bidPrice, bidAmount,
 				calculateSpread(askPrice, bidPrice))
 		} else {
-			log.Printf("   📈 %s | No order book data", market)
+			log.Printf("    %s | No order book data", market)
 		}
 	}
 }
@@ -152,7 +152,7 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 	// Debug: Log first few successful data updates to verify WebSocket is working
 	wsDataReceivedCounter++
 	if wsDataReceivedCounter <= 5 {
-		log.Printf("📊 WebSocket Data Received | Market: %s | Bids: %d | Asks: %d",
+		log.Printf(" WebSocket Data Received | Market: %s | Bids: %d | Asks: %d",
 			marketName, len(orderBook.Bids), len(orderBook.Asks))
 	}
 
@@ -163,12 +163,12 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 func logMarketDataStatus(marketDepths *MarketDepths, expectedMarkets []string) {
 	availableMarkets := marketDepths.GetAvailableMarkets()
 
-	log.Printf("🔍 MARKET DATA STATUS:")
-	log.Printf("   📈 Expected markets: %d", len(expectedMarkets))
-	log.Printf("   📊 Available markets: %d", len(availableMarkets))
+	log.Printf(" MARKET DATA STATUS:")
+	log.Printf("    Expected markets: %d", len(expectedMarkets))
+	log.Printf("    Available markets: %d", len(availableMarkets))
 
 	// Show first few available markets
-	log.Printf("   ✅ Available: %v", availableMarkets[:Min(10, len(availableMarkets))])
+	log.Printf("    Available: %v", availableMarkets[:Min(10, len(availableMarkets))])
 
 	// Find missing markets
 	availableSet := make(map[string]bool)
@@ -184,7 +184,7 @@ func logMarketDataStatus(marketDepths *MarketDepths, expectedMarkets []string) {
 	}
 
 	if len(missing) > 0 {
-		log.Printf("   ❌ Missing: %v", missing[:Min(10, len(missing))])
+		log.Printf("    Missing: %v", missing[:Min(10, len(missing))])
 		if len(missing) > 10 {
 			log.Printf("   ... and %d more missing markets", len(missing)-10)
 		}

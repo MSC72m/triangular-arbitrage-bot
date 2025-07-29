@@ -39,6 +39,9 @@ type HttpClient struct {
 	// Market data cache with proper synchronization
 	marketData   map[string]*OrderBook
 	marketDataMu sync.RWMutex
+
+	// Rate limiting
+	rateLimiter *RateLimiter
 }
 
 func newHttpClient(config *Config) *HttpClient {
@@ -48,6 +51,7 @@ func newHttpClient(config *Config) *HttpClient {
 		wsSubscriptions: make(map[string]bool),
 		wsDataFeed:      make(chan []byte, 2000), // Buffered channel
 		marketData:      make(map[string]*OrderBook),
+		rateLimiter:     NewRateLimiter(config.RateLimitPerSecond, config.RateLimitPerSecond),
 	}
 }
 
@@ -119,9 +123,6 @@ func (c *HttpClient) ConnectWebSocket() error {
 	if c.wsConnected {
 		return nil // Already connected
 	}
-
-	fmt.Printf("🔌 Connecting to WebSocket: %s\n", c.wsUrl)
-
 	// Use existing headers for WebSocket connection
 	wsHeaders := make(http.Header)
 	for k, v := range c.headers {
@@ -143,7 +144,7 @@ func (c *HttpClient) ConnectWebSocket() error {
 
 	c.wsConn = conn
 	c.wsConnected = true
-	fmt.Printf("✅ WebSocket connected successfully\n")
+	fmt.Printf("WebSocket connected successfully\n")
 
 	// Start background processes
 	go c.readWebSocketMessages()
@@ -161,7 +162,7 @@ func (c *HttpClient) readWebSocketMessages() {
 		}
 		c.wsConnected = false
 		c.mu.Unlock()
-		fmt.Println("📪 WebSocket connection closed")
+		fmt.Println("WebSocket connection closed")
 	}()
 
 	messageCount := 0
@@ -633,15 +634,14 @@ func (c *HttpClient) GetOrderBookREST(market string) (*OrderBook, error) {
 	timestamp := time.Now().Unix()
 	params := map[string]string{
 		"url":    fmt.Sprintf("%s/market/depth?market=%s&merge=0&limit=%d&_t=%d", c.config.APIBaseURL, market, c.config.OrderBookDepthLimit, timestamp),
-		"method": "GET",
+		"method": GET,
 	}
 
-	response, err := c.performRequest(params, "GET")
+	response, err := c.performRequest(params, GET)
 	if err != nil {
 		log.Printf("❌ REST API request failed for %s: %v", market, err)
 		return nil, err
 	}
-
 
 	// Parse CoinEx depth response
 	data, ok := response["data"].(map[string]interface{})
@@ -775,6 +775,11 @@ func (c *HttpClient) getQueryString(urlStr string, params map[string]string) str
 }
 
 func (c *HttpClient) performRequest(params map[string]string, method string) (map[string]interface{}, error) {
+	// Apply rate limiting
+	if !c.rateLimiter.Allow() {
+		return nil, fmt.Errorf("rate limit exceeded")
+	}
+
 	fmt.Println("Performing request", params, method)
 	var reqBody io.Reader
 	url := params["url"]

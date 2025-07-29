@@ -16,7 +16,7 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.SetPrefix("[ARBITRAGE] ")
 
-	log.Println("🔺 Starting Triangular Arbitrage Bot...")
+	log.Println("Starting Triangular Arbitrage Bot...")
 
 	// Load configuration
 	config, err := LoadConfig("config.json")
@@ -28,39 +28,39 @@ func main() {
 		len(config.APIKey), config.QuoteCurrencies, config.ProfitThreshold*100)
 
 	if config.SimulationMode {
-		log.Println("⚠️  SIMULATION MODE ENABLED - No real trades will be executed")
-		log.Println("   📝 FOK orders will be simulated")
-		log.Println("   🔧 Enable real trading by setting simulationMode: false in config.json")
+		log.Println("SIMULATION MODE ENABLED - No real trades will be executed")
+		log.Println("   FOK orders will be simulated")
+		log.Println("   Enable real trading by setting simulationMode: false in config.json")
 	} else {
-		log.Println("🚀 REAL TRADING MODE ENABLED - FOK orders will use CoinEx API")
-		log.Printf("   ⚡ FOK Polling Frequency: %.1fHz (every %.0fms)",
+		log.Println("REAL TRADING MODE ENABLED - FOK orders will use CoinEx API")
+		log.Printf("   FOK Polling Frequency: %.1fHz (every %.0fms)",
 			config.FOKOrderSettings.PollingFrequencyHz,
 			1000/config.FOKOrderSettings.PollingFrequencyHz)
-		log.Printf("   ⏰ FOK Order Timeout: %ds", config.FOKOrderSettings.OrderTimeoutSeconds)
-		log.Printf("   🔄 Max Retry Attempts: %d", config.FOKOrderSettings.MaxRetryAttempts)
-		log.Println("   ⚠️  REAL MONEY WILL BE USED!")
+		log.Printf("   FOK Order Timeout: %ds", config.FOKOrderSettings.OrderTimeoutSeconds)
+		log.Printf("   Max Retry Attempts: %d", config.FOKOrderSettings.MaxRetryAttempts)
+		log.Println("   REAL MONEY WILL BE USED!")
 	}
 
 	// Display order execution settings
-	log.Printf("💰 ORDER EXECUTION SETTINGS:")
-	log.Printf("   📊 Max Orders Per Second: %.2f (1 order every %.1fs)",
+	log.Printf("ORDER EXECUTION SETTINGS:")
+	log.Printf("   Max Orders Per Second: %.2f (1 order every %.1fs)",
 		config.OrderExecutionSettings.MaxOrdersPerSecond,
 		1.0/config.OrderExecutionSettings.MaxOrdersPerSecond)
-	log.Printf("   🔢 Max Concurrent Orders: %d", config.OrderExecutionSettings.MaxConcurrentOrders)
-	log.Printf("   💵 Order Amount Type: %s", config.OrderExecutionSettings.OrderAmountType)
+	log.Printf("   Max Concurrent Orders: %d", config.OrderExecutionSettings.MaxConcurrentOrders)
+	log.Printf("   Order Amount Type: %s", config.OrderExecutionSettings.OrderAmountType)
 
 	if config.OrderExecutionSettings.OrderAmountType == "static" {
-		log.Printf("   💲 Static Order Amount: $%.2f per order", config.OrderExecutionSettings.StaticOrderAmount)
+		log.Printf("   Static Order Amount: $%.2f per order", config.OrderExecutionSettings.StaticOrderAmount)
 	} else {
-		log.Printf("   📈 Dynamic Order Percentage: %.2f%% of available balance",
+		log.Printf("   Dynamic Order Percentage: %.2f%% of available balance",
 			config.OrderExecutionSettings.DynamicOrderPercentage*100)
 	}
 
-	log.Printf("   🏦 Account Balance: $%.2f", config.OrderExecutionSettings.AccountBalance)
-	log.Printf("   💸 Max Daily Spend: $%.2f", config.OrderExecutionSettings.MaxDailySpend)
-	log.Printf("   🛡️  Spending Limits: %s", map[bool]string{true: "ENABLED", false: "DISABLED"}[config.OrderExecutionSettings.EnableSpendingLimits])
-	log.Printf("   ⬇️  Min Order Amount: $%.2f", config.OrderExecutionSettings.MinOrderAmount)
-	log.Printf("   ⬆️  Max Order Amount: $%.2f", config.OrderExecutionSettings.MaxOrderAmount)
+	log.Printf("   Account Balance: $%.2f", config.OrderExecutionSettings.AccountBalance)
+	log.Printf("   Max Daily Spend: $%.2f", config.OrderExecutionSettings.MaxDailySpend)
+	log.Printf("   Spending Limits: %s", map[bool]string{true: "ENABLED", false: "DISABLED"}[config.OrderExecutionSettings.EnableSpendingLimits])
+	log.Printf("   Min Order Amount: $%.2f", config.OrderExecutionSettings.MinOrderAmount)
+	log.Printf("   Max Order Amount: $%.2f", config.OrderExecutionSettings.MaxOrderAmount)
 
 	// Initialize HTTP client with WebSocket support
 	httpClient := newHttpClient(config)
@@ -76,24 +76,24 @@ func main() {
 
 	// Display current order execution state
 	concurrent, dailySpent, availableBalance := coinexClient.GetOrderExecutionStats()
-	log.Printf("💳 CURRENT ORDER EXECUTION STATE:")
-	log.Printf("   🔢 Active Concurrent Orders: %d/%d", concurrent, config.OrderExecutionSettings.MaxConcurrentOrders)
-	log.Printf("   💸 Daily Spent: $%.2f/$%.2f", dailySpent, config.OrderExecutionSettings.MaxDailySpend)
-	log.Printf("   💰 Available Balance: $%.2f", availableBalance)
+	log.Printf("CURRENT ORDER EXECUTION STATE:")
+	log.Printf("   Active Concurrent Orders: %d/%d", concurrent, config.OrderExecutionSettings.MaxConcurrentOrders)
+	log.Printf("   Daily Spent: $%.2f/$%.2f", dailySpent, config.OrderExecutionSettings.MaxDailySpend)
+	log.Printf("   Available Balance: $%.2f", availableBalance)
 
 	if config.OrderExecutionSettings.OrderAmountType == "dynamic" {
 		nextOrderValue := availableBalance * config.OrderExecutionSettings.DynamicOrderPercentage
-		log.Printf("   📊 Next Order Value: $%.2f (%.1f%% of available)",
+		log.Printf("   Next Order Value: $%.2f (%.1f%% of available)",
 			nextOrderValue, config.OrderExecutionSettings.DynamicOrderPercentage*100)
 	}
 
 	// Test connection
-	log.Println("🔗 Testing exchange connection...")
+	log.Println("Testing exchange connection...")
 	testResponse, err := coinexClient.TestConnection()
 	if err != nil {
 		log.Fatalf("Connection test failed: %v", err)
 	}
-	log.Printf("✅ Connection test successful: %s", testResponse[:Min(100, len(testResponse))])
+	log.Printf("Connection test successful: %s", testResponse[:Min(100, len(testResponse))])
 
 	// Initialize core components
 	marketDepths := NewMarketDepths()
@@ -101,30 +101,30 @@ func main() {
 	arbitrageEngine := NewArbitrageEngine(config, marketDepths, metrics, coinexClient)
 
 	// Connect to WebSocket using integrated HttpClient
-	log.Println("🔌 Connecting to WebSocket...")
+	log.Println("Connecting to WebSocket...")
 	if err := httpClient.ConnectWebSocket(); err != nil {
 		log.Fatalf("Failed to connect to WebSocket: %v", err)
 	}
-	log.Println("✅ WebSocket connected successfully")
+	log.Println("WebSocket connected successfully")
 
 	// Get markets suitable for triangular arbitrage
-	log.Println("🔍 Discovering arbitrage markets...")
+	log.Println("Discovering arbitrage markets...")
 	arbitrageMarkets, completeAssets, err := coinexClient.GetArbitrageMarkets()
 	if err != nil {
 		log.Fatalf("Failed to get arbitrage markets: %v", err)
 	}
 
 	if len(arbitrageMarkets) == 0 {
-		log.Fatal("❌ No suitable markets found for triangular arbitrage")
+		log.Fatal("No suitable markets found for triangular arbitrage")
 	}
 
-	log.Printf("✅ Found %d markets for arbitrage (%d complete assets)", len(arbitrageMarkets), len(completeAssets))
+	log.Printf("Found %d markets for arbitrage (%d complete assets)", len(arbitrageMarkets), len(completeAssets))
 
 	// Log all discovered markets for debugging
-	log.Printf("🔍 DISCOVERED MARKETS:")
+	log.Printf("DISCOVERED MARKETS:")
 	for i, market := range arbitrageMarkets {
 		if i < 20 { // Show first 20 markets
-			log.Printf("   📊 %s", market)
+			log.Printf("   %s", market)
 		}
 	}
 	if len(arbitrageMarkets) > 20 {
@@ -132,27 +132,27 @@ func main() {
 	}
 
 	// Log complete assets
-	log.Printf("🎯 COMPLETE ASSETS: %v", completeAssets)
+	log.Printf("COMPLETE ASSETS: %v", completeAssets)
 
 	// Start market data processor BEFORE subscriptions
 	messageCounter := uint64(0)
 	go func() {
-		log.Println("🔄 Starting market data processor...")
+		log.Println("Starting market data processor...")
 		dataFeed := httpClient.GetWebSocketDataFeed()
-		log.Printf("📡 Data feed channel ready, waiting for messages...")
+		log.Printf("Data feed channel ready, waiting for messages...")
 
 		for msg := range dataFeed {
 			messageCounter++
 
 			// Log first few messages for debugging
 			if messageCounter <= 5 {
-				log.Printf("📨 Processing message #%d: %s", messageCounter, string(msg)[:Min(200, len(msg))])
+				log.Printf("Processing message #%d: %s", messageCounter, string(msg)[:Min(200, len(msg))])
 			}
 
 			// Process WebSocket message
 			if err := processWebSocketMessage(msg, marketDepths, metrics, httpClient); err != nil {
 				if messageCounter%100 == 0 { // Log errors more frequently for debugging
-					log.Printf("⚠️  WebSocket message processing error: %v | Message preview: %s",
+					log.Printf("WebSocket message processing error: %v | Message preview: %s",
 						err, string(msg)[:Min(200, len(msg))])
 				}
 				continue
@@ -160,37 +160,37 @@ func main() {
 
 			// Log processing stats periodically
 			if messageCounter%1000 == 0 || messageCounter <= 10 {
-				log.Printf("📈 Processed %d WebSocket messages successfully", messageCounter)
+				log.Printf("Processed %d WebSocket messages successfully", messageCounter)
 			}
 		}
-		log.Printf("⚠️  Market data processor exited - data feed channel closed")
+		log.Printf("Market data processor exited - data feed channel closed")
 	}()
 
 	// Subscribe to markets with progressive batching approach (prevents WebSocket overload)
-	log.Printf("📡 Subscribing to %d markets with progressive batching...", len(arbitrageMarkets))
+	log.Printf("Subscribing to %d markets with progressive batching...", len(arbitrageMarkets))
 
 	successfulSubscriptions, failedSubscriptions := httpClient.SubscribeWebSocketProgressive(arbitrageMarkets, 10)
 
-	log.Printf("📊 PROGRESSIVE Subscription Results:")
-	log.Printf("   ✅ Working with data: %d", len(successfulSubscriptions))
-	log.Printf("   ❌ Failed/dead: %d", len(failedSubscriptions))
-	log.Printf("   📈 Success rate: %.1f%%", float64(len(successfulSubscriptions))/float64(len(arbitrageMarkets))*100)
+	log.Printf("PROGRESSIVE Subscription Results:")
+	log.Printf("   Working with data: %d", len(successfulSubscriptions))
+	log.Printf("   Failed/dead: %d", len(failedSubscriptions))
+	log.Printf("   Success rate: %.1f%%", float64(len(successfulSubscriptions))/float64(len(arbitrageMarkets))*100)
 
 	if len(failedSubscriptions) > 0 {
-		log.Printf("   🚫 Failed markets (first 10): %v", failedSubscriptions[:Min(10, len(failedSubscriptions))])
+		log.Printf("   Failed markets (first 10): %v", failedSubscriptions[:Min(10, len(failedSubscriptions))])
 	}
 
 	// Update arbitrageMarkets to only include successfully subscribed markets
 	arbitrageMarkets = successfulSubscriptions
 
 	if len(arbitrageMarkets) == 0 {
-		log.Fatal("❌ No markets successfully subscribed - cannot proceed")
+		log.Fatal("No markets successfully subscribed - cannot proceed")
 	}
 
-	log.Printf("✅ Proceeding with %d working subscriptions", len(arbitrageMarkets))
+	log.Printf("Proceeding with %d working subscriptions", len(arbitrageMarkets))
 
 	// Wait for initial market data and verify it's flowing with proper synchronization
-	log.Println("⏳ Waiting for initial market data...")
+	log.Println("Waiting for initial market data...")
 
 	var wg sync.WaitGroup
 	marketDataReady := make(chan bool, 1)
@@ -207,12 +207,12 @@ func main() {
 		for {
 			select {
 			case <-timeout:
-				log.Printf("⚠️  Timeout waiting for initial market data")
+				log.Printf("Timeout waiting for initial market data")
 				marketDataReady <- false
 				return
 			case <-ticker.C:
 				initialMarkets := marketDepths.GetAvailableMarkets()
-				log.Printf("🔍 MARKET DATA CHECK: %d markets available", len(initialMarkets))
+				log.Printf("MARKET DATA CHECK: %d markets available", len(initialMarkets))
 
 				// Check if we have the critical USDCUSDT pair and at least 2 other markets
 				// For critical markets, we assume they exist - only check other markets
@@ -224,12 +224,12 @@ func main() {
 				}
 
 				if nonCriticalMarkets >= 2 { // Reduced from 3 to 2, critical markets assumed to exist
-					log.Printf("✅ Initial market data ready with %d non-critical markets (critical markets assumed to exist)", nonCriticalMarkets)
-					log.Printf("✅ Market data flowing: %v", initialMarkets[:Min(10, len(initialMarkets))])
+					log.Printf("Initial market data ready with %d non-critical markets (critical markets assumed to exist)", nonCriticalMarkets)
+					log.Printf("Market data flowing: %v", initialMarkets[:Min(10, len(initialMarkets))])
 					marketDataReady <- true
 					return
 				} else {
-					log.Printf("⚠️  Have %d non-critical markets but need at least 2", nonCriticalMarkets)
+					log.Printf("Have %d non-critical markets but need at least 2", nonCriticalMarkets)
 				}
 			}
 		}
@@ -239,11 +239,11 @@ func main() {
 	wg.Wait()
 	ready := <-marketDataReady
 	if !ready {
-		log.Printf("❌ WARNING: Proceeding without sufficient market data...")
+		log.Printf("WARNING: Proceeding without sufficient market data...")
 		retryMarkets := marketDepths.GetAvailableMarkets()
-		log.Printf("   📊 Available markets: %d", len(retryMarkets))
+		log.Printf("   Available markets: %d", len(retryMarkets))
 		if len(retryMarkets) > 0 {
-			log.Printf("   📈 Available: %v", retryMarkets[:Min(5, len(retryMarkets))])
+			log.Printf("   Available: %v", retryMarkets[:Min(5, len(retryMarkets))])
 		}
 	}
 
@@ -251,7 +251,7 @@ func main() {
 	arbitrageEngine.UpdateTriangularPaths(arbitrageMarkets, completeAssets)
 
 	// Enhanced WebSocket data validation and fallback
-	log.Printf("🔍 Validating WebSocket data health...")
+	log.Printf("Validating WebSocket data health...")
 
 	// Wait a bit more for WebSocket data to stabilize
 	time.Sleep(5 * time.Second)
@@ -259,22 +259,22 @@ func main() {
 	// Validate actual data delivery vs subscriptions
 	activeWsMarkets, deadWsMarkets := httpClient.ValidateWebSocketDataHealth(arbitrageMarkets)
 
-	log.Printf("📊 WEBSOCKET DATA HEALTH:")
-	log.Printf("   📡 Subscribed markets: %d", len(arbitrageMarkets))
-	log.Printf("   ✅ Delivering data: %d (%.1f%%)", len(activeWsMarkets), float64(len(activeWsMarkets))/float64(len(arbitrageMarkets))*100)
-	log.Printf("   ❌ Dead subscriptions: %d", len(deadWsMarkets))
+	log.Printf("WEBSOCKET DATA HEALTH:")
+	log.Printf("   Subscribed markets: %d", len(arbitrageMarkets))
+	log.Printf("   Delivering data: %d (%.1f%%)", len(activeWsMarkets), float64(len(activeWsMarkets))/float64(len(arbitrageMarkets))*100)
+	log.Printf("   Dead subscriptions: %d", len(deadWsMarkets))
 
 	if len(deadWsMarkets) > 0 {
-		log.Printf("   🚫 Dead markets (first 10): %v", deadWsMarkets[:Min(10, len(deadWsMarkets))])
+		log.Printf("   Dead markets (first 10): %v", deadWsMarkets[:Min(10, len(deadWsMarkets))])
 	}
 
 	// Define critical markets that MUST have data - only quote currency variations
 	criticalMarkets := config.CriticalMarkets
 
 	// ALWAYS assume critical markets exist and have sufficient liquidity
-	log.Printf("🎯 CRITICAL MARKETS: %v (assumed to exist with sufficient liquidity)", criticalMarkets)
-	log.Printf("   📊 No price data fetching needed - critical markets are assumed to exist")
-	log.Printf("   🚫 No depth/volume checks performed for critical markets")
+	log.Printf("CRITICAL MARKETS: %v (assumed to exist with sufficient liquidity)", criticalMarkets)
+	log.Printf("   No price data fetching needed - critical markets are assumed to exist")
+	log.Printf("   No depth/volume checks performed for critical markets")
 
 	// Combine WebSocket and REST data for final arbitrage markets
 	allActiveMarkets := make([]string, 0, len(arbitrageMarkets)+len(criticalMarkets))
@@ -283,16 +283,16 @@ func main() {
 	// Add critical markets to active list (assumed to exist)
 	for _, critical := range criticalMarkets {
 		allActiveMarkets = append(allActiveMarkets, critical)
-		log.Printf("✅ Added critical market to active list: %s (assumed to exist)", critical)
+		log.Printf("Added critical market to active list: %s (assumed to exist)", critical)
 	}
 
-	log.Printf("📊 Final active markets count: %d (WebSocket: %d + REST fallback: %d)",
+	log.Printf("Final active markets count: %d (WebSocket: %d + REST fallback: %d)",
 		len(allActiveMarkets), len(arbitrageMarkets), len(allActiveMarkets)-len(arbitrageMarkets))
 
 	arbitrageEngine.UpdateTriangularPaths(allActiveMarkets, completeAssets)
 
 	// Start arbitrage engine
-	log.Println("🚀 Starting arbitrage engine...")
+	log.Println("Starting arbitrage engine...")
 	arbitrageEngine.Start()
 
 	// Start simple periodic metrics logging
@@ -317,13 +317,13 @@ func main() {
 
 				// Log WebSocket connection status
 				if httpClient.IsWebSocketConnected() {
-					log.Printf("🔗 WebSocket Status: Connected ✅")
+					log.Printf("WebSocket Status: Connected")
 				} else {
-					log.Printf("🔗 WebSocket Status: Disconnected ❌")
+					log.Printf("WebSocket Status: Disconnected")
 				}
 			case <-criticalDataTicker.C:
 				// Critical markets are assumed to exist - no periodic refresh needed
-				log.Printf("🎯 Critical markets assumed to exist: %v", config.CriticalMarkets)
+				log.Printf("Critical markets assumed to exist: %v", config.CriticalMarkets)
 			}
 		}
 	}()
@@ -332,27 +332,27 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	log.Printf("✅ Triangular Arbitrage Bot is running!")
-	log.Printf("🛑 Press Ctrl+C to stop")
+	log.Printf("Triangular Arbitrage Bot is running!")
+	log.Printf("Press Ctrl+C to stop")
 
 	// Wait for shutdown signal
 	<-quit
-	log.Println("🛑 Shutdown signal received, stopping bot...")
+	log.Println("Shutdown signal received, stopping bot...")
 
 	// Graceful shutdown
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Stop arbitrage engine
-	log.Println("⏹️  Stopping arbitrage engine...")
+	log.Println("Stopping arbitrage engine...")
 	arbitrageEngine.Stop()
 
 	// Wait for active FOK orders to complete their FULL 3-leg cycles
-	log.Println("⏳ Waiting for ALL active FOK orders to complete...")
+	log.Println("Waiting for ALL active FOK orders to complete...")
 	activeTrackers := coinexClient.GetActiveTrackers()
 
 	if len(activeTrackers) > 0 {
-		log.Printf("📊 Found %d active FOK orders - waiting for COMPLETE execution...", len(activeTrackers))
+		log.Printf("Found %d active FOK orders - waiting for COMPLETE execution...", len(activeTrackers))
 
 		// Wait indefinitely for ALL orders to complete (no timeout pressure)
 		// Each FOK order has max 2s timeout, but we want full 3-leg cycle completion
@@ -361,19 +361,19 @@ func main() {
 		for {
 			activeTrackers = coinexClient.GetActiveTrackers()
 			if len(activeTrackers) == 0 {
-				log.Printf("✅ ALL FOK orders completed successfully in %v", time.Since(waitStart))
+				log.Printf("ALL FOK orders completed successfully in %v", time.Since(waitStart))
 				break
 			}
 
 			// Log every 2 seconds what we're waiting for
 			if int(time.Since(waitStart).Seconds())%2 == 0 {
-				log.Printf("⏳ Still waiting for %d FOK orders to complete... (%v elapsed)",
+				log.Printf("Still waiting for %d FOK orders to complete... (%v elapsed)",
 					len(activeTrackers), time.Since(waitStart))
 
 				// Show which orders we're waiting for
 				for i, tracker := range activeTrackers {
 					if i < 3 { // Show first 3
-						log.Printf("   📋 Order %d: %s | Market: %s | Age: %v",
+						log.Printf("   Order %d: %s | Market: %s | Age: %v",
 							i+1, tracker.OrderID, tracker.Market, time.Since(tracker.CreatedAt))
 					}
 				}
@@ -385,7 +385,7 @@ func main() {
 			time.Sleep(500 * time.Millisecond)
 		}
 	} else {
-		log.Println("✅ No active FOK orders to wait for")
+		log.Println("No active FOK orders to wait for")
 	}
 
 	// Check if we have any pending opportunities in the execution channel
@@ -397,7 +397,7 @@ func main() {
 	// Check if there are any remaining active trackers after stopping
 	finalActiveTrackers := coinexClient.GetActiveTrackers()
 	if len(finalActiveTrackers) > 0 {
-		log.Printf("⚠️  %d FOK orders still active after engine stop - waiting for completion...", len(finalActiveTrackers))
+		log.Printf("%d FOK orders still active after engine stop - waiting for completion...", len(finalActiveTrackers))
 
 		// Wait up to 10 seconds for remaining orders
 		remainingWaitCtx, remainingCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -409,27 +409,28 @@ func main() {
 		for {
 			select {
 			case <-remainingWaitCtx.Done():
-				log.Printf("⚠️  Timeout waiting for %d remaining orders - forcing shutdown", len(coinexClient.GetActiveTrackers()))
-				break
+				log.Printf("Timeout waiting for %d remaining orders - forcing shutdown", len(coinexClient.GetActiveTrackers()))
+				goto ClosingProgram
 			case <-ticker.C:
 				remaining := coinexClient.GetActiveTrackers()
 				if len(remaining) == 0 {
-					log.Println("✅ All remaining orders completed")
+					log.Println("All remaining orders completed")
 					break
 				}
-				log.Printf("⏳ Still waiting for %d orders...", len(remaining))
+				log.Printf("Still waiting for %d orders...", len(remaining))
 			}
 		}
+	ClosingProgram:
 	}
 
 	// Close WebSocket connection
-	log.Println("📪 Closing WebSocket connection...")
+	log.Println("Closing WebSocket connection...")
 	if err := httpClient.CloseWebSocket(); err != nil {
-		log.Printf("⚠️  Error closing WebSocket: %v", err)
+		log.Printf("Error closing WebSocket: %v", err)
 	}
 
 	// Final metrics log
-	log.Println("📊 Final metrics:")
+	log.Println("Final metrics:")
 	logSimpleMetrics(metrics, marketDepths)
 
 	// Wait for shutdown or timeout
@@ -442,10 +443,10 @@ func main() {
 
 	select {
 	case <-done:
-		log.Println("✅ Graceful shutdown completed")
+		log.Println("Graceful shutdown completed")
 	case <-shutdownCtx.Done():
-		log.Println("⚠️  Shutdown timeout exceeded")
+		log.Println("Shutdown timeout exceeded")
 	}
 
-	log.Println("👋 Triangular Arbitrage Bot stopped")
+	log.Println("Triangular Arbitrage Bot stopped")
 }

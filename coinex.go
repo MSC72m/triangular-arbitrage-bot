@@ -257,7 +257,7 @@ func (c *coinexClient) PlaceFOKOrder(market, orderType string, amount, price flo
 	orderID := fmt.Sprintf("FOK_%s_%d_%d", market, time.Now().UnixNano(), rand.Intn(10000))
 
 	executionMode := map[bool]string{true: "SIMULATION", false: "REAL API"}[c.config.SimulationMode]
-	log.Printf("🚀 PLACING FOK ORDER (%s) | ID: %s | Market: %s | Type: %s | Amount: %.6f | Price: %.8f | Value: $%.2f",
+	log.Printf(" PLACING FOK ORDER (%s) | ID: %s | Market: %s | Type: %s | Amount: %.6f | Price: %.8f | Value: $%.2f",
 		executionMode, orderID, market, orderType, orderAmount, price, orderValue)
 
 	// Step 5: Create order tracker
@@ -418,7 +418,7 @@ func (c *coinexClient) manageOrderLifecycle(tracker *FOKOrderTracker, orderResul
 		log.Printf("🎮 STARTING SIMULATION ORDER | ID: %s", tracker.OrderID)
 		c.manageSimulationOrderLifecycle(tracker, orderResultChan)
 	} else {
-		log.Printf("🔗 STARTING REAL API ORDER | ID: %s", tracker.OrderID)
+		log.Printf(" STARTING REAL API ORDER | ID: %s", tracker.OrderID)
 		c.manageRealFOKOrderLifecycle(tracker, orderResultChan)
 	}
 }
@@ -444,7 +444,7 @@ func (c *coinexClient) manageSimulationOrderLifecycle(tracker *FOKOrderTracker, 
 
 	timeout := time.After(time.Duration(c.config.FOKOrderSettings.OrderTimeoutSeconds) * time.Second)
 
-	log.Printf("📊 SIMULATION POLLING | ID: %s | Interval: %v | Timeout: %ds",
+	log.Printf(" SIMULATION POLLING | ID: %s | Interval: %v | Timeout: %ds",
 		tracker.OrderID, pollingInterval, c.config.FOKOrderSettings.OrderTimeoutSeconds)
 
 	for {
@@ -464,16 +464,16 @@ func (c *coinexClient) manageSimulationOrderLifecycle(tracker *FOKOrderTracker, 
 
 				select {
 				case orderResultChan <- result:
-					log.Printf("✅ SIMULATION RESULT SENT | ID: %s | Status: %s", tracker.OrderID, status)
+					log.Printf(" SIMULATION RESULT SENT | ID: %s | Status: %s", tracker.OrderID, status)
 				default:
-					log.Printf("⚠️  SIMULATION RESULT CHANNEL FULL | ID: %s", tracker.OrderID)
+					log.Printf("  SIMULATION RESULT CHANNEL FULL | ID: %s", tracker.OrderID)
 				}
 				return
 			}
 
 		case <-timeout:
 			// Order timeout - attempt cancellation
-			log.Printf("⏰ SIMULATION ORDER TIMEOUT | ID: %s", tracker.OrderID)
+			log.Printf(" SIMULATION ORDER TIMEOUT | ID: %s", tracker.OrderID)
 			c.cancelOrder(tracker)
 
 			result := c.buildOrderResult(tracker)
@@ -482,9 +482,9 @@ func (c *coinexClient) manageSimulationOrderLifecycle(tracker *FOKOrderTracker, 
 
 			select {
 			case orderResultChan <- result:
-				log.Printf("⏰ SIMULATION TIMEOUT RESULT SENT | ID: %s", tracker.OrderID)
+				log.Printf(" SIMULATION TIMEOUT RESULT SENT | ID: %s", tracker.OrderID)
 			default:
-				log.Printf("⚠️  SIMULATION TIMEOUT RESULT CHANNEL FULL | ID: %s", tracker.OrderID)
+				log.Printf("  SIMULATION TIMEOUT RESULT CHANNEL FULL | ID: %s", tracker.OrderID)
 			}
 			return
 
@@ -500,13 +500,13 @@ func (c *coinexClient) manageSimulationOrderLifecycle(tracker *FOKOrderTracker, 
 			tracker.Status = result.Status
 			tracker.mu.Unlock()
 
-			log.Printf("📨 SIMULATION ORDER RESULT | ID: %s | Status: %s", tracker.OrderID, result.Status)
+			log.Printf(" SIMULATION ORDER RESULT | ID: %s | Status: %s", tracker.OrderID, result.Status)
 
 			select {
 			case orderResultChan <- result:
 				log.Printf("📤 SIMULATION RESULT SENT | ID: %s", tracker.OrderID)
 			default:
-				log.Printf("⚠️  SIMULATION RESULT CHANNEL FULL | ID: %s", tracker.OrderID)
+				log.Printf("  SIMULATION RESULT CHANNEL FULL | ID: %s", tracker.OrderID)
 			}
 			return
 		}
@@ -521,7 +521,7 @@ func (c *coinexClient) pollOrderStatus(tracker *FOKOrderTracker) {
 
 	// In real implementation, this would call CoinEx order status API
 	// For simulation, we just log the polling activity
-	log.Printf("🔍 POLLING ORDER STATUS | ID: %s | Status: %s | Age: %v",
+	log.Printf(" POLLING ORDER STATUS | ID: %s | Status: %s | Age: %v",
 		tracker.OrderID, tracker.Status, time.Since(tracker.CreatedAt))
 }
 
@@ -536,7 +536,7 @@ func (c *coinexClient) cancelOrder(tracker *FOKOrderTracker) {
 	tracker.IsActive = false
 	tracker.mu.Unlock()
 
-	log.Printf("✅ ORDER CANCELLED | ID: %s", tracker.OrderID)
+	log.Printf(" ORDER CANCELLED | ID: %s", tracker.OrderID)
 }
 
 // simulateOrderExecution simulates order execution (in real implementation, this would be actual order placement)
@@ -555,7 +555,7 @@ func (c *coinexClient) simulateOrderExecution(tracker *FOKOrderTracker) {
 	randomFactor := 0.8 + rand.Float64()*0.4 // 0.8 to 1.2
 	actualExecutionTime := time.Duration(float64(executionTimeMs)*randomFactor) * time.Millisecond
 
-	log.Printf("⚡ SIMULATING FOK EXECUTION | ID: %s | Est. time: %v", tracker.OrderID, actualExecutionTime)
+	log.Printf(" SIMULATING FOK EXECUTION | ID: %s | Est. time: %v", tracker.OrderID, actualExecutionTime)
 
 	// Sleep to simulate order execution
 	time.Sleep(actualExecutionTime)
@@ -613,10 +613,10 @@ func (c *coinexClient) simulateOrderExecution(tracker *FOKOrderTracker) {
 		}
 
 		if status == OrderStatusFilled {
-			log.Printf("✅ FOK ORDER FILLED | ID: %s | Amount: %.6f | Avg Price: %.8f | Fee: %.6f %s | Time: %dms",
+			log.Printf(" FOK ORDER FILLED | ID: %s | Amount: %.6f | Avg Price: %.8f | Fee: %.6f %s | Time: %dms",
 				tracker.OrderID, filledAmount, avgPrice, fee, feeCurrency, result.ExecutionTime)
 		} else {
-			log.Printf("❌ FOK ORDER NOT FILLED | ID: %s | Insufficient liquidity | Time: %dms",
+			log.Printf(" FOK ORDER NOT FILLED | ID: %s | Insufficient liquidity | Time: %dms",
 				tracker.OrderID, result.ExecutionTime)
 		}
 	} else {
@@ -645,7 +645,7 @@ func (c *coinexClient) simulateOrderExecution(tracker *FOKOrderTracker) {
 			Timestamp:     time.Now(),
 		}
 
-		log.Printf("❌ FOK ORDER FAILED | ID: %s | Error: %s | Time: %dms",
+		log.Printf(" FOK ORDER FAILED | ID: %s | Error: %s | Time: %dms",
 			tracker.OrderID, errorMsg, result.ExecutionTime)
 	}
 
@@ -654,7 +654,7 @@ func (c *coinexClient) simulateOrderExecution(tracker *FOKOrderTracker) {
 	case tracker.ResultChan <- result:
 		// Successfully sent result
 	default:
-		log.Printf("⚠️  TRACKER RESULT CHANNEL FULL | ID: %s", tracker.OrderID)
+		log.Printf("  TRACKER RESULT CHANNEL FULL | ID: %s", tracker.OrderID)
 	}
 }
 
@@ -703,16 +703,16 @@ func (c *coinexClient) CancelAllActiveOrders() {
 				case tracker.CancelChan <- struct{}{}:
 					log.Printf("🛑 SIMULATION CANCELLATION SIGNAL SENT | ID: %s", tracker.OrderID)
 				default:
-					log.Printf("⚠️  SIMULATION CANCELLATION CHANNEL FULL | ID: %s", tracker.OrderID)
+					log.Printf("  SIMULATION CANCELLATION CHANNEL FULL | ID: %s", tracker.OrderID)
 				}
 			} else {
 				// Real API mode - cancel via CoinEx API
 				tracker.mu.Unlock() // Unlock before API call
 				err := c.cancelRealOrder(tracker)
 				if err != nil {
-					log.Printf("❌ REAL API CANCELLATION FAILED | ID: %s | Error: %v", tracker.OrderID, err)
+					log.Printf(" REAL API CANCELLATION FAILED | ID: %s | Error: %v", tracker.OrderID, err)
 				} else {
-					log.Printf("✅ REAL API CANCELLATION SUCCESS | ID: %s", tracker.OrderID)
+					log.Printf(" REAL API CANCELLATION SUCCESS | ID: %s", tracker.OrderID)
 				}
 				tracker.mu.Lock() // Re-lock for safe unlock below
 			}
@@ -768,7 +768,7 @@ func (c *coinexClient) ResetDailySpending() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	log.Printf("🔄 RESETTING DAILY SPENDING | Previous: $%.2f", c.dailySpent)
+	log.Printf(" RESETTING DAILY SPENDING | Previous: $%.2f", c.dailySpent)
 	c.dailySpent = 0
 }
 
@@ -787,10 +787,10 @@ func (c *coinexClient) TestConnection() (string, error) {
 	// Use the market list endpoint which is simpler and doesn't need market parameter
 	params := map[string]string{
 		"url":    c.baseUrl + "/market/list",
-		"method": "GET",
+		"method": GET,
 	}
 
-	response, err := c.httpClient.performRequest(params, "GET")
+	response, err := c.httpClient.performRequest(params, GET)
 	if err != nil {
 		return "", err
 	}
@@ -807,7 +807,7 @@ func (c *coinexClient) TestConnection() (string, error) {
 func (c *coinexClient) GetBalance() (string, error) {
 	// Use v2 API for balance
 	timestamp := time.Now().UnixMilli()
-	method := "GET"
+	method := GET
 	requestPath := "/assets/credit/balance"
 	queryString := ""
 	body := ""
@@ -852,10 +852,10 @@ func (c *coinexClient) GetMarketList() (string, error) {
 	// Use the v1 market list endpoint
 	params := map[string]string{
 		"url":    c.baseUrl + "/market/list",
-		"method": "GET",
+		"method": GET,
 	}
 
-	response, err := c.httpClient.performRequest(params, "GET")
+	response, err := c.httpClient.performRequest(params, GET)
 	if err != nil {
 		return "", err
 	}
@@ -873,10 +873,10 @@ func (c *coinexClient) GetMarketList() (string, error) {
 func (c *coinexClient) GetAllMarketTickers() (map[string]interface{}, error) {
 	params := map[string]string{
 		"url":    c.baseUrl + "/market/ticker/all",
-		"method": "GET",
+		"method": GET,
 	}
 
-	response, err := c.httpClient.performRequest(params, "GET")
+	response, err := c.httpClient.performRequest(params, GET)
 	if err != nil {
 		return nil, err
 	}
@@ -898,17 +898,17 @@ func (c *coinexClient) GetArbitrageMarkets() ([]string, []string, error) {
 	}
 
 	markets := marketList["data"].([]interface{})
-	fmt.Printf("📊 Total markets from CoinEx: %d\n", len(markets))
+	fmt.Printf(" Total markets from CoinEx: %d\n", len(markets))
 
 	// Step 1: Find theoretical triangular arbitrage opportunities
-	fmt.Printf("🔍 Step 1: Finding theoretical triangular markets...\n")
+	fmt.Printf(" Step 1: Finding theoretical triangular markets...\n")
 	triangularMarkets, completeAssets := c.findTriangularArbitrageMarkets(markets)
 
 	// Step 2: Get real market activity data (24H volume) for ALL markets
-	fmt.Printf("🔍 Step 2: Fetching real market activity data from CoinEx...\n")
+	fmt.Printf(" Step 2: Fetching real market activity data from CoinEx...\n")
 	tickerData, err := c.GetAllMarketTickers()
 	if err != nil {
-		fmt.Printf("⚠️  Failed to get market ticker data, using heuristic filtering: %v\n", err)
+		fmt.Printf("  Failed to get market ticker data, using heuristic filtering: %v\n", err)
 		// Fallback to heuristic filtering
 		activeMarkets, _ := c.validateMarketActivity(triangularMarkets)
 		activeCompleteAssets := c.filterCompleteAssetsByActiveMarkets(completeAssets, activeMarkets)
@@ -918,11 +918,11 @@ func (c *coinexClient) GetArbitrageMarkets() ([]string, []string, error) {
 	// Step 3: Filter markets based on real 24H volume data
 	activeMarkets, deadMarkets := c.filterMarketsByRealActivity(triangularMarkets, tickerData)
 
-	fmt.Printf("\n🎯 REAL DATA FILTERING RESULTS:\n")
-	fmt.Printf("   📊 Theoretical markets: %d\n", len(triangularMarkets))
-	fmt.Printf("   ✅ Active markets (with volume): %d\n", len(activeMarkets))
+	fmt.Printf("\n REAL DATA FILTERING RESULTS:\n")
+	fmt.Printf("    Theoretical markets: %d\n", len(triangularMarkets))
+	fmt.Printf("    Active markets (with volume): %d\n", len(activeMarkets))
 	fmt.Printf("   💀 Dead markets (no volume): %d\n", len(deadMarkets))
-	fmt.Printf("   💰 Efficiency gain: %.1f%% reduction in subscriptions\n",
+	fmt.Printf("    Efficiency gain: %.1f%% reduction in subscriptions\n",
 		float64(len(deadMarkets))/float64(len(triangularMarkets))*100)
 
 	if len(deadMarkets) > 0 {
@@ -935,11 +935,11 @@ func (c *coinexClient) GetArbitrageMarkets() ([]string, []string, error) {
 	// Update complete assets based on active markets only
 	activeCompleteAssets := c.filterCompleteAssetsByActiveMarkets(completeAssets, activeMarkets)
 
-	fmt.Printf("   🎯 Complete assets with active markets: %d (from %d)\n",
+	fmt.Printf("    Complete assets with active markets: %d (from %d)\n",
 		len(activeCompleteAssets), len(completeAssets))
 
 	if len(activeCompleteAssets) > 0 {
-		fmt.Printf("   📈 Active triangular assets: %v\n", activeCompleteAssets)
+		fmt.Printf("    Active triangular assets: %v\n", activeCompleteAssets)
 	}
 
 	return activeMarkets, activeCompleteAssets, nil
@@ -951,7 +951,7 @@ func (c *coinexClient) findTriangularArbitrageMarkets(markets []interface{}) ([]
 	usdtMarkets := make(map[string]string) // asset -> market (e.g., BTC -> BTCUSDT)
 	usdcMarkets := make(map[string]string) // asset -> market (e.g., BTC -> BTCUSDC)
 
-	fmt.Printf("🔍 Analyzing markets for triangular arbitrage with quote currencies: %v\n", c.allowedMarkets)
+	fmt.Printf(" Analyzing markets for triangular arbitrage with quote currencies: %v\n", c.allowedMarkets)
 
 	// Parse all markets and categorize them by configured quote currencies
 	for _, market := range markets {
@@ -973,19 +973,19 @@ func (c *coinexClient) findTriangularArbitrageMarkets(markets []interface{}) ([]
 		}
 	}
 
-	fmt.Printf("✅ Market Analysis Results:\n")
-	fmt.Printf("   📈 USDT pairs: %d\n", len(usdtMarkets))
+	fmt.Printf(" Market Analysis Results:\n")
+	fmt.Printf("    USDT pairs: %d\n", len(usdtMarkets))
 	fmt.Printf("   💎 USDC pairs: %d\n", len(usdcMarkets))
 
 	// Debug: Show actual USDC markets found
 	if len(usdcMarkets) > 0 {
-		fmt.Printf("   🔍 USDC markets found: ")
+		fmt.Printf("    USDC markets found: ")
 		for _, market := range usdcMarkets {
 			fmt.Printf("%s ", market)
 		}
 		fmt.Printf("\n")
 	} else {
-		fmt.Printf("   ⚠️  NO USDC markets found in CoinEx market list!\n")
+		fmt.Printf("     NO USDC markets found in CoinEx market list!\n")
 	}
 
 	// Find assets that have BOTH quote currency pairs (required for triangular arbitrage)
@@ -998,7 +998,7 @@ func (c *coinexClient) findTriangularArbitrageMarkets(markets []interface{}) ([]
 			// Add both markets for this asset
 			triangularMarkets = append(triangularMarkets, usdtMarkets[asset])
 			triangularMarkets = append(triangularMarkets, usdcMarkets[asset])
-			fmt.Printf("   ✅ Complete asset: %s → Markets: %s, %s\n",
+			fmt.Printf("    Complete asset: %s → Markets: %s, %s\n",
 				asset, usdtMarkets[asset], usdcMarkets[asset])
 		}
 	}
@@ -1011,21 +1011,21 @@ func (c *coinexClient) findTriangularArbitrageMarkets(markets []interface{}) ([]
 		marketStr := market.(string)
 		if marketStr == "USDCUSDT" || marketStr == "USDTUSDC" {
 			triangularMarkets = append(triangularMarkets, marketStr)
-			fmt.Printf("   🎯 Added critical quote pair: %s\n", marketStr)
+			fmt.Printf("    Added critical quote pair: %s\n", marketStr)
 		}
 	}
 
-	fmt.Printf("\n🎯 TRIANGULAR ARBITRAGE SUMMARY:\n")
-	fmt.Printf("   📊 Assets with both quote pairs: %d\n", len(completeAssets))
-	fmt.Printf("   📡 Markets to subscribe: %d (vs %d total)\n", len(triangularMarkets), len(markets))
-	fmt.Printf("   💰 Efficiency gain: %.1f%% reduction in subscriptions\n",
+	fmt.Printf("\n TRIANGULAR ARBITRAGE SUMMARY:\n")
+	fmt.Printf("    Assets with both quote pairs: %d\n", len(completeAssets))
+	fmt.Printf("    Markets to subscribe: %d (vs %d total)\n", len(triangularMarkets), len(markets))
+	fmt.Printf("    Efficiency gain: %.1f%% reduction in subscriptions\n",
 		float64(len(markets)-len(triangularMarkets))/float64(len(markets))*100)
 
 	if len(completeAssets) > 0 {
-		fmt.Printf("   🔄 Triangular assets: %v\n", completeAssets)
-		fmt.Printf("   📈 Example cycle: USDT → %s → USDC → USDT\n", completeAssets[0])
+		fmt.Printf("    Triangular assets: %v\n", completeAssets)
+		fmt.Printf("    Example cycle: USDT → %s → USDC → USDT\n", completeAssets[0])
 	} else {
-		fmt.Printf("   ⚠️  WARNING: No assets found with both USDT and USDC pairs!\n")
+		fmt.Printf("     WARNING: No assets found with both USDT and USDC pairs!\n")
 		fmt.Printf("   💡 Suggestion: Check if CoinEx supports USDC markets\n")
 
 		// Show what we do have for debugging
@@ -1036,7 +1036,7 @@ func (c *coinexClient) findTriangularArbitrageMarkets(markets []interface{}) ([]
 					usdtSample = append(usdtSample, asset)
 				}
 			}
-			fmt.Printf("   📈 Sample USDT assets: %v\n", usdtSample)
+			fmt.Printf("    Sample USDT assets: %v\n", usdtSample)
 		}
 
 		if len(usdcMarkets) > 0 {
@@ -1055,18 +1055,18 @@ func (c *coinexClient) findTriangularArbitrageMarkets(markets []interface{}) ([]
 
 // filterMarketsByRealActivity filters markets based on real 24H volume data from CoinEx
 func (c *coinexClient) filterMarketsByRealActivity(markets []string, tickerData map[string]interface{}) ([]string, []string) {
-	fmt.Printf("   🔍 Analyzing real market activity for %d markets...\n", len(markets))
+	fmt.Printf("    Analyzing real market activity for %d markets...\n", len(markets))
 
 	// Extract ticker data
 	data, ok := tickerData["data"].(map[string]interface{})
 	if !ok {
-		fmt.Printf("   ⚠️  Invalid ticker data format, falling back to heuristic filtering\n")
+		fmt.Printf("     Invalid ticker data format, falling back to heuristic filtering\n")
 		return c.validateMarketActivity(markets)
 	}
 
 	tickers, ok := data["ticker"].(map[string]interface{})
 	if !ok {
-		fmt.Printf("   ⚠️  Invalid ticker format, falling back to heuristic filtering\n")
+		fmt.Printf("     Invalid ticker format, falling back to heuristic filtering\n")
 		return c.validateMarketActivity(markets)
 	}
 
@@ -1122,7 +1122,7 @@ func (c *coinexClient) filterMarketsByRealActivity(markets []string, tickerData 
 		if usdVolume >= minVolumeThreshold {
 			activeMarkets = append(activeMarkets, market)
 			if len(activeMarkets) <= 5 {
-				fmt.Printf("   ✅ Active: %s (24H vol: $%.0f)\n", market, usdVolume)
+				fmt.Printf("    Active: %s (24H vol: $%.0f)\n", market, usdVolume)
 			}
 		} else {
 			deadMarkets = append(deadMarkets, market)
@@ -1139,7 +1139,7 @@ func (c *coinexClient) filterMarketsByRealActivity(markets []string, tickerData 
 		fmt.Printf("   ... and %d more dead markets\n", len(deadMarkets)-5)
 	}
 
-	fmt.Printf("   📊 Volume Analysis Complete:\n")
+	fmt.Printf("    Volume Analysis Complete:\n")
 	fmt.Printf("     - Active markets (>$%.0f/24h): %d\n", minVolumeThreshold, len(activeMarkets))
 	fmt.Printf("     - Dead markets (<$%.0f/24h): %d\n", minVolumeThreshold, len(deadMarkets))
 
@@ -1148,7 +1148,7 @@ func (c *coinexClient) filterMarketsByRealActivity(markets []string, tickerData 
 
 // validateMarketActivity tests markets for actual trading activity before subscription
 func (c *coinexClient) validateMarketActivity(markets []string) ([]string, []string) {
-	fmt.Printf("   🔍 Testing %d markets for trading activity...\n", len(markets))
+	fmt.Printf("    Testing %d markets for trading activity...\n", len(markets))
 
 	activeMarkets := []string{}
 	deadMarkets := []string{}
@@ -1162,7 +1162,7 @@ func (c *coinexClient) validateMarketActivity(markets []string) ([]string, []str
 		if isActive {
 			activeMarkets = append(activeMarkets, market)
 			if len(activeMarkets) <= 5 { // Log first few
-				fmt.Printf("   ✅ Active: %s\n", market)
+				fmt.Printf("    Active: %s\n", market)
 			}
 		} else {
 			deadMarkets = append(deadMarkets, market)
@@ -1233,9 +1233,9 @@ func (c *coinexClient) filterCompleteAssetsByActiveMarkets(completeAssets []stri
 
 		if hasActiveUSDT && hasActiveUSDC {
 			filteredAssets = append(filteredAssets, asset)
-			fmt.Printf("   ✅ Asset %s: Both %sUSDT and %sUSDC are active\n", asset, asset, asset)
+			fmt.Printf("    Asset %s: Both %sUSDT and %sUSDC are active\n", asset, asset, asset)
 		} else {
-			fmt.Printf("   ❌ Asset %s excluded: ", asset)
+			fmt.Printf("    Asset %s excluded: ", asset)
 			if !hasActiveUSDT {
 				fmt.Printf("%sUSDT inactive ", asset)
 			}
@@ -1260,7 +1260,7 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 	// Step 1: Place the actual FOK order via CoinEx API
 	actualOrderID, err := c.placeRealFOKOrder(tracker)
 	if err != nil {
-		log.Printf("❌ REAL ORDER PLACEMENT FAILED | ID: %s | Error: %v", tracker.OrderID, err)
+		log.Printf(" REAL ORDER PLACEMENT FAILED | ID: %s | Error: %v", tracker.OrderID, err)
 
 		result := &OrderResult{
 			OrderID:       tracker.OrderID,
@@ -1280,9 +1280,9 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 
 		select {
 		case orderResultChan <- result:
-			log.Printf("❌ PLACEMENT FAILURE RESULT SENT | ID: %s", tracker.OrderID)
+			log.Printf(" PLACEMENT FAILURE RESULT SENT | ID: %s", tracker.OrderID)
 		default:
-			log.Printf("⚠️  PLACEMENT FAILURE RESULT CHANNEL FULL | ID: %s", tracker.OrderID)
+			log.Printf("  PLACEMENT FAILURE RESULT CHANNEL FULL | ID: %s", tracker.OrderID)
 		}
 		return
 	}
@@ -1297,7 +1297,7 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 	c.orderTrackingManager.RemoveTracker(oldID)
 	c.orderTrackingManager.AddTracker(tracker)
 
-	log.Printf("✅ REAL ORDER PLACED | TempID: %s | RealID: %s | Market: %s", oldID, actualOrderID, tracker.Market)
+	log.Printf(" REAL ORDER PLACED | TempID: %s | RealID: %s | Market: %s", oldID, actualOrderID, tracker.Market)
 
 	// Step 2: Setup polling and timeout
 	pollingInterval := time.Duration(1000/c.config.FOKOrderSettings.PollingFrequencyHz) * time.Millisecond
@@ -1306,7 +1306,7 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 
 	timeout := time.After(time.Duration(c.config.FOKOrderSettings.OrderTimeoutSeconds) * time.Second)
 
-	log.Printf("📊 REAL ORDER POLLING STARTED | ID: %s | Interval: %v | Timeout: %ds",
+	log.Printf(" REAL ORDER POLLING STARTED | ID: %s | Interval: %v | Timeout: %ds",
 		actualOrderID, pollingInterval, c.config.FOKOrderSettings.OrderTimeoutSeconds)
 
 	// Step 3: Poll for order status
@@ -1316,7 +1316,7 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 			// Poll real order status from CoinEx API
 			orderStatus, err := c.pollRealOrderStatus(tracker)
 			if err != nil {
-				log.Printf("⚠️  ORDER STATUS POLL ERROR | ID: %s | Error: %v", actualOrderID, err)
+				log.Printf("  ORDER STATUS POLL ERROR | ID: %s | Error: %v", actualOrderID, err)
 				continue
 			}
 
@@ -1332,22 +1332,22 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 
 				select {
 				case orderResultChan <- orderStatus:
-					log.Printf("✅ REAL ORDER RESULT SENT | ID: %s | Status: %s", actualOrderID, orderStatus.Status)
+					log.Printf(" REAL ORDER RESULT SENT | ID: %s | Status: %s", actualOrderID, orderStatus.Status)
 				default:
-					log.Printf("⚠️  REAL ORDER RESULT CHANNEL FULL | ID: %s", actualOrderID)
+					log.Printf("  REAL ORDER RESULT CHANNEL FULL | ID: %s", actualOrderID)
 				}
 				return
 			}
 
 		case <-timeout:
 			// Order timeout - attempt cancellation via API
-			log.Printf("⏰ REAL ORDER TIMEOUT | ID: %s | Attempting cancellation", actualOrderID)
+			log.Printf(" REAL ORDER TIMEOUT | ID: %s | Attempting cancellation", actualOrderID)
 
 			err := c.cancelRealOrder(tracker)
 			if err != nil {
-				log.Printf("❌ REAL ORDER CANCELLATION FAILED | ID: %s | Error: %v", actualOrderID, err)
+				log.Printf(" REAL ORDER CANCELLATION FAILED | ID: %s | Error: %v", actualOrderID, err)
 			} else {
-				log.Printf("✅ REAL ORDER CANCELLED | ID: %s", actualOrderID)
+				log.Printf(" REAL ORDER CANCELLED | ID: %s", actualOrderID)
 			}
 
 			// Wait for final status
@@ -1375,9 +1375,9 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 
 			select {
 			case orderResultChan <- finalStatus:
-				log.Printf("⏰ REAL ORDER TIMEOUT RESULT SENT | ID: %s", actualOrderID)
+				log.Printf(" REAL ORDER TIMEOUT RESULT SENT | ID: %s", actualOrderID)
 			default:
-				log.Printf("⚠️  REAL ORDER TIMEOUT RESULT CHANNEL FULL | ID: %s", actualOrderID)
+				log.Printf("  REAL ORDER TIMEOUT RESULT CHANNEL FULL | ID: %s", actualOrderID)
 			}
 			return
 
@@ -1387,7 +1387,7 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 
 			err := c.cancelRealOrder(tracker)
 			if err != nil {
-				log.Printf("❌ REAL ORDER EXTERNAL CANCELLATION FAILED | ID: %s | Error: %v", actualOrderID, err)
+				log.Printf(" REAL ORDER EXTERNAL CANCELLATION FAILED | ID: %s | Error: %v", actualOrderID, err)
 			}
 			return
 		}
@@ -1421,15 +1421,15 @@ func (c *coinexClient) placeRealFOKOrder(tracker *FOKOrderTracker) (string, erro
 	// Prepare request parameters
 	requestParams := map[string]string{
 		"url":    c.baseUrl + "/order/limit",
-		"method": "POST",
+		"method": POST,
 		"body":   c.buildFormData(params),
 	}
 
-	log.Printf("🔗 CALLING COINEX API | URL: %s | Market: %s | Type: %s | Amount: %.6f | Price: %.8f | Option: FOK",
+	log.Printf(" CALLING COINEX API | URL: %s | Market: %s | Type: %s | Amount: %.6f | Price: %.8f | Option: FOK",
 		requestParams["url"], tracker.Market, tracker.Type, tracker.Amount, tracker.Price)
 
 	// Make API call
-	response, err := c.httpClient.performRequest(requestParams, "POST")
+	response, err := c.httpClient.performRequest(requestParams, POST)
 	if err != nil {
 		return "", fmt.Errorf("API request failed: %w", err)
 	}
@@ -1454,7 +1454,7 @@ func (c *coinexClient) placeRealFOKOrder(tracker *FOKOrderTracker) (string, erro
 
 	orderID := fmt.Sprintf("%.0f", orderIDFloat)
 
-	log.Printf("✅ REAL FOK ORDER PLACED | OrderID: %s | Market: %s", orderID, tracker.Market)
+	log.Printf(" REAL FOK ORDER PLACED | OrderID: %s | Market: %s", orderID, tracker.Market)
 
 	return orderID, nil
 }
@@ -1485,11 +1485,11 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (*OrderResu
 	// Prepare request parameters
 	requestParams := map[string]string{
 		"url":    c.baseUrl + "/order/status?" + queryString,
-		"method": "GET",
+		"method": GET,
 	}
 
 	// Make API call
-	response, err := c.httpClient.performRequest(requestParams, "GET")
+	response, err := c.httpClient.performRequest(requestParams, GET)
 	if err != nil {
 		return nil, fmt.Errorf("order status API request failed: %w", err)
 	}
@@ -1566,7 +1566,7 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (*OrderResu
 		}
 	}
 
-	log.Printf("🔍 REAL ORDER STATUS | ID: %s | Status: %s | Filled: %.6f/%.6f | AvgPrice: %.8f",
+	log.Printf(" REAL ORDER STATUS | ID: %s | Status: %s | Filled: %.6f/%.6f | AvgPrice: %.8f",
 		tracker.OrderID, result.Status, result.FilledAmount, result.Amount, result.AvgPrice)
 
 	return result, nil
@@ -1598,14 +1598,14 @@ func (c *coinexClient) cancelRealOrder(tracker *FOKOrderTracker) error {
 	// Prepare request parameters
 	requestParams := map[string]string{
 		"url":    c.baseUrl + "/order/pending",
-		"method": "DELETE",
+		"method": DELETE,
 		"body":   formData,
 	}
 
-	log.Printf("🛑 CANCELLING REAL ORDER | ID: %s | Market: %s", tracker.OrderID, tracker.Market)
+	log.Printf("CANCELLING REAL ORDER | ID: %s | Market: %s", tracker.OrderID, tracker.Market)
 
 	// Make API call
-	response, err := c.httpClient.performRequest(requestParams, "DELETE")
+	response, err := c.httpClient.performRequest(requestParams, DELETE)
 	if err != nil {
 		return fmt.Errorf("order cancellation API request failed: %w", err)
 	}
@@ -1616,7 +1616,7 @@ func (c *coinexClient) cancelRealOrder(tracker *FOKOrderTracker) error {
 		return fmt.Errorf("CoinEx order cancellation API error: code=%.0f, message=%s", code, message)
 	}
 
-	log.Printf("✅ REAL ORDER CANCELLATION SUCCESS | ID: %s", tracker.OrderID)
+	log.Printf(" REAL ORDER CANCELLATION SUCCESS | ID: %s", tracker.OrderID)
 
 	// Update tracker status
 	tracker.mu.Lock()
@@ -1656,24 +1656,24 @@ func (c *coinexClient) buildQueryString(params map[string]string) string {
 
 // EnsureCriticalMarketData ensures critical markets have data via REST API fallback
 func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, marketDepths *MarketDepths) {
-	log.Printf("🔄 Ensuring quote currency markets have data via REST API: %v", criticalMarkets)
+	log.Printf(" Ensuring quote currency markets have data via REST API: %v", criticalMarkets)
 
 	for _, market := range criticalMarkets {
 		// Check if market already has data in marketDepths
 		if orderBook, exists := marketDepths.Load(market); exists && orderBook != nil {
 			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
 				// Market already has data, skip
-				log.Printf("✅ %s already has data, skipping", market)
+				log.Printf(" %s already has data, skipping", market)
 				continue
 			}
 		}
 
-		log.Printf("📡 Fetching %s via REST API (WebSocket data missing)...", market)
+		log.Printf(" Fetching %s via REST API (WebSocket data missing)...", market)
 
 		// Use the HttpClient's REST API fallback method
 		restOrderBook, err := c.httpClient.GetOrderBookREST(market)
 		if err != nil {
-			log.Printf("❌ Failed to get %s via REST: %v", market, err)
+			log.Printf(" Failed to get %s via REST: %v", market, err)
 			continue
 		}
 
@@ -1686,10 +1686,10 @@ func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, market
 			c.httpClient.marketData[market] = restOrderBook
 			c.httpClient.marketDataMu.Unlock()
 
-			log.Printf("✅ Quote currency market %s data restored via REST | Bids: %d | Asks: %d",
+			log.Printf(" Quote currency market %s data restored via REST | Bids: %d | Asks: %d",
 				market, len(restOrderBook.Bids), len(restOrderBook.Asks))
 		} else {
-			log.Printf("⚠️  Quote currency market %s has empty order book even via REST", market)
+			log.Printf("  Quote currency market %s has empty order book even via REST", market)
 		}
 	}
 }
@@ -1697,17 +1697,17 @@ func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, market
 // FetchCriticalMarketsViaREST fetches order book data for critical markets via REST API
 // This is used as a primary data source for quote currencies and other critical markets
 func (c *coinexClient) FetchCriticalMarketsViaREST(markets []string, marketDepths *MarketDepths) {
-	log.Printf("🔄 Fetching critical markets via REST API: %v", markets)
+	log.Printf(" Fetching critical markets via REST API: %v", markets)
 
 	successCount := 0
 	failedCount := 0
 
 	for _, market := range markets {
-		log.Printf("📡 Fetching %s via REST API...", market)
+		log.Printf(" Fetching %s via REST API...", market)
 
 		restOrderBook, err := c.httpClient.GetOrderBookREST(market)
 		if err != nil {
-			log.Printf("❌ Failed to fetch %s via REST: %v", market, err)
+			log.Printf(" Failed to fetch %s via REST: %v", market, err)
 			failedCount++
 			continue
 		}
@@ -1721,11 +1721,11 @@ func (c *coinexClient) FetchCriticalMarketsViaREST(markets []string, marketDepth
 			c.httpClient.marketData[market] = restOrderBook
 			c.httpClient.marketDataMu.Unlock()
 
-			log.Printf("✅ %s fetched via REST | Bids: %d | Asks: %d",
+			log.Printf(" %s fetched via REST | Bids: %d | Asks: %d",
 				market, len(restOrderBook.Bids), len(restOrderBook.Asks))
 			successCount++
 		} else {
-			log.Printf("⚠️  %s has empty order book via REST", market)
+			log.Printf("  %s has empty order book via REST", market)
 			failedCount++
 		}
 
@@ -1733,7 +1733,7 @@ func (c *coinexClient) FetchCriticalMarketsViaREST(markets []string, marketDepth
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	log.Printf("📊 REST API fetch complete: %d success, %d failed", successCount, failedCount)
+	log.Printf(" REST API fetch complete: %d success, %d failed", successCount, failedCount)
 }
 
 // GetQuoteCurrencyMarkets returns all markets for the configured quote currencies
@@ -1743,14 +1743,14 @@ func (c *coinexClient) GetQuoteCurrencyMarkets() []string {
 	// Get all available markets from CoinEx
 	marketListString, err := c.GetMarketList()
 	if err != nil {
-		log.Printf("❌ Failed to get market list for quote currencies: %v", err)
+		log.Printf(" Failed to get market list for quote currencies: %v", err)
 		return quoteMarkets
 	}
 
 	var marketList map[string]interface{}
 	err = json.Unmarshal([]byte(marketListString), &marketList)
 	if err != nil {
-		log.Printf("❌ Failed to unmarshal market list: %v", err)
+		log.Printf(" Failed to unmarshal market list: %v", err)
 		return quoteMarkets
 	}
 
@@ -1767,7 +1767,7 @@ func (c *coinexClient) GetQuoteCurrencyMarkets() []string {
 		}
 	}
 
-	log.Printf("📊 Found %d markets for quote currencies %v", len(quoteMarkets), c.allowedMarkets)
+	log.Printf(" Found %d markets for quote currencies %v", len(quoteMarkets), c.allowedMarkets)
 	return quoteMarkets
 }
 

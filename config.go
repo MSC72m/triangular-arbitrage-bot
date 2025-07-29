@@ -22,6 +22,7 @@ type OrderExecutionSettings struct {
 	OrderAmountType        string  `json:"orderAmountType"`        // "static" or "dynamic"
 	StaticOrderAmount      float64 `json:"staticOrderAmount"`      // Fixed USD amount per order (when static)
 	DynamicOrderPercentage float64 `json:"dynamicOrderPercentage"` // Percentage of available balance (when dynamic)
+	MaxVolumeFraction      float64 `json:"maxVolumeFraction"`      // Maximum fraction of available order book depth to use (0.0-1.0)
 	MaxDailySpend          float64 `json:"maxDailySpend"`          // Maximum USD to spend per day
 	AccountBalance         float64 `json:"accountBalance"`         // Current account balance (USD)
 	EnableSpendingLimits   bool    `json:"enableSpendingLimits"`   // Enable spending protection
@@ -107,7 +108,7 @@ func DefaultConfig() *Config {
 		OrderBookDepthLimit: 5, // Analyze top 5 levels
 
 		// Rate limiting defaults
-		RateLimitPerSecond: 10,
+		RateLimitPerSecond: 15,
 		RateLimitPerMinute: 300,
 
 		// Performance defaults
@@ -149,6 +150,7 @@ func DefaultConfig() *Config {
 			OrderAmountType:        "static",
 			StaticOrderAmount:      3.5,  // $3.50 per order
 			DynamicOrderPercentage: 0.25, // 25% of available balance
+			MaxVolumeFraction:      0.5,  // Use up to 50% of order book depth
 			MaxDailySpend:          20.0, // $20 max per day
 			AccountBalance:         1.5,  // $1.50 available balance
 			EnableSpendingLimits:   true, // Enable spending protection
@@ -185,32 +187,33 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 
-	fmt.Printf("🔍 Loaded configuration:\n")
-	fmt.Printf("   📈 Profit Threshold: %.4f%%\n", config.ProfitThreshold*100)
-	fmt.Printf("   📈 Quote Currencies: %v\n", config.QuoteCurrencies)
-	fmt.Printf("   📈 Include BTC: %v\n", config.IncludeBTC)
+	fmt.Printf(" Loaded configuration:\n")
+	fmt.Printf("    Profit Threshold: %.4f%%\n", config.ProfitThreshold*100)
+	fmt.Printf("    Quote Currencies: %v\n", config.QuoteCurrencies)
+	fmt.Printf("    Include BTC: %v\n", config.IncludeBTC)
 	fmt.Printf("   🔒 Asset Locking Enabled: %v\n", config.EnableAssetLocking)
 	fmt.Printf("   ⏱️  Order Execution Time: %dms\n", config.OrderExecutionTimeMs)
-	fmt.Printf("   📊 Max Orders Per Asset: %d\n", config.MaxConcurrentOrdersPerAsset)
-	fmt.Printf("   🎯 Order Simulation: %v\n", config.EnableOrderSimulation)
-	fmt.Printf("   📈 Order Book Depth Limit: %d\n", config.OrderBookDepthLimit)
-	fmt.Printf("   📈 Rate Limit Per Second: %d\n", config.RateLimitPerSecond)
-	fmt.Printf("   📈 Rate Limit Per Minute: %d\n", config.RateLimitPerMinute)
-	fmt.Printf("   📈 Max Latency Ms: %d\n", config.MaxLatencyMs)
-	fmt.Printf("   📈 Concurrent Scans: %d\n", config.ConcurrentScans)
-	fmt.Printf("   📈 Log Level: %s\n", config.LogLevel)
-	fmt.Printf("   📈 Default Trading Fee: %.4f%%\n", config.DefaultTradingFee*100)
-	fmt.Printf("   🔄 FOK Order Settings:\n")
+	fmt.Printf("    Max Orders Per Asset: %d\n", config.MaxConcurrentOrdersPerAsset)
+	fmt.Printf("    Order Simulation: %v\n", config.EnableOrderSimulation)
+	fmt.Printf("    Order Book Depth Limit: %d\n", config.OrderBookDepthLimit)
+	fmt.Printf("    Rate Limit Per Second: %d\n", config.RateLimitPerSecond)
+	fmt.Printf("    Rate Limit Per Minute: %d\n", config.RateLimitPerMinute)
+	fmt.Printf("    Max Latency Ms: %d\n", config.MaxLatencyMs)
+	fmt.Printf("    Concurrent Scans: %d\n", config.ConcurrentScans)
+	fmt.Printf("    Log Level: %s\n", config.LogLevel)
+	fmt.Printf("    Default Trading Fee: %.4f%%\n", config.DefaultTradingFee*100)
+	fmt.Printf("    FOK Order Settings:\n")
 	fmt.Printf("       Polling Frequency: %.1fHz\n", config.FOKOrderSettings.PollingFrequencyHz)
 	fmt.Printf("       Order Timeout: %d seconds\n", config.FOKOrderSettings.OrderTimeoutSeconds)
 	fmt.Printf("       Max Retry Attempts: %d\n", config.FOKOrderSettings.MaxRetryAttempts)
 	fmt.Printf("       Enable Aggressive Re-evaluation: %v\n", config.FOKOrderSettings.EnableAggressiveReEvaluation)
 	fmt.Printf("       Cancel All on Single Failure: %v\n", config.FOKOrderSettings.CancelAllOnSingleFailure)
-	fmt.Printf("   🔄 Order Execution Settings:\n")
+	fmt.Printf("    Order Execution Settings:\n")
 	fmt.Printf("       Max Orders Per Second: %.2f\n", config.OrderExecutionSettings.MaxOrdersPerSecond)
 	fmt.Printf("       Max Concurrent Orders: %d\n", config.OrderExecutionSettings.MaxConcurrentOrders)
 	fmt.Printf("       Order Amount Type: %s\n", config.OrderExecutionSettings.OrderAmountType)
 	fmt.Printf("       Dynamic Order Percentage: %.2f%%\n", config.OrderExecutionSettings.DynamicOrderPercentage*100)
+	fmt.Printf("       Max Volume Fraction: %.2f%%\n", config.OrderExecutionSettings.MaxVolumeFraction*100)
 	fmt.Printf("       Max Daily Spend: %.2f\n", config.OrderExecutionSettings.MaxDailySpend)
 	fmt.Printf("       Account Balance: %.2f\n", config.OrderExecutionSettings.AccountBalance)
 	fmt.Printf("       Enable Spending Limits: %v\n", config.OrderExecutionSettings.EnableSpendingLimits)
@@ -238,12 +241,12 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("secretKey appears to be invalid (too short) - required for real trading")
 		}
 
-		fmt.Printf("⚠️  REAL TRADING MODE VALIDATION:\n")
+		fmt.Printf("  REAL TRADING MODE VALIDATION:\n")
 		fmt.Printf("   🔑 API Key: %s...%s (length: %d)\n",
 			c.APIKey[:4], c.APIKey[len(c.APIKey)-4:], len(c.APIKey))
 		fmt.Printf("   🔐 Secret Key: %s...%s (length: %d)\n",
 			c.SecretKey[:4], c.SecretKey[len(c.SecretKey)-4:], len(c.SecretKey))
-		fmt.Printf("   ✅ API credentials appear valid for real trading\n")
+		fmt.Printf("    API credentials appear valid for real trading\n")
 	}
 
 	if c.ProfitThreshold <= 0 {
@@ -281,6 +284,9 @@ func (c *Config) Validate() error {
 	}
 	if c.OrderExecutionSettings.DynamicOrderPercentage <= 0 || c.OrderExecutionSettings.DynamicOrderPercentage > 1 {
 		return fmt.Errorf("orderExecutionSettings.dynamicOrderPercentage must be between 0 and 1")
+	}
+	if c.OrderExecutionSettings.MaxVolumeFraction < 0 || c.OrderExecutionSettings.MaxVolumeFraction > 1 {
+		return fmt.Errorf("orderExecutionSettings.maxVolumeFraction must be between 0 and 1")
 	}
 	if c.OrderExecutionSettings.MaxDailySpend <= 0 {
 		return fmt.Errorf("orderExecutionSettings.maxDailySpend must be positive")

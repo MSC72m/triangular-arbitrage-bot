@@ -1,0 +1,39 @@
+{
+  "profitThreshold": 0.001,
+  "simulationMode": false,
+  "concurrentScans": 250,
+  "maxLatencyMs": 200,
+  "rateLimitPerSecond": 20,
+  "quoteCurrencies": ["USDT", "USDC"],
+  "criticalMarkets": ["USDCUSDT", "USDTUSDC"],
+  "enableAssetLocking": true,
+  "orderExecutionTimeMs": 1500,
+  "maxConcurrentOrdersPerAsset": 1,
+  "orderTimeoutSeconds": 30,
+  "enableOrderSimulation": false,
+  "logLevel": "debug",
+  "tradingFees": {
+    "USDT": 0.002,
+    "USDC": 0.002
+  },
+  "defaultTradingFee": 0.002,
+  "fokOrderSettings": {
+    "pollingFrequencyHz": 2.5,
+    "orderTimeoutSeconds": 2,
+    "maxRetryAttempts": 3,
+    "enableAggressiveReEvaluation": true,
+    "cancelAllOnSingleFailure": true
+  },
+  "orderExecutionSettings": {
+    "maxOrdersPerSecond": 5.0,
+    "maxConcurrentOrders": 5,
+    "orderAmountType": "static",
+    "staticOrderAmount": 1.0,
+    "dynamicOrderPercentage": 0.25,
+    "maxDailySpend": 20.0,
+    "accountBalance": 20,
+    "enableSpendingLimits": true,
+    "minOrderAmount": 0.1,
+    "maxOrderAmount": 5.0
+  }
+}

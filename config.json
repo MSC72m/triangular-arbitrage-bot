@@ -3,7 +3,7 @@
   "apiBaseURLV2": "https://api.coinex.com/v2/",
   "profitThreshold": 0.00001,
   "simulationMode": false,
-  "concurrentScans": 300,
+  "concurrentScans": 160,
   "wsSubscriptionsBatchSize": 50,
   "maxLatencyMs": 200,
   "rateLimitPerSecond": 15,
@@ -35,15 +35,15 @@
     "cancelAllOnSingleFailure": true
   },
   "orderExecutionSettings": {
-    "maxOrdersPerSecond": 5.0,
-    "maxConcurrentOrders": 5,
+    "maxOrdersPerSecond": 3.0,
+    "maxConcurrentOrders": 3,
     "orderAmountType": "static",
-    "staticOrderAmount": 3.5,
+    "staticOrderAmount": 4,
     "dynamicOrderPercentage": 0.25,
     "maxVolumeFraction": 0.5,
     "accountBalance": 20,
     "enableSpendingLimits": true,
     "minOrderAmount": 0.1,
-    "maxOrderAmount": 5.0
+    "maxOrderAmount": 5
   }
 }

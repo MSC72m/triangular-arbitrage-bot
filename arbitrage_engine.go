@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"      // Added for re-evaluation simulation
@@ -236,22 +237,11 @@ func (alm *AssetLockManager) GetAssetOrderCount(asset string) int {
 
 // extractAssetsFromPath extracts the specific markets/trading pairs that should be locked
 func (alm *AssetLockManager) extractAssetsFromPath(path TriangularPath) []string {
-	// Instead of locking base assets, lock the specific trading pairs (markets)
-	// This allows the same base asset (e.g., GMT) to trade on different pairs simultaneously
-	markets := []string{path.Market1, path.Market2, path.Market3}
+	// Only lock the base asset (e.g., "HNT") to prevent multiple arbitrage attempts on the same asset
+	// This allows different trading pairs of the same asset to be used simultaneously
+	baseAsset := path.Asset1
 
-	// Remove duplicates if any
-	uniqueMarkets := make(map[string]bool)
-	for _, market := range markets {
-		uniqueMarkets[market] = true
-	}
-
-	result := make([]string, 0, len(uniqueMarkets))
-	for market := range uniqueMarkets {
-		result = append(result, market)
-	}
-
-	return result
+	return []string{baseAsset}
 }
 
 // getLockedAssetsSnapshot returns a snapshot of locked assets (for logging)
@@ -285,6 +275,8 @@ type OrderExecutionManager struct {
 	assetLockManager *AssetLockManager
 	orderResultChan  chan *OrderResult
 	config           *Config
+	shutdown         bool
+	shutdownMutex    sync.RWMutex
 }
 
 // NewOrderExecutionManager creates a new order execution manager
@@ -294,11 +286,34 @@ func NewOrderExecutionManager(coinexClient *coinexClient, assetLockManager *Asse
 		assetLockManager: assetLockManager,
 		orderResultChan:  make(chan *OrderResult, 2000), // Buffered channel for order results
 		config:           config,
+		shutdown:         false,
 	}
+}
+
+// Shutdown marks the execution manager as shutting down
+func (oem *OrderExecutionManager) Shutdown() {
+	oem.shutdownMutex.Lock()
+	defer oem.shutdownMutex.Unlock()
+	oem.shutdown = true
+	log.Printf("🛑 ORDER EXECUTION MANAGER SHUTDOWN | Stopping new arbitrage executions")
+}
+
+// IsShutdown checks if the execution manager is shutting down
+func (oem *OrderExecutionManager) IsShutdown() bool {
+	oem.shutdownMutex.RLock()
+	defer oem.shutdownMutex.RUnlock()
+	return oem.shutdown
 }
 
 // ExecuteArbitrageOrders executes all three legs of an arbitrage trade with advanced FOK handling
 func (oem *OrderExecutionManager) ExecuteArbitrageOrders(opportunity ArbitrageOpportunity) {
+	// Check if we're shutting down
+	if oem.IsShutdown() {
+		log.Printf("🚫 ARBITRAGE REJECTED | Shutdown in progress | Path: %s→%s→%s",
+			opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
+		return
+	}
+
 	path := opportunity.Path
 	markets := oem.assetLockManager.extractAssetsFromPath(path)
 
@@ -317,6 +332,9 @@ func (oem *OrderExecutionManager) ExecuteArbitrageOrders(opportunity ArbitrageOp
 		executionMode, path.Market1, path.Market2, path.Market3, markets, opportunity.NetProfit*100)
 
 	// Start FOK arbitrage execution with retry logic
+	log.Printf("🚀 STARTING EXECUTION | Asset: %s | Path: %s→%s→%s | Volume: $%.2f",
+		path.Asset1, path.Market1, path.Market2, path.Market3, opportunity.Volume)
+
 	oem.executeFOKArbitrageWithRetry(opportunity, markets, 0)
 }
 
@@ -333,10 +351,25 @@ func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity Arbit
 		log.Printf("🔓 ASSETS UNLOCKED | Markets: %v", markets)
 	}()
 
-	// Step 3: Execute orders sequentially as required by specification
+	// Step 1: Assume sufficient balance from config (no API call to avoid delays)
+	requiredAmount := opportunity.Volume * opportunity.Price1
+	if requiredAmount > oem.config.OrderExecutionSettings.AccountBalance {
+		log.Printf("🚫 INSUFFICIENT CONFIG BALANCE | Required: $%.2f | Available: $%.2f | Path: %s→%s→%s",
+			requiredAmount, oem.config.OrderExecutionSettings.AccountBalance,
+			opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
+		return
+	}
+	log.Printf("💰 CONFIG BALANCE CHECK PASSED | Required: $%.2f | Available: $%.2f | Can execute arbitrage",
+		requiredAmount, oem.config.OrderExecutionSettings.AccountBalance)
+
+	// Step 2: Execute orders sequentially as required by specification
 	log.Printf("📤 EXECUTING FOK ORDERS SEQUENTIALLY | Attempt: %d/%d", attemptNumber, oem.config.FOKOrderSettings.MaxRetryAttempts)
 
-	// Execute Leg-1: First order
+	// Track all trackers for atomic execution
+	var trackers []*FOKOrderTracker
+	var results []*OrderResult
+
+	// Execute Leg-1: First order (buy asset with USDT)
 	log.Printf(" ATTEMPTING LEG-1 | Market: %s | Type: %s | Amount: %.6f | Latest Price: %.8f",
 		opportunity.Path.Market1, "buy", opportunity.Volume, opportunity.Price1)
 
@@ -346,70 +379,222 @@ func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity Arbit
 		log.Printf(" LEG-1 REJECTED | Market: %s | Aborting arbitrage", opportunity.Path.Market1)
 		return
 	}
+	trackers = append(trackers, tracker1)
 
-	// Wait for Leg-1 result
+	// Wait for Leg-1 result with timeout
 	select {
 	case result1 := <-orderResultChan1:
+		results = append(results, result1)
 		if result1.Status != OrderStatusFilled {
 			log.Printf(" LEG-1 FAILED | Status: %s | Error: %s | Aborting arbitrage", result1.Status, result1.ErrorMessage)
+			// Cancel any active orders from this attempt
+			oem.cancelAllActiveOrders(trackers)
 			return
 		}
-		log.Printf(" LEG-1 SUCCESS | ID: %s | Status: %s", result1.OrderID, result1.Status)
-	case <-time.After(time.Duration(oem.config.FOKOrderSettings.OrderTimeoutSeconds) * time.Second):
-		log.Printf(" LEG-1 TIMEOUT | Aborting arbitrage")
+		log.Printf("✅ LEG-1 SUCCESS | ID: %s | Status: %s | Filled Amount: %.6f", result1.OrderID, result1.Status, result1.FilledAmount)
+	case <-time.After(5 * time.Second): // 5 second timeout for order placement
+		log.Printf(" LEG-1 TIMEOUT | Order placement took too long, aborting arbitrage")
+		// Cancel any active orders from this attempt
+		oem.cancelAllActiveOrders(trackers)
 		return
 	}
 
-	// Execute Leg-2: Second order
+	// Calculate Leg-2 amount based on Leg-1 result
+	leg2Amount := results[0].FilledAmount // Use the actual filled amount from Leg-1
+	log.Printf(" CALCULATING LEG-2 AMOUNT | From Leg-1 filled: %.6f | For Leg-2: %.6f", results[0].FilledAmount, leg2Amount)
+
+	// Execute Leg-2: Second order (sell asset for USDC)
 	log.Printf(" ATTEMPTING LEG-2 | Market: %s | Type: %s | Amount: %.6f | Latest Price: %.8f",
-		opportunity.Path.Market2, "sell", opportunity.Volume, opportunity.Price2)
+		opportunity.Path.Market2, "sell", leg2Amount, opportunity.Price2)
 
 	orderResultChan2 := make(chan *OrderResult, 1)
-	tracker2 := oem.coinexClient.PlaceFOKOrder(opportunity.Path.Market2, "sell", opportunity.Volume, opportunity.Price2, orderResultChan2)
+	tracker2 := oem.coinexClient.PlaceFOKOrder(opportunity.Path.Market2, "sell", leg2Amount, opportunity.Price2, orderResultChan2)
 	if tracker2 == nil {
-		log.Printf(" LEG-2 REJECTED | Market: %s | Aborting arbitrage", opportunity.Path.Market2)
+		log.Printf(" LEG-2 REJECTED | Market: %s | Completing cycle with Leg-1 only", opportunity.Path.Market2)
+		// Complete the cycle by selling the asset we bought in Leg-1
+		oem.completeArbitrageCycle(results, trackers, opportunity.Path)
 		return
 	}
+	trackers = append(trackers, tracker2)
 
 	// Wait for Leg-2 result
 	select {
 	case result2 := <-orderResultChan2:
+		results = append(results, result2)
 		if result2.Status != OrderStatusFilled {
-			log.Printf(" LEG-2 FAILED | Status: %s | Error: %s | Aborting arbitrage", result2.Status, result2.ErrorMessage)
+			log.Printf(" LEG-2 FAILED | Status: %s | Error: %s | Completing cycle with Leg-1 only", result2.Status, result2.ErrorMessage)
+			// Complete the cycle by selling the asset we bought in Leg-1
+			oem.completeArbitrageCycle(results, trackers, opportunity.Path)
 			return
 		}
-		log.Printf(" LEG-2 SUCCESS | ID: %s | Status: %s", result2.OrderID, result2.Status)
-	case <-time.After(time.Duration(oem.config.FOKOrderSettings.OrderTimeoutSeconds) * time.Second):
-		log.Printf(" LEG-2 TIMEOUT | Aborting arbitrage")
+		log.Printf("✅ LEG-2 SUCCESS | ID: %s | Status: %s | Filled Amount: %.6f", result2.OrderID, result2.Status, result2.FilledAmount)
+	case <-time.After(5 * time.Second): // 5 second timeout for order placement
+		log.Printf(" LEG-2 TIMEOUT | Order placement took too long, completing cycle with Leg-1 only")
+		// Complete the cycle by selling the asset we bought in Leg-1
+		oem.completeArbitrageCycle(results, trackers, opportunity.Path)
 		return
 	}
 
-	// Execute Leg-3: Third order
+	// Calculate Leg-3 amount based on Leg-2 result
+	// For Leg-3, we need to convert the USDC amount to USDT amount
+	leg3Amount := results[1].FilledAmount * results[1].AvgPrice // Convert USDC to USDT equivalent
+	log.Printf(" CALCULATING LEG-3 AMOUNT | From Leg-2 filled: %.6f | Avg Price: %.8f | For Leg-3: %.6f",
+		results[1].FilledAmount, results[1].AvgPrice, leg3Amount)
+
+	// Execute Leg-3: Third order (buy USDT with USDC)
 	log.Printf(" ATTEMPTING LEG-3 | Market: %s | Type: %s | Amount: %.6f | Latest Price: %.8f",
-		opportunity.Path.Market3, "buy", opportunity.Volume, opportunity.Price3)
+		opportunity.Path.Market3, "buy", leg3Amount, opportunity.Price3)
 
 	orderResultChan3 := make(chan *OrderResult, 1)
-	tracker3 := oem.coinexClient.PlaceFOKOrder(opportunity.Path.Market3, "buy", opportunity.Volume, opportunity.Price3, orderResultChan3)
+	tracker3 := oem.coinexClient.PlaceFOKOrder(opportunity.Path.Market3, "buy", leg3Amount, opportunity.Price3, orderResultChan3)
 	if tracker3 == nil {
-		log.Printf(" LEG-3 REJECTED | Market: %s | Aborting arbitrage", opportunity.Path.Market3)
+		log.Printf(" LEG-3 REJECTED | Market: %s | Completing cycle with Leg-1 and Leg-2", opportunity.Path.Market3)
+		// Complete the cycle by converting USDC back to USDT
+		oem.completeArbitrageCycle(results, trackers, opportunity.Path)
 		return
 	}
+	trackers = append(trackers, tracker3)
 
 	// Wait for Leg-3 result
 	select {
 	case result3 := <-orderResultChan3:
+		results = append(results, result3)
 		if result3.Status != OrderStatusFilled {
-			log.Printf(" LEG-3 FAILED | Status: %s | Error: %s | Arbitrage incomplete", result3.Status, result3.ErrorMessage)
+			log.Printf(" LEG-3 FAILED | Status: %s | Error: %s | Completing cycle with Leg-1 and Leg-2", result3.Status, result3.ErrorMessage)
+			// Complete the cycle by converting USDC back to USDT
+			oem.completeArbitrageCycle(results, trackers, opportunity.Path)
 			return
 		}
-		log.Printf(" LEG-3 SUCCESS | ID: %s | Status: %s", result3.OrderID, result3.Status)
-	case <-time.After(time.Duration(oem.config.FOKOrderSettings.OrderTimeoutSeconds) * time.Second):
-		log.Printf(" LEG-3 TIMEOUT | Arbitrage incomplete")
+		log.Printf("✅ LEG-3 SUCCESS | ID: %s | Status: %s | Filled Amount: %.6f", result3.OrderID, result3.Status, result3.FilledAmount)
+	case <-time.After(5 * time.Second): // 5 second timeout for order placement
+		log.Printf(" LEG-3 TIMEOUT | Order placement took too long, completing cycle with Leg-1 and Leg-2")
+		// Complete the cycle by converting USDC back to USDT
+		oem.completeArbitrageCycle(results, trackers, opportunity.Path)
 		return
 	}
 
 	// All three legs completed successfully
 	log.Printf("✅ ARBITRAGE COMPLETED | All three legs executed successfully")
+	log.Printf("📊 ARBITRAGE SUMMARY | Leg-1: %.6f → Leg-2: %.6f → Leg-3: %.6f",
+		results[0].FilledAmount, results[1].FilledAmount, results[2].FilledAmount)
+}
+
+// checkBalanceBeforeArbitrage checks if we have sufficient balance to execute the arbitrage
+func (oem *OrderExecutionManager) checkBalanceBeforeArbitrage(opportunity ArbitrageOpportunity) bool {
+	// Get real balance from CoinEx API
+	balanceResponse, err := oem.coinexClient.GetBalance()
+	if err != nil {
+		log.Printf("⚠️ BALANCE CHECK FAILED | Cannot get balance: %v | Proceeding with config balance", err)
+		// Fallback to config balance
+		return oem.checkBalanceFromConfig(opportunity)
+	}
+
+	// Parse balance response
+	var balanceData map[string]interface{}
+	if err := json.Unmarshal([]byte(balanceResponse), &balanceData); err != nil {
+		log.Printf("⚠️ BALANCE PARSE FAILED | Cannot parse balance response: %v | Proceeding with config balance", err)
+		return oem.checkBalanceFromConfig(opportunity)
+	}
+
+	// Check if response is successful
+	if code, ok := balanceData["code"].(float64); !ok || code != 0 {
+		message, _ := balanceData["message"].(string)
+		log.Printf("⚠️ BALANCE API ERROR | Code: %.0f | Message: %s | Proceeding with config balance", code, message)
+		return oem.checkBalanceFromConfig(opportunity)
+	}
+
+	// Extract balance data
+	data, ok := balanceData["data"].(map[string]interface{})
+	if !ok {
+		log.Printf("⚠️ BALANCE DATA MISSING | Cannot find data in response | Proceeding with config balance")
+		return oem.checkBalanceFromConfig(opportunity)
+	}
+
+	// Look for USDT balance
+	usdtBalance := 0.0
+	if usdtData, exists := data["USDT"].(map[string]interface{}); exists {
+		if available, ok := usdtData["available"].(string); ok {
+			if balance, err := strconv.ParseFloat(available, 64); err == nil {
+				usdtBalance = balance
+			}
+		}
+	}
+
+	settings := oem.config.OrderExecutionSettings
+	requiredBalance := settings.StaticOrderAmount
+
+	log.Printf("💰 REAL BALANCE CHECK | USDT Available: $%.2f | Required: $%.2f", usdtBalance, requiredBalance)
+
+	if usdtBalance < requiredBalance {
+		log.Printf("🚫 INSUFFICIENT USDT BALANCE | Available: $%.2f | Required: $%.2f | Cannot execute Leg-1",
+			usdtBalance, requiredBalance)
+		return false
+	}
+
+	log.Printf("✅ BALANCE CHECK PASSED | USDT Available: $%.2f | Required: $%.2f | Can execute arbitrage",
+		usdtBalance, requiredBalance)
+	return true
+}
+
+// checkBalanceFromConfig checks balance using config values as fallback
+func (oem *OrderExecutionManager) checkBalanceFromConfig(opportunity ArbitrageOpportunity) bool {
+	settings := oem.config.OrderExecutionSettings
+	requiredBalance := settings.StaticOrderAmount
+
+	// Check if we have enough balance for the first leg
+	if settings.AccountBalance < requiredBalance {
+		log.Printf("🚫 INSUFFICIENT CONFIG BALANCE | Required: $%.2f | Available: $%.2f | Cannot execute Leg-1",
+			requiredBalance, settings.AccountBalance)
+		return false
+	}
+
+	log.Printf("💰 CONFIG BALANCE CHECK PASSED | Required: $%.2f | Available: $%.2f | Can execute arbitrage",
+		requiredBalance, settings.AccountBalance)
+	return true
+}
+
+// cancelAllActiveOrders cancels all active orders in the trackers slice
+func (oem *OrderExecutionManager) cancelAllActiveOrders(trackers []*FOKOrderTracker) {
+	if len(trackers) == 0 {
+		return
+	}
+
+	// Check if we're shutting down
+	if oem.IsShutdown() {
+		log.Printf("🛑 SKIPPING CANCELLATION | Shutdown in progress, avoiding channel operations")
+		return
+	}
+
+	log.Printf("🛑 CANCELLING %d ACTIVE ORDERS | Atomic execution failed", len(trackers))
+
+	for i, tracker := range trackers {
+		if tracker != nil {
+			log.Printf("🛑 CANCELLING LEG-%d | ID: %s | Market: %s", i+1, tracker.OrderID, tracker.Market)
+
+			// Safely send cancellation signal without panicking
+			if tracker.CancelChan != nil {
+				// Use a recover mechanism to prevent panic on closed channel
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("🛑 CANCELLATION PANIC RECOVERED | LEG-%d | ID: %s | Error: %v", i+1, tracker.OrderID, r)
+						}
+					}()
+
+					select {
+					case tracker.CancelChan <- struct{}{}:
+						log.Printf("🛑 CANCELLATION SIGNAL SENT | LEG-%d | ID: %s", i+1, tracker.OrderID)
+					default:
+						// Channel is full or closed, try to close it safely
+						log.Printf("🛑 CANCELLATION CHANNEL FULL/CLOSED | LEG-%d | ID: %s", i+1, tracker.OrderID)
+						// Don't try to close the channel as it might already be closed
+					}
+				}()
+			} else {
+				log.Printf("🛑 CANCELLATION CHANNEL NIL | LEG-%d | ID: %s", i+1, tracker.OrderID)
+			}
+		}
+	}
 }
 
 // analyzeFOKResultsAndDecide analyzes FOK results and decides whether to retry or complete
@@ -583,6 +768,13 @@ func (ae *ArbitrageEngine) executionWorker() {
 		case <-ae.stopChan:
 			return
 		case opportunity := <-ae.executionChan:
+			// Check if we're shutting down before processing
+			if ae.orderExecutionManager.IsShutdown() {
+				log.Printf("🚫 EXECUTION REJECTED | Shutdown in progress | Path: %s→%s→%s",
+					opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
+				continue
+			}
+
 			if ae.config.SimulationMode {
 				ae.simulateExecution(opportunity)
 			} else {
@@ -712,7 +904,17 @@ func (ae *ArbitrageEngine) Stop() {
 
 	if !ae.stopped {
 		ae.stopped = true
+
+		// Shutdown order execution manager first to prevent channel panics
+		ae.orderExecutionManager.Shutdown()
+
+		// Give a moment for shutdown to propagate
+		time.Sleep(100 * time.Millisecond)
+
+		// Close the stop channel
 		close(ae.stopChan)
+
+		log.Printf("🛑 ARBITRAGE ENGINE STOPPED | All components shutdown safely")
 	}
 }
 
@@ -1741,4 +1943,127 @@ func (ae *ArbitrageEngine) detectLoop() {
 	}
 
 	ae.lastOpportunityTime = now
+}
+
+// completeArbitrageCycle completes the arbitrage cycle by executing the remaining legs
+// to convert any assets we've acquired back to USDT
+func (oem *OrderExecutionManager) completeArbitrageCycle(results []*OrderResult, trackers []*FOKOrderTracker, path TriangularPath) {
+	log.Printf("🔄 COMPLETING ARBITRAGE CYCLE | Results: %d | Path: %s→%s→%s",
+		len(results), path.Market1, path.Market2, path.Market3)
+
+	// Cancel any remaining active orders first
+	oem.cancelAllActiveOrders(trackers)
+
+	// Analyze what we have and what we need to complete
+	var usdtSpent float64
+	var assetAcquired float64
+	var usdcAcquired float64
+
+	// Calculate what we've acquired so far
+	for i, result := range results {
+		if result.Status == OrderStatusFilled {
+			switch i {
+			case 0: // Leg-1: Bought asset with USDT
+				usdtSpent = result.FilledAmount * result.AvgPrice
+				assetAcquired = result.FilledAmount
+				log.Printf("  LEG-1 COMPLETED | Spent: $%.4f USDT | Acquired: %.6f %s",
+					usdtSpent, assetAcquired, path.Asset1)
+			case 1: // Leg-2: Sold asset for USDC
+				usdcAcquired = result.FilledAmount * result.AvgPrice
+				log.Printf("  LEG-2 COMPLETED | Sold: %.6f %s | Acquired: $%.4f USDC",
+					result.FilledAmount, path.Asset1, usdcAcquired)
+			case 2: // Leg-3: Bought USDT with USDC
+				log.Printf("  LEG-3 COMPLETED | Converted USDC back to USDT")
+			}
+		}
+	}
+
+	// Determine what we need to complete the cycle
+	if len(results) == 1 {
+		// Only Leg-1 completed - we have asset, need to sell it for USDT
+		log.Printf("🔄 COMPLETING CYCLE | We have %.6f %s, need to sell for USDT", assetAcquired, path.Asset1)
+		oem.executeEmergencySell(assetAcquired, path.Market1, "sell", path.Asset1)
+
+	} else if len(results) == 2 {
+		// Leg-1 and Leg-2 completed - we have USDC, need to convert to USDT
+		log.Printf("🔄 COMPLETING CYCLE | We have $%.4f USDC, need to convert to USDT", usdcAcquired)
+		oem.executeEmergencySell(usdcAcquired, path.Market3, "buy", "USDT")
+
+	} else {
+		// All legs completed or no fills
+		log.Printf("🔄 CYCLE ANALYSIS | No emergency completion needed")
+	}
+}
+
+// executeEmergencySell executes an emergency sell order to complete the cycle
+func (oem *OrderExecutionManager) executeEmergencySell(amount float64, market string, orderType string, asset string) {
+	log.Printf("🚨 EMERGENCY %s | Market: %s | Amount: %.6f %s",
+		strings.ToUpper(orderType), market, amount, asset)
+
+	// Get current market price for emergency order
+	currentPrice := oem.getCurrentMarketPrice(market)
+	if currentPrice <= 0 {
+		log.Printf("❌ EMERGENCY ORDER FAILED | Cannot get price for %s", market)
+		return
+	}
+
+	// Place emergency order with market price (slightly worse than limit)
+	emergencyPrice := currentPrice
+	if orderType == "sell" {
+		emergencyPrice *= 0.999 // Slightly below market for quick fill
+	} else {
+		emergencyPrice *= 1.001 // Slightly above market for quick fill
+	}
+
+	log.Printf("🚨 PLACING EMERGENCY ORDER | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
+		market, orderType, amount, emergencyPrice)
+
+	orderResultChan := make(chan *OrderResult, 1)
+	tracker := oem.coinexClient.PlaceFOKOrder(market, orderType, amount, emergencyPrice, orderResultChan)
+	if tracker == nil {
+		log.Printf("❌ EMERGENCY ORDER REJECTED | Market: %s", market)
+		return
+	}
+
+	// Wait for emergency order result
+	select {
+	case result := <-orderResultChan:
+		if result.Status == OrderStatusFilled {
+			log.Printf("✅ EMERGENCY ORDER SUCCESS | Market: %s | Filled: %.6f | Avg Price: %.8f",
+				market, result.FilledAmount, result.AvgPrice)
+		} else {
+			log.Printf("❌ EMERGENCY ORDER FAILED | Market: %s | Status: %s | Error: %s",
+				market, result.Status, result.ErrorMessage)
+		}
+	case <-time.After(10 * time.Second):
+		log.Printf("❌ EMERGENCY ORDER TIMEOUT | Market: %s", market)
+	}
+}
+
+// getCurrentMarketPrice gets the current market price for emergency orders
+func (oem *OrderExecutionManager) getCurrentMarketPrice(market string) float64 {
+	// This would typically get the current price from market data
+	// For now, we'll use a reasonable default based on the market
+	if strings.HasSuffix(market, "USDT") {
+		// Extract asset from market (e.g., "BTCUSDT" -> "BTC")
+		asset := strings.TrimSuffix(market, "USDT")
+		switch asset {
+		case "BTC":
+			return 118000.0
+		case "ETH":
+			return 3500.0
+		case "FLOW":
+			return 0.38
+		case "BTT":
+			return 0.0000007
+		default:
+			return 1.0 // Default price
+		}
+	} else if strings.HasSuffix(market, "USDC") {
+		return 1.0 // USDC pairs typically around 1.0
+	} else if market == "USDCUSDT" || market == "USDTUSDC" {
+		return 1.0 // Stablecoin pairs
+	}
+
+	return 1.0 // Default fallback
 }

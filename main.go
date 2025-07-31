@@ -296,6 +296,7 @@ func main() {
 	arbitrageEngine.Start()
 
 	// Start simple periodic metrics logging
+	metricsStopChan := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		priceTicker := time.NewTicker(2 * time.Minute)          // Log prices less frequently
@@ -315,6 +316,9 @@ func main() {
 
 		for {
 			select {
+			case <-metricsStopChan:
+				log.Printf("🛑 Metrics logging stopped")
+				return
 			case <-ticker.C:
 				logBasicMetrics(metrics, marketDepths)
 			case <-priceTicker.C:
@@ -363,94 +367,95 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Stop arbitrage engine FIRST to prevent new opportunities from being queued
-	log.Println("Stopping arbitrage engine...")
+	// Step 1: Stop arbitrage engine FIRST to prevent new opportunities from being queued
+	log.Println("🛑 Step 1: Stopping arbitrage engine...")
 	arbitrageEngine.Stop()
 
-	// Wait for active FOK orders to complete their FULL 3-leg cycles
-	log.Println("Waiting for ALL active FOK orders to complete...")
+	// Step 2: Stop WebSocket data processing to prevent new market data updates
+	log.Println("🛑 Step 2: Stopping WebSocket data processing...")
+	httpClient.StopWebSocketProcessing()
+
+	// Step 2.5: Stop metrics logging to prevent continued output
+	log.Println("🛑 Step 2.5: Stopping metrics logging...")
+	close(metricsStopChan)
+
+	// Step 3: Wait for active FOK orders to complete their FULL 3-leg cycles
+	log.Println("🛑 Step 3: Waiting for ALL active FOK orders to complete...")
 	activeTrackers := coinexClient.GetActiveTrackers()
 
 	if len(activeTrackers) > 0 {
-		log.Printf("Found %d active FOK orders - waiting for COMPLETE execution...", len(activeTrackers))
+		log.Printf("🔄 %d FOK orders still active - waiting for completion...", len(activeTrackers))
 
-		// Wait indefinitely for ALL orders to complete (no timeout pressure)
-		// Each FOK order has max 2s timeout, but we want full 3-leg cycle completion
-		waitStart := time.Now()
-
-		for {
-			activeTrackers = coinexClient.GetActiveTrackers()
-			if len(activeTrackers) == 0 {
-				log.Printf("ALL FOK orders completed successfully in %v", time.Since(waitStart))
-				break
-			}
-
-			// Log every 2 seconds what we're waiting for
-			if int(time.Since(waitStart).Seconds())%2 == 0 {
-				log.Printf("Still waiting for %d FOK orders to complete... (%v elapsed)",
-					len(activeTrackers), time.Since(waitStart))
-
-				// Show which orders we're waiting for
-				for i, tracker := range activeTrackers {
-					if i < 3 { // Show first 3
-						log.Printf("   Order %d: %s | Market: %s | Age: %v",
-							i+1, tracker.OrderID, tracker.Market, time.Since(tracker.CreatedAt))
-					}
-				}
-				if len(activeTrackers) > 3 {
-					log.Printf("   ... and %d more orders", len(activeTrackers)-3)
-				}
-			}
-
-			time.Sleep(500 * time.Millisecond)
-		}
-	} else {
-		log.Println("No active FOK orders to wait for")
-	}
-
-	// Wait a moment for any in-flight opportunities to complete
-	time.Sleep(2 * time.Second)
-
-	// Check if there are any remaining active trackers after stopping
-	finalActiveTrackers := coinexClient.GetActiveTrackers()
-	if len(finalActiveTrackers) > 0 {
-		log.Printf("%d FOK orders still active after engine stop - waiting for completion...", len(finalActiveTrackers))
-
-		// Wait up to 10 seconds for remaining orders
-		remainingWaitCtx, remainingCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer remainingCancel()
+		// Wait up to 15 seconds for orders to complete
+		orderWaitCtx, orderCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer orderCancel()
 
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 
 		for {
 			select {
+			case <-orderWaitCtx.Done():
+				log.Printf("⏰ Timeout waiting for %d orders - forcing cancellation", len(coinexClient.GetActiveTrackers()))
+				// Cancel all remaining orders
+				coinexClient.CancelAllActiveOrders()
+				break
+			case <-ticker.C:
+				remaining := coinexClient.GetActiveTrackers()
+				if len(remaining) == 0 {
+					log.Println("✅ All orders completed successfully")
+					break
+				}
+				log.Printf("⏳ Still waiting for %d orders...", len(remaining))
+			}
+		}
+	} else {
+		log.Println("✅ No active orders to wait for")
+	}
+
+	// Step 4: Final check for any remaining orders
+	finalActiveTrackers := coinexClient.GetActiveTrackers()
+	if len(finalActiveTrackers) > 0 {
+		log.Printf("⚠️ %d FOK orders still active after engine stop - forcing cancellation", len(finalActiveTrackers))
+
+		// Force cancel all remaining orders
+		coinexClient.CancelAllActiveOrders()
+
+		// Wait up to 5 seconds for cancellation to complete
+		remainingWaitCtx, remainingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer remainingCancel()
+
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
 			case <-remainingWaitCtx.Done():
-				log.Printf("Timeout waiting for %d remaining orders - forcing shutdown", len(coinexClient.GetActiveTrackers()))
+				log.Printf("⏰ Timeout waiting for %d remaining orders - forcing shutdown", len(coinexClient.GetActiveTrackers()))
 				goto ClosingProgram
 			case <-ticker.C:
 				remaining := coinexClient.GetActiveTrackers()
 				if len(remaining) == 0 {
-					log.Println("All remaining orders completed")
+					log.Println("✅ All remaining orders cancelled")
 					break
 				}
-				log.Printf("Still waiting for %d orders...", len(remaining))
+				log.Printf("⏳ Still waiting for %d orders to cancel...", len(remaining))
 			}
 		}
 	ClosingProgram:
 	}
 
-	// Close WebSocket connection
-	log.Println("Closing WebSocket connection...")
+	// Step 5: Close WebSocket connection
+	log.Println("🛑 Step 4: Closing WebSocket connection...")
 	if err := httpClient.CloseWebSocket(); err != nil {
-		log.Printf("Error closing WebSocket: %v", err)
+		log.Printf("❌ Error closing WebSocket: %v", err)
 	}
 
-	// Final metrics log
-	log.Println("Final metrics:")
+	// Step 6: Final metrics log
+	log.Println("📊 Final metrics:")
 	logSimpleMetrics(metrics, marketDepths)
 
-	// Wait for shutdown or timeout
+	// Step 7: Wait for shutdown or timeout
 	done := make(chan struct{})
 	go func() {
 		// Simulate cleanup completion
@@ -460,10 +465,10 @@ func main() {
 
 	select {
 	case <-done:
-		log.Println("Graceful shutdown completed")
+		log.Println("✅ Graceful shutdown completed")
 	case <-shutdownCtx.Done():
-		log.Println("Shutdown timeout exceeded")
+		log.Println("⏰ Shutdown timeout exceeded")
 	}
 
-	log.Println("Triangular Arbitrage Bot stopped")
+	log.Println("🛑 Triangular Arbitrage Bot stopped")
 }

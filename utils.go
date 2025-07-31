@@ -94,7 +94,6 @@ func decompressGzip(data []byte) ([]byte, error) {
 
 // processWebSocketMessage processes incoming WebSocket messages and updates market depths
 func processWebSocketMessage(msg []byte, marketDepths *MarketDepths, metrics *Metrics, httpClient *HttpClient) error {
-	// Check if the message is compressed (gzip header: 0x1f 0x8b)
 	var processedMsg []byte
 	if len(msg) > 2 && msg[0] == 0x1f && msg[1] == 0x8b {
 		// This is compressed data, decompress it first
@@ -152,8 +151,20 @@ func processWebSocketMessage(msg []byte, marketDepths *MarketDepths, metrics *Me
 	}
 }
 
-// handleDepthUpdate processes order book depth updates
+// handleDepthUpdate processes depth updates to get order book data
 func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDepths, httpClient *HttpClient) error {
+	// Check if WebSocket processing has been stopped
+	if httpClient != nil {
+		httpClient.marketDataMu.RLock()
+		processingStopped := httpClient.wsProcessingStopped
+		httpClient.marketDataMu.RUnlock()
+
+		if processingStopped {
+			// Skip processing if shutdown is in progress
+			return nil
+		}
+	}
+
 	// CoinEx API format: {"method": "depth.update", "data": {...}}
 	data, ok := wsResponse["data"].(map[string]interface{})
 	if !ok {
@@ -172,49 +183,41 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 		return fmt.Errorf("invalid depth data in depth update: %+v", data)
 	}
 
-	// Debug: Log the depth data structure for first few messages
-	if wsDataReceivedCounter <= 5 {
-		log.Printf("🔍 DEBUG: Depth data keys for %s: %v", marketName, getMapKeys(depthData))
-	}
-
-	// Extract asks and bids
-	asks, ok := depthData["asks"].([]interface{})
-	if !ok {
-		return fmt.Errorf("invalid asks format in depth update: %+v", depthData)
-	}
-
-	bids, ok := depthData["bids"].([]interface{})
-	if !ok {
-		return fmt.Errorf("invalid bids format in depth update: %+v", depthData)
-	}
-
-	// Extract latest price directly from depth data
+	// Extract latest price - try multiple locations
 	var latestPrice float64 = 0
-	if lastPriceStr, ok := depthData["last"].(string); ok {
+
+	// Try to get latest price from data object first
+	if lastPriceStr, ok := data["last"].(string); ok {
 		if price, err := strconv.ParseFloat(lastPriceStr, 64); err == nil {
 			latestPrice = price
 		}
+	} else if lastPriceStr, ok := data["last"].(float64); ok {
+		latestPrice = lastPriceStr
 	} else {
-		// Debug: Log when last field is missing
-		if wsDataReceivedCounter <= 5 {
-			log.Printf("⚠️  DEBUG: No 'last' field found in depth data for %s", marketName)
+		// Try to get from depth data
+		if lastPriceStr, ok := depthData["last"].(string); ok {
+			if price, err := strconv.ParseFloat(lastPriceStr, 64); err == nil {
+				latestPrice = price
+			}
+		} else if lastPriceStr, ok := depthData["last"].(float64); ok {
+			latestPrice = lastPriceStr
 		}
 	}
 
-	// Build OrderBook
+	// Create order book
 	orderBook := &OrderBook{
 		Asks:   []Depth{},
 		Bids:   []Depth{},
 		Latest: latestPrice,
+		Market: marketName,
 	}
 
-	// Convert asks
-	for _, ask := range asks {
-		if askArray, ok := ask.([]interface{}); ok && len(askArray) >= 2 {
-			if priceStr, ok := askArray[0].(string); ok {
-				if amountStr, ok := askArray[1].(string); ok {
-					// Skip entries with amount 0 (deleted levels)
-					if amountStr != "0" {
+	// Parse asks (sell orders)
+	if asksData, ok := depthData["asks"].([]interface{}); ok {
+		for _, ask := range asksData {
+			if askArray, ok := ask.([]interface{}); ok && len(askArray) >= 2 {
+				if priceStr, ok := askArray[0].(string); ok {
+					if amountStr, ok := askArray[1].(string); ok {
 						orderBook.Asks = append(orderBook.Asks, Depth{
 							Price:  priceStr,
 							Amount: amountStr,
@@ -225,13 +228,12 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 		}
 	}
 
-	// Convert bids
-	for _, bid := range bids {
-		if bidArray, ok := bid.([]interface{}); ok && len(bidArray) >= 2 {
-			if priceStr, ok := bidArray[0].(string); ok {
-				if amountStr, ok := bidArray[1].(string); ok {
-					// Skip entries with amount 0 (deleted levels)
-					if amountStr != "0" {
+	// Parse bids (buy orders)
+	if bidsData, ok := depthData["bids"].([]interface{}); ok {
+		for _, bid := range bidsData {
+			if bidArray, ok := bid.([]interface{}); ok && len(bidArray) >= 2 {
+				if priceStr, ok := bidArray[0].(string); ok {
+					if amountStr, ok := bidArray[1].(string); ok {
 						orderBook.Bids = append(orderBook.Bids, Depth{
 							Price:  priceStr,
 							Amount: amountStr,
@@ -296,6 +298,18 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 
 // handleTickerUpdate processes ticker updates to get latest prices
 func handleTickerUpdate(wsResponse map[string]interface{}, marketDepths *MarketDepths, httpClient *HttpClient) error {
+	// Check if WebSocket processing has been stopped
+	if httpClient != nil {
+		httpClient.marketDataMu.RLock()
+		processingStopped := httpClient.wsProcessingStopped
+		httpClient.marketDataMu.RUnlock()
+
+		if processingStopped {
+			// Skip processing if shutdown is in progress
+			return nil
+		}
+	}
+
 	// CoinEx API format: {"method": "ticker.update", "data": {...}}
 	data, ok := wsResponse["data"].(map[string]interface{})
 	if !ok {
@@ -337,7 +351,7 @@ func handleTickerUpdate(wsResponse map[string]interface{}, marketDepths *MarketD
 			orderBook.Latest = latestPrice
 		}
 
-		// Store updated order book
+		// Store in market depths
 		marketDepths.Store(marketName, orderBook)
 
 		// Also store in httpClient's marketData cache
@@ -345,11 +359,6 @@ func handleTickerUpdate(wsResponse map[string]interface{}, marketDepths *MarketD
 			httpClient.marketDataMu.Lock()
 			httpClient.marketData[marketName] = orderBook
 			httpClient.marketDataMu.Unlock()
-		}
-
-		// Log ticker update
-		if wsDataReceivedCounter <= 10 {
-			log.Printf(" Ticker Update | Market: %s | Latest: %.8f", marketName, latestPrice)
 		}
 	}
 

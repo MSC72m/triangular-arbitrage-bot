@@ -646,6 +646,49 @@ func (c *coinexClient) CancelAllActiveOrders() {
 	log.Printf("🛑 CANCELLING ALL ACTIVE ORDERS | Count: %d | Mode: %s",
 		len(activeTrackers), map[bool]string{true: "SIMULATION", false: "REAL API"}[c.config.SimulationMode])
 
+	// In real API mode, also check for any orders on the exchange we might not be tracking
+	if !c.config.SimulationMode {
+		exchangeOrders, err := c.GetOpenOrders()
+		if err != nil {
+			log.Printf("⚠️ CANNOT CHECK EXCHANGE ORDERS | Error: %v", err)
+		} else if len(exchangeOrders) > 0 {
+			log.Printf("📋 FOUND %d ORDERS ON EXCHANGE | Checking for untracked orders", len(exchangeOrders))
+
+			// Create a set of tracked order IDs
+			trackedOrderIDs := make(map[string]bool)
+			for _, tracker := range activeTrackers {
+				trackedOrderIDs[tracker.OrderID] = true
+			}
+
+			// Check for untracked orders
+			for _, order := range exchangeOrders {
+				if orderID, ok := order["order_id"].(string); ok {
+					if !trackedOrderIDs[orderID] {
+						log.Printf("⚠️ UNTRACKED ORDER FOUND | ID: %s | Market: %v | Side: %v | Amount: %v | Price: %v",
+							orderID, order["market"], order["side"], order["amount"], order["price"])
+
+						// Create a temporary tracker to cancel this order
+						tempTracker := &FOKOrderTracker{
+							OrderID: orderID,
+							Market:  fmt.Sprintf("%v", order["market"]),
+							Type:    fmt.Sprintf("%v", order["side"]),
+							Amount:  0, // We don't know the original amount
+							Price:   0, // We don't know the original price
+						}
+
+						// Cancel the untracked order
+						err := c.cancelRealOrder(tempTracker)
+						if err != nil {
+							log.Printf("❌ FAILED TO CANCEL UNTRACKED ORDER | ID: %s | Error: %v", orderID, err)
+						} else {
+							log.Printf("✅ CANCELLED UNTRACKED ORDER | ID: %s", orderID)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	for _, tracker := range activeTrackers {
 		tracker.mu.Lock()
 		if tracker.IsActive && tracker.CancelChan != nil {
@@ -658,14 +701,33 @@ func (c *coinexClient) CancelAllActiveOrders() {
 					log.Printf("  SIMULATION CANCELLATION CHANNEL FULL | ID: %s", tracker.OrderID)
 				}
 			} else {
-				// Real API mode - cancel via CoinEx API
+				// Real API mode - cancel via CoinEx API with verification
 				tracker.mu.Unlock() // Unlock before API call
+
+				// Step 1: Cancel the order on the exchange
 				err := c.cancelRealOrder(tracker)
 				if err != nil {
 					log.Printf(" REAL API CANCELLATION FAILED | ID: %s | Error: %v", tracker.OrderID, err)
 				} else {
 					log.Printf(" REAL API CANCELLATION SUCCESS | ID: %s", tracker.OrderID)
 				}
+
+				// Step 2: Verify cancellation and check for partial fills
+				time.Sleep(500 * time.Millisecond) // Wait for cancellation to process
+				finalStatus, err := c.pollRealOrderStatus(tracker)
+				if err != nil {
+					log.Printf("  CANNOT VERIFY CANCELLATION | ID: %s | Error: %v", tracker.OrderID, err)
+				} else {
+					log.Printf("  CANCELLATION VERIFICATION | ID: %s | Final Status: %s | Filled: %.6f/%.6f",
+						tracker.OrderID, finalStatus.Status, finalStatus.FilledAmount, finalStatus.Amount)
+
+					// Check if there was a partial fill before cancellation
+					if finalStatus.FilledAmount > 0 {
+						log.Printf("⚠️ PARTIAL FILL DETECTED | ID: %s | Filled: %.6f | Avg Price: %.8f | Fee: %.6f %s",
+							tracker.OrderID, finalStatus.FilledAmount, finalStatus.AvgPrice, finalStatus.Fee, finalStatus.FeeCurrency)
+					}
+				}
+
 				tracker.mu.Lock() // Re-lock for safe unlock below
 			}
 		}
@@ -1332,15 +1394,15 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 
 // placeRealFOKOrder places an actual FOK order via CoinEx API v2
 func (c *coinexClient) placeRealFOKOrder(tracker *FOKOrderTracker) (string, error) {
-	// Use v2 API for futures trading
+	// Use v2 API for spot trading
 	timestamp := time.Now().UnixMilli()
 	method := "POST"
-	requestPath := "/v2/futures/order" // Include full v2 path for signature
+	requestPath := "/v2/spot/order" // Use spot endpoint instead of futures
 
 	// Prepare JSON body for v2 API
 	orderData := map[string]interface{}{
 		"market":      tracker.Market,
-		"market_type": "FUTURES", // Required for futures trading
+		"market_type": "SPOT", // Use spot trading instead of futures
 		"side":        tracker.Type,
 		"type":        "limit",
 		"amount":      fmt.Sprintf("%.8f", tracker.Amount),
@@ -1392,6 +1454,9 @@ func (c *coinexClient) placeRealFOKOrder(tracker *FOKOrderTracker) (string, erro
 		return "", fmt.Errorf("API request failed: %w", err)
 	}
 
+	// Log the full response for debugging
+	log.Printf("🔍 FULL SPOT ORDER RESPONSE: %+v", response)
+
 	// Check response
 	if code, ok := response["code"].(float64); !ok || code != 0 {
 		message, _ := response["message"].(string)
@@ -1401,18 +1466,73 @@ func (c *coinexClient) placeRealFOKOrder(tracker *FOKOrderTracker) (string, erro
 	// Extract order data
 	data, ok := response["data"].(map[string]interface{})
 	if !ok {
+		log.Printf("🔍 SPOT ORDER RESPONSE DATA MISSING | Response: %+v", response)
 		return "", fmt.Errorf("invalid response format: missing data")
 	}
 
-	// Get order ID (v2 API uses order_id instead of id)
-	orderID, ok := data["order_id"].(string)
-	if !ok {
-		// Try the old format as fallback
-		if orderIDFloat, ok := data["id"].(float64); ok {
-			orderID = fmt.Sprintf("%.0f", orderIDFloat)
+	log.Printf("🔍 SPOT ORDER DATA: %+v", data)
+
+	// Debug: Check the exact type of order_id
+	if orderIDValue, exists := data["order_id"]; exists {
+		log.Printf("🔍 ORDER_ID DEBUG | Value: %v | Type: %T", orderIDValue, orderIDValue)
+	} else {
+		log.Printf("🔍 ORDER_ID DEBUG | Field 'order_id' does not exist in data")
+	}
+
+	// For spot FOK orders, the response might not contain order_id if:
+	// 1. Order was filled immediately (FOK success)
+	// 2. Order was not created (FOK failure)
+	// 3. Order was created but response format is different
+
+	// Try to get order ID from various possible fields
+	var orderID string
+	var found bool
+
+	// Try order_id first (v2 API) - can be string or number
+	if orderIDStr, ok := data["order_id"].(string); ok && orderIDStr != "" {
+		orderID = orderIDStr
+		found = true
+		log.Printf("✅ FOUND ORDER_ID (string) | ID: %s", orderID)
+	} else if orderIDFloat, ok := data["order_id"].(float64); ok {
+		// order_id is returned as number in v2 API
+		orderID = fmt.Sprintf("%.0f", orderIDFloat)
+		found = true
+		log.Printf("✅ FOUND ORDER_ID (number) | ID: %s", orderID)
+	} else if orderIDFloat, ok := data["id"].(float64); ok {
+		// Try old format
+		orderID = fmt.Sprintf("%.0f", orderIDFloat)
+		found = true
+		log.Printf("✅ FOUND ORDER_ID (old format) | ID: %s", orderID)
+	} else {
+		// Debug: Log what we tried and what we found
+		log.Printf("🔍 ORDER_ID PARSING DEBUG | Tried string: %v | Tried float64: %v | Tried 'id' field: %v",
+			data["order_id"], data["order_id"], data["id"])
+
+		// Check if this is an immediate fill (FOK success)
+		if status, ok := data["status"].(string); ok {
+			if status == "done" || status == "filled" {
+				// This is an immediate fill - create a temporary order ID
+				orderID = fmt.Sprintf("FOK_IMMEDIATE_%s_%d", tracker.Market, timestamp)
+				found = true
+				log.Printf("✅ FOK IMMEDIATE FILL | Status: %s | Generated ID: %s", status, orderID)
+			} else if status == "not_deal" || status == "pending" {
+				// Order was created but no ID in response - this shouldn't happen
+				log.Printf("⚠️ ORDER CREATED BUT NO ID | Status: %s | Data: %+v", status, data)
+				return "", fmt.Errorf("order created but no order ID in response")
+			} else {
+				// Unknown status
+				log.Printf("⚠️ UNKNOWN ORDER STATUS | Status: %s | Data: %+v", status, data)
+				return "", fmt.Errorf("unknown order status: %s", status)
+			}
 		} else {
-			return "", fmt.Errorf("invalid response format: missing order ID")
+			// No status field - check if there are any other fields that might indicate success
+			log.Printf("⚠️ NO ORDER_ID OR STATUS | Data: %+v", data)
+			return "", fmt.Errorf("invalid response format: missing order ID and status")
 		}
+	}
+
+	if !found {
+		return "", fmt.Errorf("invalid response format: missing order ID")
 	}
 
 	log.Printf(" REAL FOK ORDER PLACED | OrderID: %s | Market: %s", orderID, tracker.Market)
@@ -1425,12 +1545,12 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (*OrderResu
 	// Use v2 API for order status query
 	timestamp := time.Now().UnixMilli()
 	method := "GET"
-	requestPath := "/v2/futures/order" // Include full v2 path for signature
+	requestPath := "/v2/spot/order" // Use spot endpoint instead of futures
 
 	// Build query string for v2 API
 	queryParams := map[string]string{
 		"market":      tracker.Market,
-		"market_type": "FUTURES",
+		"market_type": "SPOT", // Use spot trading instead of futures
 		"order_id":    tracker.OrderID,
 	}
 
@@ -1569,12 +1689,12 @@ func (c *coinexClient) cancelRealOrder(tracker *FOKOrderTracker) error {
 	// Use v2 API for order cancellation
 	timestamp := time.Now().UnixMilli()
 	method := "DELETE"
-	requestPath := "/v2/futures/order" // Include full v2 path for signature
+	requestPath := "/v2/spot/order" // Use spot endpoint instead of futures
 
 	// Prepare JSON body for v2 API
 	cancelData := map[string]interface{}{
 		"market":      tracker.Market,
-		"market_type": "FUTURES",
+		"market_type": "SPOT", // Use spot trading instead of futures
 		"order_id":    tracker.OrderID,
 	}
 
@@ -1859,4 +1979,67 @@ func (cmm *CriticalMarketPriceManager) GetCriticalMarketSnapshot() map[string]*O
 	// Return empty snapshot - we don't need price data for critical markets
 	// The arbitrage engine will handle critical markets differently
 	return make(map[string]*OrderBook)
+}
+
+// GetOpenOrders gets all open orders from the exchange
+func (c *coinexClient) GetOpenOrders() ([]map[string]interface{}, error) {
+	// Use v2 API for getting open orders
+	timestamp := time.Now().UnixMilli()
+	method := "GET"
+	requestPath := "/v2/spot/order/pending" // Get pending orders endpoint
+	queryString := ""
+
+	// Generate v2 signature
+	signature := c.generateRESTSignature(method, requestPath, queryString, "", timestamp)
+
+	// Set v2 authentication headers
+	authHeaders := map[string]string{
+		"X-COINEX-KEY":       c.apiKey,
+		"X-COINEX-SIGN":      signature,
+		"X-COINEX-TIMESTAMP": strconv.FormatInt(timestamp, 10),
+	}
+
+	// Merge auth headers with existing headers
+	c.httpClient.mergeHeaders(authHeaders)
+
+	// Prepare request parameters
+	requestParams := map[string]string{
+		"url":    "https://api.coinex.com" + requestPath,
+		"method": method,
+	}
+
+	// Make API call
+	response, err := c.httpClient.performRequest(requestParams, GET)
+	if err != nil {
+		return nil, fmt.Errorf("get open orders API request failed: %w", err)
+	}
+
+	// Check response
+	if code, ok := response["code"].(float64); !ok || code != 0 {
+		message, _ := response["message"].(string)
+		return nil, fmt.Errorf("CoinEx get open orders API error: code=%.0f, message=%s", code, message)
+	}
+
+	// Extract orders data
+	data, ok := response["data"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid open orders response format: missing data")
+	}
+
+	// Extract orders list
+	ordersData, ok := data["data"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid open orders response format: missing orders list")
+	}
+
+	// Convert to map slice
+	var orders []map[string]interface{}
+	for _, order := range ordersData {
+		if orderMap, ok := order.(map[string]interface{}); ok {
+			orders = append(orders, orderMap)
+		}
+	}
+
+	log.Printf("📋 FOUND %d OPEN ORDERS ON EXCHANGE", len(orders))
+	return orders, nil
 }

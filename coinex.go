@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/hmac"
-	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -131,7 +130,7 @@ func (otm *OrderTrackingManager) GetActiveTrackers() []*FOKOrderTracker {
 type coinexClient struct {
 	httpClient                 *HttpClient
 	apiKey                     string
-	secretKey                  string
+	secretID                   string
 	baseUrl                    string
 	allowedMarkets             []string
 	config                     *Config // Add reference to config
@@ -148,8 +147,8 @@ func NewCoinexClient(httpClient *HttpClient, config *Config) *coinexClient {
 	fmt.Printf("Loading CoinEx client with quote currencies from config: %v\n", config.QuoteCurrencies)
 	client := &coinexClient{
 		httpClient:           httpClient,
-		apiKey:               config.APIKey,
-		secretKey:            config.SecretKey,
+		apiKey:               config.APIKey,   // Use API key as API key
+		secretID:             config.SecretID, // Use secret ID as secret ID
 		allowedMarkets:       config.QuoteCurrencies,
 		baseUrl:              config.APIBaseURL, // Use v1 API for market operations
 		config:               config,            // Store config reference
@@ -166,50 +165,69 @@ func (c *coinexClient) GetApiKey() string {
 	return c.apiKey
 }
 
-// generateSignature creates MD5 signature according to CoinEx API v1 specification
-func (c *coinexClient) generateSignature(params map[string]string) string {
-	// Add access_id and tonce to params
-	params["access_id"] = c.apiKey
-	params["tonce"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
+// generateRESTSignature creates HMAC-SHA256 signature for CoinEx API v2 REST endpoints
+func (c *coinexClient) generateRESTSignature(method, requestPath, queryString, body string, timestamp int64) string {
+	// Create the string to sign for v2 REST API
+	// Format: method + request_path + body + timestamp
+	// According to CoinEx docs: https://docs.coinex.com/api/v2/authorization
 
-	// Sort parameters alphabetically
-	keys := make([]string, 0, len(params))
-	for k := range params {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	// Create query string
-	var queryParts []string
-	for _, k := range keys {
-		queryParts = append(queryParts, k+"="+params[k])
-	}
-	queryString := strings.Join(queryParts, "&")
-
-	// Add secret key to the end
-	signString := queryString + "&secret_key=" + c.secretKey
-
-	// Create MD5 hash
-	h := md5.New()
-	h.Write([]byte(signString))
-	return strings.ToUpper(hex.EncodeToString(h.Sum(nil)))
-}
-
-// generateV2Signature creates HMAC-SHA256 signature for CoinEx API v2
-func (c *coinexClient) generateV2Signature(method, requestPath, queryString, body string, timestamp int64) string {
-	// Create the string to sign for v2 API
-	// Format: method + requestPath + queryString + body + timestamp
-	var stringToSign string
+	// Build the full request path including query string if present
+	fullRequestPath := requestPath
 	if queryString != "" {
-		stringToSign = method + requestPath + "?" + queryString + body + strconv.FormatInt(timestamp, 10)
+		fullRequestPath = requestPath + "?" + queryString
+	}
+
+	// Create the string to sign: method + request_path + body + timestamp
+	// The body should be included as a string literal (with quotes)
+	var stringToSign string
+	if body != "" {
+		// For POST/PUT requests with body, include the body as a string literal
+		stringToSign = method + fullRequestPath + body + strconv.FormatInt(timestamp, 10)
 	} else {
-		stringToSign = method + requestPath + body + strconv.FormatInt(timestamp, 10)
+		// For GET/DELETE requests without body
+		stringToSign = method + fullRequestPath + strconv.FormatInt(timestamp, 10)
 	}
 
 	// Create HMAC-SHA256 signature
-	h := hmac.New(sha256.New, []byte(c.secretKey))
+	h := hmac.New(sha256.New, []byte(c.secretID))
 	h.Write([]byte(stringToSign))
-	return hex.EncodeToString(h.Sum(nil))
+	signature := hex.EncodeToString(h.Sum(nil))
+
+	// Debug logging
+	log.Printf("🔐 REST SIGNATURE DEBUG | Method: %s | Path: %s | Query: %s | Body: %s | Timestamp: %d",
+		method, requestPath, queryString, body, timestamp)
+	log.Printf("🔐 REST SIGNATURE DEBUG | Body type: %T | Body length: %d", body, len(body))
+	log.Printf("🔐 REST SIGNATURE DEBUG | Full request path: %s", fullRequestPath)
+	log.Printf("🔐 REST SIGNATURE DEBUG | Timestamp string: %s", strconv.FormatInt(timestamp, 10))
+	log.Printf("🔐 REST SIGNATURE DEBUG | String to sign: %s", stringToSign)
+	log.Printf("🔐 REST SIGNATURE DEBUG | Secret key: %s", c.secretID)
+	log.Printf("🔐 REST SIGNATURE DEBUG | Signature: %s", signature)
+	log.Printf("🔐 REST SIGNATURE DEBUG | Signature length: %d", len(signature))
+
+	return signature
+}
+
+// generateWebSocketSignature creates HMAC-SHA256 signature for CoinEx WebSocket authentication
+func (c *coinexClient) generateWebSocketSignature(timestamp int64) string {
+	// Create the string to sign for WebSocket authentication
+	// Format: timestamp (just the timestamp!)
+	// According to CoinEx docs: https://docs.coinex.com/api/v2/authorization
+
+	stringToSign := strconv.FormatInt(timestamp, 10)
+
+	// Create HMAC-SHA256 signature
+	h := hmac.New(sha256.New, []byte(c.secretID))
+	h.Write([]byte(stringToSign))
+	signature := hex.EncodeToString(h.Sum(nil))
+
+	// Debug logging
+	log.Printf("🔐 WS SIGNATURE DEBUG | Timestamp: %d", timestamp)
+	log.Printf("🔐 WS SIGNATURE DEBUG | String to sign: %s", stringToSign)
+	log.Printf("🔐 WS SIGNATURE DEBUG | Secret key: %s", c.secretID)
+	log.Printf("🔐 WS SIGNATURE DEBUG | Signature: %s", signature)
+	log.Printf("🔐 WS SIGNATURE DEBUG | Signature length: %d", len(signature))
+
+	return signature
 }
 
 func (c *coinexClient) PlaceOrder() string {
@@ -731,7 +749,7 @@ func (c *coinexClient) GetBalance() (string, error) {
 	body := ""
 
 	// Generate v2 signature
-	signature := c.generateV2Signature(method, requestPath, queryString, body, timestamp)
+	signature := c.generateRESTSignature(method, requestPath, queryString, body, timestamp)
 
 	// Set v2 authentication headers
 	authHeaders := map[string]string{
@@ -748,7 +766,7 @@ func (c *coinexClient) GetBalance() (string, error) {
 
 	// Add the required parameters to the request
 	requestParams := map[string]string{
-		"url":    c.config.APIBaseURLV2 + requestPath,
+		"url":    strings.TrimSuffix(c.config.APIBaseURLV2, "/") + requestPath,
 		"method": method,
 	}
 
@@ -1312,35 +1330,57 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 	}
 }
 
-// placeRealFOKOrder places an actual FOK order via CoinEx API
+// placeRealFOKOrder places an actual FOK order via CoinEx API v2
 func (c *coinexClient) placeRealFOKOrder(tracker *FOKOrderTracker) (string, error) {
-	// Prepare parameters for CoinEx limit order with FOK option
-	params := make(map[string]string)
-	params["access_id"] = c.apiKey
-	params["market"] = tracker.Market
-	params["type"] = tracker.Type
-	params["amount"] = fmt.Sprintf("%.8f", tracker.Amount)
-	params["price"] = fmt.Sprintf("%.8f", tracker.Price)
-	params["option"] = "FOK" // Fill-or-Kill option
-	params["tonce"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
+	// Use v2 API for futures trading
+	timestamp := time.Now().UnixMilli()
+	method := "POST"
+	requestPath := "/v2/futures/order" // Include full v2 path for signature
 
-	// Generate signature
-	signature := c.generateSignature(params)
-
-	// Prepare headers
-	headers := map[string]string{
-		"Content-Type":  "application/json",
-		"Authorization": signature,
+	// Prepare JSON body for v2 API
+	orderData := map[string]interface{}{
+		"market":      tracker.Market,
+		"market_type": "FUTURES", // Required for futures trading
+		"side":        tracker.Type,
+		"type":        "limit",
+		"amount":      fmt.Sprintf("%.8f", tracker.Amount),
+		"price":       fmt.Sprintf("%.8f", tracker.Price),
+		"client_id":   fmt.Sprintf("FOK_%s_%d", tracker.Market, timestamp),
+		"is_hide":     false,
+		"stp_mode":    "both", // Self-trading protection
 	}
 
-	// Merge with existing headers
-	c.httpClient.mergeHeaders(headers)
+	// Convert to JSON string
+	bodyBytes, err := json.Marshal(orderData)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal order data: %w", err)
+	}
+	body := string(bodyBytes)
+
+	// Generate v2 signature
+	signature := c.generateRESTSignature(method, requestPath, "", body, timestamp)
+
+	// Set v2 authentication headers
+	authHeaders := map[string]string{
+		"X-COINEX-KEY":       c.apiKey,
+		"X-COINEX-SIGN":      signature,
+		"X-COINEX-TIMESTAMP": strconv.FormatInt(timestamp, 10),
+		"Content-Type":       "application/json",
+	}
+
+	// Debug logging for auth headers
+	log.Printf("🔐 REST AUTH HEADERS DEBUG | X-COINEX-KEY: %s (length: %d)", c.apiKey, len(c.apiKey))
+	log.Printf("🔐 REST AUTH HEADERS DEBUG | X-COINEX-SIGN: %s", signature)
+	log.Printf("🔐 REST AUTH HEADERS DEBUG | X-COINEX-TIMESTAMP: %s", strconv.FormatInt(timestamp, 10))
+
+	// Merge auth headers with existing headers
+	c.httpClient.mergeHeaders(authHeaders)
 
 	// Prepare request parameters
 	requestParams := map[string]string{
-		"url":    c.baseUrl + "/order/limit",
-		"method": POST,
-		"body":   c.buildFormData(params),
+		"url":    "https://api.coinex.com" + requestPath, // Use correct base URL for v2
+		"method": method,
+		"body":   body,
 	}
 
 	log.Printf(" CALLING COINEX API | URL: %s | Market: %s | Type: %s | Amount: %.6f | Price: %.8f | Option: FOK",
@@ -1364,46 +1404,60 @@ func (c *coinexClient) placeRealFOKOrder(tracker *FOKOrderTracker) (string, erro
 		return "", fmt.Errorf("invalid response format: missing data")
 	}
 
-	// Get order ID
-	orderIDFloat, ok := data["id"].(float64)
+	// Get order ID (v2 API uses order_id instead of id)
+	orderID, ok := data["order_id"].(string)
 	if !ok {
-		return "", fmt.Errorf("invalid response format: missing order ID")
+		// Try the old format as fallback
+		if orderIDFloat, ok := data["id"].(float64); ok {
+			orderID = fmt.Sprintf("%.0f", orderIDFloat)
+		} else {
+			return "", fmt.Errorf("invalid response format: missing order ID")
+		}
 	}
-
-	orderID := fmt.Sprintf("%.0f", orderIDFloat)
 
 	log.Printf(" REAL FOK ORDER PLACED | OrderID: %s | Market: %s", orderID, tracker.Market)
 
 	return orderID, nil
 }
 
-// pollRealOrderStatus polls the real order status from CoinEx API
+// pollRealOrderStatus polls the real order status from CoinEx API v2
 func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (*OrderResult, error) {
-	// Prepare parameters for order status query
-	params := make(map[string]string)
-	params["access_id"] = c.apiKey
-	params["market"] = tracker.Market
-	params["id"] = tracker.OrderID
-	params["tonce"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
+	// Use v2 API for order status query
+	timestamp := time.Now().UnixMilli()
+	method := "GET"
+	requestPath := "/v2/futures/order" // Include full v2 path for signature
 
-	// Generate signature
-	signature := c.generateSignature(params)
-
-	// Prepare headers
-	headers := map[string]string{
-		"Authorization": signature,
+	// Build query string for v2 API
+	queryParams := map[string]string{
+		"market":      tracker.Market,
+		"market_type": "FUTURES",
+		"order_id":    tracker.OrderID,
 	}
 
-	// Merge with existing headers
-	c.httpClient.mergeHeaders(headers)
-
 	// Build query string
-	queryString := c.buildQueryString(params)
+	var queryParts []string
+	for key, value := range queryParams {
+		queryParts = append(queryParts, key+"="+value)
+	}
+	queryString := strings.Join(queryParts, "&")
+
+	// Generate v2 signature
+	signature := c.generateRESTSignature(method, requestPath, queryString, "", timestamp)
+
+	// Set v2 authentication headers
+	authHeaders := map[string]string{
+		"X-COINEX-KEY":       c.apiKey,
+		"X-COINEX-SIGN":      signature,
+		"X-COINEX-TIMESTAMP": strconv.FormatInt(timestamp, 10),
+	}
+
+	// Merge auth headers with existing headers
+	c.httpClient.mergeHeaders(authHeaders)
 
 	// Prepare request parameters
 	requestParams := map[string]string{
-		"url":    c.baseUrl + "/order/status?" + queryString,
-		"method": GET,
+		"url":    "https://api.coinex.com" + requestPath + "?" + queryString, // Use correct base URL for v2
+		"method": method,
 	}
 
 	// Make API call
@@ -1435,43 +1489,63 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (*OrderResu
 		ExecutionTime: time.Since(tracker.CreatedAt).Milliseconds(),
 	}
 
-	// Parse status
+	// Parse status (v2 API uses different status values)
 	if statusStr, ok := data["status"].(string); ok {
 		switch statusStr {
-		case "not_deal":
+		case "not_deal", "pending":
 			result.Status = OrderStatusPending
-		case "part_deal":
+		case "part_deal", "partial":
 			result.Status = OrderStatusPartial
-		case "done":
+		case "done", "filled":
 			result.Status = OrderStatusFilled
+		case "canceled", "cancelled":
+			result.Status = OrderStatusCancelled
 		default:
 			result.Status = OrderStatusFailed
 		}
 	}
 
-	// Parse filled amount
-	if dealAmountStr, ok := data["deal_amount"].(string); ok {
+	// Parse filled amount (v2 API uses filled_amount)
+	if filledAmountStr, ok := data["filled_amount"].(string); ok {
+		if filledAmount, err := strconv.ParseFloat(filledAmountStr, 64); err == nil {
+			result.FilledAmount = filledAmount
+		}
+	} else if dealAmountStr, ok := data["deal_amount"].(string); ok {
+		// Fallback to old format
 		if filledAmount, err := strconv.ParseFloat(dealAmountStr, 64); err == nil {
 			result.FilledAmount = filledAmount
 		}
 	}
 
-	// Parse average price
-	if avgPriceStr, ok := data["avg_price"].(string); ok {
+	// Parse average price (v2 API uses last_filled_price or avg_price)
+	if avgPriceStr, ok := data["last_filled_price"].(string); ok {
+		if avgPrice, err := strconv.ParseFloat(avgPriceStr, 64); err == nil {
+			result.AvgPrice = avgPrice
+		}
+	} else if avgPriceStr, ok := data["avg_price"].(string); ok {
+		// Fallback to old format
 		if avgPrice, err := strconv.ParseFloat(avgPriceStr, 64); err == nil {
 			result.AvgPrice = avgPrice
 		}
 	}
 
-	// Parse fees
-	if dealFeeStr, ok := data["deal_fee"].(string); ok {
+	// Parse fees (v2 API uses fee)
+	if feeStr, ok := data["fee"].(string); ok {
+		if fee, err := strconv.ParseFloat(feeStr, 64); err == nil {
+			result.Fee = fee
+		}
+	} else if dealFeeStr, ok := data["deal_fee"].(string); ok {
+		// Fallback to old format
 		if fee, err := strconv.ParseFloat(dealFeeStr, 64); err == nil {
 			result.Fee = fee
 		}
 	}
 
-	// Parse fee asset
-	if feeAsset, ok := data["fee_asset"].(string); ok {
+	// Parse fee asset (v2 API uses fee_ccy)
+	if feeCcy, ok := data["fee_ccy"].(string); ok {
+		result.FeeCurrency = feeCcy
+	} else if feeAsset, ok := data["fee_asset"].(string); ok {
+		// Fallback to old format
 		result.FeeCurrency = feeAsset
 	} else {
 		// Default fee currency based on market
@@ -1490,34 +1564,46 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (*OrderResu
 	return result, nil
 }
 
-// cancelRealOrder cancels a real order via CoinEx API
+// cancelRealOrder cancels a real order via CoinEx API v2
 func (c *coinexClient) cancelRealOrder(tracker *FOKOrderTracker) error {
-	// Prepare parameters for order cancellation
-	params := make(map[string]string)
-	params["access_id"] = c.apiKey
-	params["market"] = tracker.Market
-	params["id"] = tracker.OrderID
-	params["tonce"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
+	// Use v2 API for order cancellation
+	timestamp := time.Now().UnixMilli()
+	method := "DELETE"
+	requestPath := "/v2/futures/order" // Include full v2 path for signature
 
-	// Generate signature
-	signature := c.generateSignature(params)
-
-	// Prepare headers
-	headers := map[string]string{
-		"Authorization": signature,
+	// Prepare JSON body for v2 API
+	cancelData := map[string]interface{}{
+		"market":      tracker.Market,
+		"market_type": "FUTURES",
+		"order_id":    tracker.OrderID,
 	}
 
-	// Merge with existing headers
-	c.httpClient.mergeHeaders(headers)
+	// Convert to JSON string
+	bodyBytes, err := json.Marshal(cancelData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal cancel data: %w", err)
+	}
+	body := string(bodyBytes)
 
-	// Build form data for DELETE request
-	formData := c.buildFormData(params)
+	// Generate v2 signature
+	signature := c.generateRESTSignature(method, requestPath, "", body, timestamp)
+
+	// Set v2 authentication headers
+	authHeaders := map[string]string{
+		"X-COINEX-KEY":       c.apiKey,
+		"X-COINEX-SIGN":      signature,
+		"X-COINEX-TIMESTAMP": strconv.FormatInt(timestamp, 10),
+		"Content-Type":       "application/json",
+	}
+
+	// Merge auth headers with existing headers
+	c.httpClient.mergeHeaders(authHeaders)
 
 	// Prepare request parameters
 	requestParams := map[string]string{
-		"url":    c.baseUrl + "/order/pending",
-		"method": DELETE,
-		"body":   formData,
+		"url":    "https://api.coinex.com" + requestPath, // Use correct base URL for v2
+		"method": method,
+		"body":   body,
 	}
 
 	log.Printf("CANCELLING REAL ORDER | ID: %s | Market: %s", tracker.OrderID, tracker.Market)

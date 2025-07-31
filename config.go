@@ -33,7 +33,7 @@ type OrderExecutionSettings struct {
 type Config struct {
 	// API Configuration
 	APIKey       string `json:"apiKey"`
-	SecretKey    string `json:"secretKey"`
+	SecretID     string `json:"secretID"`
 	APIBaseURL   string `json:"apiBaseURL"`
 	APIBaseURLV2 string `json:"apiBaseURLV2"`
 
@@ -182,7 +182,7 @@ func LoadConfig(path string) (*Config, error) {
 
 	env := loadEnvConfig()
 	config.APIKey = env["COINEX_API_KEY"]
-	config.SecretKey = env["COINEX_SECRET_ID"]
+	config.SecretID = env["COINEX_SECRET_ID"]
 
 	// Validate configuration
 	if err := config.Validate(); err != nil {
@@ -230,8 +230,8 @@ func (c *Config) Validate() error {
 	if c.APIKey == "" {
 		return fmt.Errorf("apiKey is required")
 	}
-	if c.SecretKey == "" {
-		return fmt.Errorf("secretKey is required")
+	if c.SecretID == "" {
+		return fmt.Errorf("secretID is required")
 	}
 
 	// Additional validation for real trading mode
@@ -239,15 +239,15 @@ func (c *Config) Validate() error {
 		if len(c.APIKey) < 10 {
 			return fmt.Errorf("apiKey appears to be invalid (too short) - required for real trading")
 		}
-		if len(c.SecretKey) < 10 {
-			return fmt.Errorf("secretKey appears to be invalid (too short) - required for real trading")
+		if len(c.SecretID) < 10 {
+			return fmt.Errorf("secretID appears to be invalid (too short) - required for real trading")
 		}
 
 		fmt.Printf("  REAL TRADING MODE VALIDATION:\n")
 		fmt.Printf("   🔑 API Key: %s...%s (length: %d)\n",
 			c.APIKey[:4], c.APIKey[len(c.APIKey)-4:], len(c.APIKey))
 		fmt.Printf("   🔐 Secret Key: %s...%s (length: %d)\n",
-			c.SecretKey[:4], c.SecretKey[len(c.SecretKey)-4:], len(c.SecretKey))
+			c.SecretID[:4], c.SecretID[len(c.SecretID)-4:], len(c.SecretID))
 		fmt.Printf("    API credentials appear valid for real trading\n")
 	}
 

@@ -228,16 +228,12 @@ func (c *HttpClient) ConnectWebSocket() error {
 	fmt.Printf("⏳ Waiting for connection to stabilize...\n")
 	time.Sleep(2 * time.Second) // Reduced back to 2s like working test
 
-	// Authenticate if API credentials are available
-	if c.config.APIKey != "" && c.config.SecretKey != "" {
+	// Authenticate WebSocket connection if credentials are provided
+	if c.config.APIKey != "" && c.config.SecretID != "" {
 		fmt.Printf("🔐 Authenticating WebSocket connection...\n")
-		if err := c.authenticateWebSocket(c.config.APIKey, c.config.SecretKey); err != nil {
-			fmt.Printf("❌ WebSocket authentication failed: %v\n", err)
-			return fmt.Errorf("websocket authentication failed: %w", err)
+		if err := c.authenticateWebSocket(c.config.APIKey, c.config.SecretID); err != nil {
+			return fmt.Errorf("WebSocket authentication failed: %w", err)
 		}
-		fmt.Printf("ℹ️  Authenticated WebSocket connection (private access enabled)\n")
-	} else {
-		fmt.Printf("ℹ️  Using public WebSocket connection (no authentication required)\n")
 	}
 
 	// Send a small immediate subscription to keep connection alive
@@ -264,7 +260,7 @@ func (c *HttpClient) ConnectWebSocket() error {
 
 	return nil
 }
-func (c *HttpClient) authenticateWebSocket(apiKey, secretKey string) error {
+func (c *HttpClient) authenticateWebSocket(secretID, apiKey string) error {
 	if !c.wsConnected || c.wsConn == nil {
 		return fmt.Errorf("websocket not connected")
 	}
@@ -272,17 +268,19 @@ func (c *HttpClient) authenticateWebSocket(apiKey, secretKey string) error {
 	timestamp := time.Now().UnixMilli()
 
 	// Step 1: Create the string to sign (just timestamp as per CoinEx docs)
-	preparedStr := fmt.Sprintf("%d", timestamp)
+	// According to CoinEx docs: https://docs.coinex.com/api/v2/authorization
+	// WebSocket signature format: timestamp (just the timestamp!)
+	preparedStr := strconv.FormatInt(timestamp, 10)
 
-	// Step 2: Create HMAC-SHA256 signature
-	h := hmac.New(sha256.New, []byte(secretKey))
+	// Step 2: Create HMAC-SHA256 signature using the secret key (longer string)
+	h := hmac.New(sha256.New, []byte(apiKey))
 	h.Write([]byte(preparedStr))
 	signedStr := hex.EncodeToString(h.Sum(nil))
 
 	authMsg := map[string]interface{}{
 		"method": "server.sign",
 		"params": map[string]interface{}{
-			"access_id":  apiKey,
+			"access_id":  secretID,
 			"signed_str": signedStr,
 			"timestamp":  timestamp,
 		},
@@ -290,6 +288,8 @@ func (c *HttpClient) authenticateWebSocket(apiKey, secretKey string) error {
 	}
 
 	fmt.Printf("🔐 Sending WebSocket authentication...\n")
+	fmt.Printf("🔐 API Key (access_id): %s (length: %d)\n", secretID, len(secretID))
+	fmt.Printf("🔐 Secret Key: %s (length: %d)\n", apiKey, len(apiKey))
 	fmt.Printf("🔐 Timestamp: %d\n", timestamp)
 	fmt.Printf("🔐 Prepared string: %s\n", preparedStr)
 	fmt.Printf("🔐 Signed string: %s\n", signedStr)

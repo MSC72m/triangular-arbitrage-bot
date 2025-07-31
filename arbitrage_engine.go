@@ -119,6 +119,24 @@ func (alm *AssetLockManager) IsPathInExecution(path TriangularPath) bool {
 	return alm.executingAssets[baseAsset]
 }
 
+// IsAssetInCooldown checks if an asset is in cooldown period to prevent repeated execution
+func (alm *AssetLockManager) IsAssetInCooldown(baseAsset string) bool {
+	if !alm.config.EnableAssetLocking {
+		return false
+	}
+
+	alm.cooldownMutex.RLock()
+	defer alm.cooldownMutex.RUnlock()
+
+	lastExec, exists := alm.lastExecutionTime[baseAsset]
+	if !exists {
+		return false // No previous execution, not in cooldown
+	}
+
+	cooldownPeriod := 5 * time.Second // 5 second cooldown between executions
+	return time.Since(lastExec) < cooldownPeriod
+}
+
 // MarkAssetInExecution marks an asset as currently being executed
 func (alm *AssetLockManager) MarkAssetInExecution(path TriangularPath) bool {
 	if !alm.config.EnableAssetLocking {
@@ -126,18 +144,6 @@ func (alm *AssetLockManager) MarkAssetInExecution(path TriangularPath) bool {
 	}
 
 	baseAsset := path.Asset1
-
-	// Check cooldown period to prevent repeated execution
-	alm.cooldownMutex.RLock()
-	lastExec, exists := alm.lastExecutionTime[baseAsset]
-	cooldownPeriod := 5 * time.Second // 5 second cooldown between executions
-	alm.cooldownMutex.RUnlock()
-
-	if exists && time.Since(lastExec) < cooldownPeriod {
-		log.Printf(" COOLDOWN ACTIVE | Asset: %s | Last execution: %v ago | Skipping opportunity",
-			baseAsset, time.Since(lastExec))
-		return false
-	}
 
 	alm.executionMutex.Lock()
 	defer alm.executionMutex.Unlock()
@@ -1176,6 +1182,13 @@ func (ae *ArbitrageEngine) scanForOpportunities(scannerID int, scanCount int) {
 
 		// Check if this path is blocked by asset locking (THIRD PRIORITY)
 		if ae.assetLockManager.IsPathLocked(path) {
+			pathsBlocked++
+			assetsBlocked[baseAsset]++
+			continue
+		}
+
+		// FOURTH PRIORITY: Check cooldown period to prevent repeated execution
+		if ae.assetLockManager.IsAssetInCooldown(baseAsset) {
 			pathsBlocked++
 			assetsBlocked[baseAsset]++
 			continue

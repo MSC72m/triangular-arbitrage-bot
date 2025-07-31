@@ -2,7 +2,7 @@
   "apiBaseURL": "https://api.coinex.com/v1",
   "apiBaseURLV2": "https://api.coinex.com/v2/",
   "profitThreshold": 0.00001,
-  "simulationMode": true,
+  "simulationMode": false,
   "concurrentScans": 150,
   "maxLatencyMs": 200,
   "rateLimitPerSecond": 15,
@@ -14,14 +14,14 @@
   "orderExecutionTimeMs": 1500,
   "maxConcurrentOrdersPerAsset": 1,
   "orderTimeoutSeconds": 30,
-  "enableOrderSimulation": true,
+  "enableOrderSimulation": false,
   "orderBookDepthLimit": 10,
   "logLevel": "debug",
   "tradingFees": {
-    "USDT": 0.0015,
-    "USDC": 0.0015
+    "USDT": 0.02,
+    "USDC": 0.02
   },
-  "defaultTradingFee": 0.0015,
+  "defaultTradingFee": 0.02,
   "webSocketTimeout": 30,
   "reconnectAttempts": 5,
   "orderTimeout": 30,

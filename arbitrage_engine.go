@@ -104,7 +104,7 @@ func (alm *AssetLockManager) IsPathLocked(path TriangularPath) bool {
 	return false
 }
 
-// IsPathInExecution checks if any asset in the path is currently being executed
+// IsPathInExecution checks if a path is currently in execution
 func (alm *AssetLockManager) IsPathInExecution(path TriangularPath) bool {
 	if !alm.config.EnableAssetLocking {
 		return false
@@ -135,6 +135,18 @@ func (alm *AssetLockManager) IsAssetInCooldown(baseAsset string) bool {
 
 	cooldownPeriod := 5 * time.Second // 5 second cooldown between executions
 	return time.Since(lastExec) < cooldownPeriod
+}
+
+// IsAssetInExecution checks if a specific asset is currently in execution
+func (alm *AssetLockManager) IsAssetInExecution(baseAsset string) bool {
+	if !alm.config.EnableAssetLocking {
+		return false
+	}
+
+	alm.executionMutex.RLock()
+	defer alm.executionMutex.RUnlock()
+
+	return alm.executingAssets[baseAsset]
 }
 
 // MarkAssetInExecution marks an asset as currently being executed
@@ -443,9 +455,6 @@ func (oem *OrderExecutionManager) analyzeFOKResultsAndDecide(opportunity Arbitra
 		netPnL := totalPnL - totalFees
 		log.Printf(" FOK ARBITRAGE COMPLETE | Attempt %d | Expected: $%.4f | Actual: $%.4f | Net: $%.4f",
 			attemptNumber+1, opportunity.NetProfit*opportunity.Volume, totalPnL, netPnL)
-
-		// Reset rejection count on success
-		oem.coinexClient.resetRejectionCount()
 
 		// Unlock markets - arbitrage completed successfully
 		oem.assetLockManager.UnlockAssets(markets)
@@ -1166,21 +1175,24 @@ func (ae *ArbitrageEngine) scanForOpportunities(scannerID int, scanCount int) {
 		// Extract assets for this path
 		baseAsset := path.Asset1 // The main asset being arbitraged (e.g., GMT, ONE, etc.)
 
-		// FIRST PRIORITY: Check maxConcurrentOrdersPerAsset limit
+		// FIRST PRIORITY: Check if asset is already in execution (BLOCK IMMEDIATELY)
+		if ae.assetLockManager.IsAssetInExecution(baseAsset) {
+			pathsInExecution++
+			assetsExecuting[baseAsset]++
+			if scanCount%1000 == 0 { // Log occasionally to avoid spam
+				log.Printf("🚫 ASSET BLOCKED | %s already in execution", baseAsset)
+			}
+			continue
+		}
+
+		// SECOND PRIORITY: Check maxConcurrentOrdersPerAsset limit
 		if ae.assetLockManager.GetAssetOrderCount(baseAsset) >= ae.config.MaxConcurrentOrdersPerAsset {
 			pathsBlocked++
 			assetsBlocked[baseAsset]++
 			continue
 		}
 
-		// Check if this asset is already in execution (SECOND PRIORITY)
-		if ae.assetLockManager.IsPathInExecution(path) {
-			pathsInExecution++
-			assetsExecuting[baseAsset]++
-			continue
-		}
-
-		// Check if this path is blocked by asset locking (THIRD PRIORITY)
+		// THIRD PRIORITY: Check if this path is blocked by asset locking
 		if ae.assetLockManager.IsPathLocked(path) {
 			pathsBlocked++
 			assetsBlocked[baseAsset]++

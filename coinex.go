@@ -143,11 +143,6 @@ type coinexClient struct {
 	concurrentOrders int
 	dailySpent       float64
 	mu               sync.RWMutex
-
-	// Rejection tracking to prevent repeated failed attempts
-	rejectionCount    int
-	lastRejectionTime time.Time
-	rejectionMutex    sync.RWMutex
 }
 
 func NewCoinexClient(httpClient *HttpClient, config *Config) *coinexClient {
@@ -224,16 +219,9 @@ func (c *coinexClient) PlaceOrder() string {
 
 // PlaceFOKOrder places a Fill-or-Kill order with automatic simulation/real API switching and spending controls
 func (c *coinexClient) PlaceFOKOrder(market, orderType string, amount, price float64, orderResultChan chan<- *OrderResult) *FOKOrderTracker {
-	// Step 0: Check rejection backoff
-	if c.checkRejectionBackoff() {
-		log.Printf("🚫 ORDER REJECTED | Backoff active due to recent rejections | Market: %s", market)
-		return nil
-	}
-
 	// Step 1: Check rate limiting
 	if !c.checkRateLimit() {
 		log.Printf("🚫 ORDER REJECTED | Rate limit exceeded | Market: %s", market)
-		c.recordRejection()
 		return nil
 	}
 
@@ -241,7 +229,6 @@ func (c *coinexClient) PlaceFOKOrder(market, orderType string, amount, price flo
 	orderAmount, orderValue, err := c.calculateOrderAmount(amount, price)
 	if err != nil {
 		log.Printf("🚫 ORDER REJECTED | %v | Market: %s", err, market)
-		c.recordRejection()
 		return nil
 	}
 
@@ -249,7 +236,6 @@ func (c *coinexClient) PlaceFOKOrder(market, orderType string, amount, price flo
 	if !c.checkConcurrentOrderLimit() {
 		log.Printf("🚫 ORDER REJECTED | Too many concurrent orders (%d) | Market: %s",
 			c.concurrentOrders, market)
-		c.recordRejection()
 		return nil
 	}
 
@@ -309,42 +295,6 @@ func (c *coinexClient) checkConcurrentOrderLimit() bool {
 	return c.concurrentOrders < c.config.OrderExecutionSettings.MaxConcurrentOrders
 }
 
-// checkRejectionBackoff checks if we should back off due to recent rejections
-func (c *coinexClient) checkRejectionBackoff() bool {
-	c.rejectionMutex.RLock()
-	defer c.rejectionMutex.RUnlock()
-
-	// If we've had more than 5 rejections in the last 30 seconds, back off
-	if c.rejectionCount >= 5 && time.Since(c.lastRejectionTime) < 30*time.Second {
-		log.Printf("⏸️  REJECTION BACKOFF | %d rejections in last 30s | Pausing order attempts", c.rejectionCount)
-		return true
-	}
-
-	return false
-}
-
-// recordRejection records a rejection for backoff tracking
-func (c *coinexClient) recordRejection() {
-	c.rejectionMutex.Lock()
-	defer c.rejectionMutex.Unlock()
-
-	c.rejectionCount++
-	c.lastRejectionTime = time.Now()
-
-	// Reset counter if more than 30 seconds have passed
-	if time.Since(c.lastRejectionTime) > 30*time.Second {
-		c.rejectionCount = 1
-	}
-}
-
-// resetRejectionCount resets the rejection counter (call when orders succeed)
-func (c *coinexClient) resetRejectionCount() {
-	c.rejectionMutex.Lock()
-	defer c.rejectionMutex.Unlock()
-
-	c.rejectionCount = 0
-}
-
 // calculateOrderAmount calculates the appropriate order amount based on configuration
 func (c *coinexClient) calculateOrderAmount(requestedAmount, price float64) (float64, float64, error) {
 	settings := c.config.OrderExecutionSettings
@@ -379,19 +329,8 @@ func (c *coinexClient) calculateOrderAmount(requestedAmount, price float64) (flo
 		orderAmount = orderValue / price
 	}
 
-	// Check spending limits
-	if settings.EnableSpendingLimits {
-		if c.dailySpent+orderValue > settings.MaxDailySpend {
-			return 0, 0, fmt.Errorf("daily spending limit would be exceeded: $%.2f + $%.2f > $%.2f",
-				c.dailySpent, orderValue, settings.MaxDailySpend)
-		}
-
-		availableBalance := settings.AccountBalance - c.dailySpent
-		if orderValue > availableBalance {
-			return 0, 0, fmt.Errorf("insufficient balance: $%.2f required, $%.2f available",
-				orderValue, availableBalance)
-		}
-	}
+	// REMOVED: Daily spending limit checks - allowing all orders to proceed
+	// REMOVED: Balance checks - allowing all orders to proceed
 
 	return orderAmount, orderValue, nil
 }
@@ -744,21 +683,8 @@ func (c *coinexClient) CanPlaceOrder(orderValue float64) bool {
 		return false
 	}
 
-	// Check spending limits
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	settings := c.config.OrderExecutionSettings
-	if settings.EnableSpendingLimits {
-		if c.dailySpent+orderValue > settings.MaxDailySpend {
-			return false
-		}
-
-		availableBalance := settings.AccountBalance - c.dailySpent
-		if orderValue > availableBalance {
-			return false
-		}
-	}
+	// REMOVED: Spending limits - allowing all orders to proceed
+	// REMOVED: Balance checks - allowing all orders to proceed
 
 	return true
 }

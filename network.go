@@ -1375,42 +1375,56 @@ func (c *HttpClient) TestWebSocketConnection() error {
 	return nil
 }
 
-// ValidateWebSocketDataAccuracy validates WebSocket data accuracy by comparing with REST API
+// ValidateWebSocketDataAccuracy validates WebSocket data accuracy and reconnects to failed markets
 func (c *HttpClient) ValidateWebSocketDataAccuracy(markets []string) {
-	log.Printf(" Validating WebSocket data accuracy for %d markets...", len(markets))
+	log.Printf("🔍 Validating WebSocket data accuracy for %d markets", len(markets))
 
-	validationCount := 0
+	// Check which markets have data and which don't
+	activeMarkets := []string{}
+	failedMarkets := []string{}
+
+	c.marketDataMu.RLock()
 	for _, market := range markets {
-		if validationCount >= 5 { // Only validate first 5 markets to avoid spam
-			break
+		if orderBook, exists := c.marketData[market]; exists && orderBook != nil {
+			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
+				activeMarkets = append(activeMarkets, market)
+			} else {
+				failedMarkets = append(failedMarkets, market)
+			}
+		} else {
+			failedMarkets = append(failedMarkets, market)
+		}
+	}
+	c.marketDataMu.RUnlock()
+
+	log.Printf("📊 WebSocket validation results: %d active, %d failed", len(activeMarkets), len(failedMarkets))
+
+	// Reconnect to failed markets via WebSocket
+	if len(failedMarkets) > 0 {
+		log.Printf("🔄 Attempting to reconnect to %d failed WebSocket markets", len(failedMarkets))
+
+		successful := []string{}
+		failed := []string{}
+
+		for _, market := range failedMarkets {
+			// Add to retry queue for background processing
+			c.AddFailedMarket(market)
+
+			// Also try immediate reconnection
+			if err := c.SubscribeWebSocketWithRetry([]string{market}, 2); err != nil {
+				failed = append(failed, market)
+				log.Printf("❌ Failed to reconnect to %s: %v", market, err)
+			} else {
+				successful = append(successful, market)
+				c.RemoveFailedMarket(market)
+				log.Printf("✅ Successfully reconnected to %s", market)
+			}
+
+			// Small delay between reconnections
+			time.Sleep(100 * time.Millisecond)
 		}
 
-		// Get WebSocket data
-		c.marketDataMu.RLock()
-		wsOrderBook, wsExists := c.marketData[market]
-		c.marketDataMu.RUnlock()
-
-		if !wsExists || wsOrderBook == nil || len(wsOrderBook.Bids) == 0 || len(wsOrderBook.Asks) == 0 {
-			continue
-		}
-
-		// Get REST API data for comparison
-		restOrderBook, err := c.GetOrderBookREST(market)
-		if err != nil {
-			continue
-		}
-
-		if len(restOrderBook.Bids) > 0 && len(restOrderBook.Asks) > 0 {
-			wsBid := wsOrderBook.Bids[0].Price
-			wsAsk := wsOrderBook.Asks[0].Price
-			restBid := restOrderBook.Bids[0].Price
-			restAsk := restOrderBook.Asks[0].Price
-
-			log.Printf(" Data Validation | %s | WS: Bid=%s Ask=%s | REST: Bid=%s Ask=%s",
-				market, wsBid, wsAsk, restBid, restAsk)
-
-			validationCount++
-		}
+		log.Printf("🔄 Reconnection results: %d successful, %d failed", len(successful), len(failed))
 	}
 }
 

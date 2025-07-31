@@ -141,7 +141,6 @@ type coinexClient struct {
 	// Order execution tracking
 	lastOrderTime    time.Time
 	concurrentOrders int
-	dailySpent       float64
 	mu               sync.RWMutex
 }
 
@@ -309,7 +308,7 @@ func (c *coinexClient) calculateOrderAmount(requestedAmount, price float64) (flo
 		orderAmount = orderValue / price
 	} else {
 		// Dynamic percentage of available balance
-		availableBalance := settings.AccountBalance - c.dailySpent
+		availableBalance := settings.AccountBalance
 		orderValue = availableBalance * settings.DynamicOrderPercentage
 		orderAmount = orderValue / price
 
@@ -329,9 +328,6 @@ func (c *coinexClient) calculateOrderAmount(requestedAmount, price float64) (flo
 		orderAmount = orderValue / price
 	}
 
-	// REMOVED: Daily spending limit checks - allowing all orders to proceed
-	// REMOVED: Balance checks - allowing all orders to proceed
-
 	return orderAmount, orderValue, nil
 }
 
@@ -340,7 +336,6 @@ func (c *coinexClient) updateOrderTracking(orderValue float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.concurrentOrders++
-	c.dailySpent += orderValue
 }
 
 // manageOrderLifecycle manages the complete lifecycle of a FOK order
@@ -666,9 +661,9 @@ func (c *coinexClient) GetOrderExecutionStats() (int, float64, float64) {
 	defer c.mu.RUnlock()
 
 	settings := c.config.OrderExecutionSettings
-	availableBalance := settings.AccountBalance - c.dailySpent
+	availableBalance := settings.AccountBalance
 
-	return c.concurrentOrders, c.dailySpent, availableBalance
+	return c.concurrentOrders, 0, availableBalance
 }
 
 // CanPlaceOrder checks if a new order can be placed based on all limits
@@ -689,13 +684,10 @@ func (c *coinexClient) CanPlaceOrder(orderValue float64) bool {
 	return true
 }
 
-// ResetDailySpending resets the daily spending counter (call this daily)
+// ResetDailySpending is deprecated - no longer tracking daily spending
 func (c *coinexClient) ResetDailySpending() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	log.Printf(" RESETTING DAILY SPENDING | Previous: $%.2f", c.dailySpent)
-	c.dailySpent = 0
+	// No longer tracking daily spending
+	log.Printf(" RESETTING DAILY SPENDING | Daily spending tracking disabled")
 }
 
 // GetOrderStatus gets the current status of an order

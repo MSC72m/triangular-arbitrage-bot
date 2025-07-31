@@ -41,7 +41,6 @@
     "staticOrderAmount": 3.5,
     "dynamicOrderPercentage": 0.25,
     "maxVolumeFraction": 0.5,
-    "maxDailySpend": 500,
     "accountBalance": 20,
     "enableSpendingLimits": true,
     "minOrderAmount": 0.1,

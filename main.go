@@ -21,7 +21,7 @@ func main() {
 	// Load configuration
 	config, err := LoadConfig("config.json")
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
 	log.Printf("Loaded configuration: API Key length=%d, Quote currencies=%v, Profit threshold=%.6f%%",
@@ -114,6 +114,10 @@ func main() {
 		log.Println("Continuing anyway...")
 	}
 
+	// Wait for WebSocket connection to be fully stable
+	log.Println("Waiting for WebSocket connection to stabilize...")
+	time.Sleep(5 * time.Second)
+
 	// Get markets suitable for triangular arbitrage
 	log.Println("Discovering arbitrage markets...")
 	arbitrageMarkets, completeAssets, err := coinexClient.GetArbitrageMarkets()
@@ -140,6 +144,14 @@ func main() {
 
 	// Log complete assets
 	log.Printf("COMPLETE ASSETS: %v", completeAssets)
+
+	// Subscribe to all markets IMMEDIATELY after discovering them
+	log.Printf("📡 Subscribing to %d markets immediately after discovery...", len(arbitrageMarkets))
+	if err := httpClient.SubscribeWebSocket(arbitrageMarkets); err != nil {
+		log.Printf("❌ Immediate subscription failed: %v", err)
+		log.Fatal("Cannot proceed without market subscriptions")
+	}
+	log.Printf("✅ Immediate subscription completed for %d markets", len(arbitrageMarkets))
 
 	// Start market data processor BEFORE subscriptions
 	messageCounter := uint64(0)
@@ -172,29 +184,6 @@ func main() {
 		}
 		log.Printf("Market data processor exited - data feed channel closed")
 	}()
-
-	// Subscribe to markets sequentially
-	log.Printf("Subscribing to %d markets sequentially...", len(arbitrageMarkets))
-
-	successfulSubscriptions, failedSubscriptions := httpClient.SubscribeWebSocketSequentially(arbitrageMarkets)
-
-	log.Printf("SEQUENTIAL Subscription Results:")
-	log.Printf("   Working with data: %d", len(successfulSubscriptions))
-	log.Printf("   Failed/dead: %d", len(failedSubscriptions))
-	log.Printf("   Success rate: %.1f%%", float64(len(successfulSubscriptions))/float64(len(arbitrageMarkets))*100)
-
-	if len(failedSubscriptions) > 0 {
-		log.Printf("   Failed markets (first 10): %v", failedSubscriptions[:Min(10, len(failedSubscriptions))])
-	}
-
-	// Update arbitrageMarkets to only include successfully subscribed markets
-	arbitrageMarkets = successfulSubscriptions
-
-	if len(arbitrageMarkets) == 0 {
-		log.Fatal("No markets successfully subscribed - cannot proceed")
-	}
-
-	log.Printf("Proceeding with %d working subscriptions", len(arbitrageMarkets))
 
 	// Wait for initial market data and verify it's flowing with proper synchronization
 	log.Println("Waiting for initial market data...")

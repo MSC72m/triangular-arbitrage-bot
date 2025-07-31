@@ -15,7 +15,7 @@
   "maxConcurrentOrdersPerAsset": 1,
   "orderTimeoutSeconds": 30,
   "enableOrderSimulation": true,
-  "orderBookDepthLimit": 5,
+  "orderBookDepthLimit": 10,
   "logLevel": "debug",
   "tradingFees": {
     "USDT": 0.0015,

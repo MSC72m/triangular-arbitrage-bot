@@ -133,6 +133,10 @@ func processWebSocketMessage(msg []byte, marketDepths *MarketDepths, metrics *Me
 	case "server.ping":
 		// Ping response - no action needed
 		return nil
+	case "server.sign":
+		// Authentication response - log it
+		log.Printf("✅ WebSocket authentication confirmed: %+v", wsResponse)
+		return nil
 	case "depth.subscribe":
 		// Subscription confirmation - log it
 		log.Printf("✅ WebSocket depth subscription confirmed: %+v", wsResponse)

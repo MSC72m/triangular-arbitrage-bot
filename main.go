@@ -107,6 +107,10 @@ func main() {
 	}
 	log.Println("WebSocket connected successfully")
 
+	// Start retry queue processor for failed WebSocket markets
+	httpClient.StartRetryQueueProcessor()
+	log.Println("Retry queue processor started")
+
 	// Test WebSocket connection with a single subscription
 	log.Println("Testing WebSocket connection...")
 	if err := httpClient.TestWebSocketConnection(); err != nil {

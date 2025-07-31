@@ -58,8 +58,9 @@ type Config struct {
 	RateLimitPerMinute int `json:"rateLimitPerMinute"` // API calls per minute
 
 	// Performance & Latency
-	MaxLatencyMs    int `json:"maxLatencyMs"`    // Maximum acceptable latency for execution
-	ConcurrentScans int `json:"concurrentScans"` // Number of concurrent arbitrage scans
+	MaxLatencyMs             int `json:"maxLatencyMs"`             // Maximum acceptable latency for execution
+	ConcurrentScans          int `json:"concurrentScans"`          // Number of concurrent arbitrage scans
+	wsSubscriptionsBatchSize int `json:"wsSubscriptionsBatchSize"` // Number of markets to subscribe to in a single batch
 
 	// Logging
 	LogLevel string `json:"logLevel"` // debug, info, warn, error
@@ -112,8 +113,9 @@ func DefaultConfig() *Config {
 		RateLimitPerMinute: 300,
 
 		// Performance defaults
-		MaxLatencyMs:    200, // 200ms max latency
-		ConcurrentScans: 250, // 250 concurrent scanners
+		MaxLatencyMs:             200, // 200ms max latency
+		ConcurrentScans:          250, // 250 concurrent scanners
+		wsSubscriptionsBatchSize: 50,  // 50 markets per batch
 
 		// Logging defaults
 		LogLevel: "debug",

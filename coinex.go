@@ -1654,20 +1654,42 @@ func (c *coinexClient) buildQueryString(params map[string]string) string {
 	return strings.Join(parts, "&")
 }
 
-// EnsureCriticalMarketData ensures critical markets have data via REST API fallback
+// EnsureCriticalMarketData ensures critical markets have data via WebSocket first, then REST API fallback
 func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, marketDepths *MarketDepths) {
-	log.Printf(" Ensuring quote currency markets have data via REST API: %v", criticalMarkets)
+	log.Printf(" Ensuring quote currency markets have data: %v", criticalMarkets)
 
 	for _, market := range criticalMarkets {
-		// Check if market already has data in marketDepths
+		// First, check if market already has data in marketDepths (from WebSocket)
 		if orderBook, exists := marketDepths.Load(market); exists && orderBook != nil {
 			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
-				// Market already has data, skip
-				log.Printf(" %s already has data, skipping", market)
+				// Market already has WebSocket data, skip
+				log.Printf(" %s already has WebSocket data, skipping", market)
 				continue
 			}
 		}
 
+		// Try to subscribe to the market via WebSocket first
+		log.Printf(" Attempting WebSocket subscription for %s...", market)
+		if err := c.httpClient.SubscribeWebSocketWithRetry([]string{market}, 2); err != nil {
+			log.Printf(" WebSocket subscription failed for %s: %v", market, err)
+			// Add to retry queue for later
+			c.httpClient.AddFailedMarket(market)
+		} else {
+			log.Printf(" WebSocket subscription successful for %s", market)
+			// Wait a moment for data to arrive
+			time.Sleep(1 * time.Second)
+
+			// Check if we now have WebSocket data
+			if orderBook, exists := marketDepths.Load(market); exists && orderBook != nil {
+				if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
+					log.Printf(" %s data available via WebSocket | Bids: %d | Asks: %d",
+						market, len(orderBook.Bids), len(orderBook.Asks))
+					continue
+				}
+			}
+		}
+
+		// If WebSocket failed or no data received, fall back to REST API
 		log.Printf(" Fetching %s via REST API (WebSocket data missing)...", market)
 
 		// Use the HttpClient's REST API fallback method

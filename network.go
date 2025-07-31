@@ -61,23 +61,32 @@ type HttpClient struct {
 	wsPingDone     chan bool
 	wsHealthDone   chan bool
 	reconnectMutex sync.Mutex
+
+	// Retry queue for failed WebSocket markets
+	failedMarkets    map[string]time.Time // market -> last failure time
+	failedMarketsMu  sync.RWMutex
+	retryInterval    time.Duration
+	maxRetryAttempts int
 }
 
 func newHttpClient(config *Config) *HttpClient {
 	return &HttpClient{
-		config:          config,
-		headers:         make(map[string]string),
-		wsSubscriptions: make(map[string]bool),
-		wsDataFeed:      make(chan []byte, 2000), // Buffered channel
-		marketData:      make(map[string]*OrderBook),
-		rateLimiter:     NewRateLimiter(config.RateLimitPerSecond, config.RateLimitPerSecond),
-		wsUrl:           "wss://socket.coinex.com/v2/spot", // Original CoinEx spot WebSocket URL
-		wsReconnectChan: make(chan bool, 1),
-		wsStopChan:      make(chan bool, 1),
-		wsPongTimeout:   45 * time.Second, // Reduced from 60s to 45s for faster detection
-		wsReadDone:      make(chan bool, 1),
-		wsPingDone:      make(chan bool, 1),
-		wsHealthDone:    make(chan bool, 1),
+		config:           config,
+		headers:          make(map[string]string),
+		wsSubscriptions:  make(map[string]bool),
+		wsDataFeed:       make(chan []byte, 2000), // Buffered channel
+		marketData:       make(map[string]*OrderBook),
+		rateLimiter:      NewRateLimiter(config.RateLimitPerSecond, config.RateLimitPerSecond),
+		wsUrl:            "wss://socket.coinex.com/v2/spot", // Original CoinEx spot WebSocket URL
+		wsReconnectChan:  make(chan bool, 1),
+		wsStopChan:       make(chan bool, 1),
+		wsPongTimeout:    45 * time.Second, // Reduced from 60s to 45s for faster detection
+		wsReadDone:       make(chan bool, 1),
+		wsPingDone:       make(chan bool, 1),
+		wsHealthDone:     make(chan bool, 1),
+		failedMarkets:    make(map[string]time.Time),
+		retryInterval:    5 * time.Second, // Default retry interval
+		maxRetryAttempts: 3,
 	}
 }
 
@@ -830,14 +839,13 @@ func (c *HttpClient) SubscribeWebSocket(markets []string) error {
 	*/
 
 	// Break large batches into smaller chunks to avoid overwhelming the connection
-	batchSize := 5 // Reduced from 20 to 5 markets at a time
 	totalMarkets := len(markets)
 	successfulSubscriptions := 0
 
-	fmt.Printf("📡 Subscribing to %d markets in batches of %d...\n", totalMarkets, batchSize)
+	fmt.Printf("📡 Subscribing to %d markets in batches of %d...\n", totalMarkets, c.config.wsSubscriptionsBatchSize)
 
-	for i := 0; i < totalMarkets; i += batchSize {
-		end := i + batchSize
+	for i := 0; i < totalMarkets; i += c.config.wsSubscriptionsBatchSize {
+		end := i + c.config.wsSubscriptionsBatchSize
 		if end > totalMarkets {
 			end = totalMarkets
 		}
@@ -1474,4 +1482,84 @@ func (c *HttpClient) TestMarketSubscription(market string) error {
 		market, len(orderBook.Bids), len(orderBook.Asks))
 
 	return nil
+}
+
+// AddFailedMarket adds a market to the retry queue
+func (c *HttpClient) AddFailedMarket(market string) {
+	c.failedMarketsMu.Lock()
+	defer c.failedMarketsMu.Unlock()
+	c.failedMarkets[market] = time.Now()
+	log.Printf("📝 Added %s to WebSocket retry queue", market)
+}
+
+// RemoveFailedMarket removes a market from the retry queue
+func (c *HttpClient) RemoveFailedMarket(market string) {
+	c.failedMarketsMu.Lock()
+	defer c.failedMarketsMu.Unlock()
+	delete(c.failedMarkets, market)
+	log.Printf("✅ Removed %s from WebSocket retry queue", market)
+}
+
+// GetFailedMarkets returns markets that are ready for retry
+func (c *HttpClient) GetFailedMarkets() []string {
+	c.failedMarketsMu.RLock()
+	defer c.failedMarketsMu.RUnlock()
+
+	var readyMarkets []string
+	now := time.Now()
+
+	for market, lastFailure := range c.failedMarkets {
+		if now.Sub(lastFailure) >= c.retryInterval {
+			readyMarkets = append(readyMarkets, market)
+		}
+	}
+
+	return readyMarkets
+}
+
+// ProcessRetryQueue processes the retry queue for failed markets
+func (c *HttpClient) ProcessRetryQueue() {
+	readyMarkets := c.GetFailedMarkets()
+	if len(readyMarkets) == 0 {
+		return
+	}
+
+	log.Printf("🔄 Processing retry queue: %d markets ready for retry", len(readyMarkets))
+
+	successful := []string{}
+	failed := []string{}
+
+	for _, market := range readyMarkets {
+		if err := c.SubscribeWebSocketWithRetry([]string{market}, 2); err != nil {
+			failed = append(failed, market)
+			log.Printf("❌ Retry failed for %s: %v", market, err)
+		} else {
+			successful = append(successful, market)
+			c.RemoveFailedMarket(market)
+		}
+
+		// Small delay between retries
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	log.Printf("🔄 Retry queue processed: %d successful, %d failed", len(successful), len(failed))
+}
+
+// StartRetryQueueProcessor starts a background process to handle failed market retries
+func (c *HttpClient) StartRetryQueueProcessor() {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-c.wsStopChan:
+				return
+			case <-ticker.C:
+				if c.IsWebSocketConnected() {
+					c.ProcessRetryQueue()
+				}
+			}
+		}
+	}()
 }

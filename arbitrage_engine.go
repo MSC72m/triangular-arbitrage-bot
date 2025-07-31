@@ -1385,17 +1385,12 @@ func (ae *ArbitrageEngine) validateMarketData(path TriangularPath, snapshot map[
 			return nil, false
 		}
 
-		// For non-critical markets, try to fetch if missing
+		// For non-critical markets, ONLY use WebSocket data - no REST API calls
+		// If WebSocket data is missing, add to retry queue and skip
 		if marketData == nil || marketData.Latest <= 0 {
-			if latestPrice, err := ae.coinexClient.httpClient.GetMarketTicker(market); err == nil {
-				if marketData == nil {
-					marketData = &OrderBook{Market: market}
-				}
-				marketData.Latest = latestPrice
-				return marketData, true
-			} else {
-				return nil, false
-			}
+			// Add to retry queue for later WebSocket subscription
+			ae.coinexClient.httpClient.AddFailedMarket(market)
+			return nil, false
 		}
 		return marketData, true
 	}
@@ -1451,23 +1446,10 @@ func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, mar
 
 		// Use latest price from market data
 		if marketData == nil || marketData.Latest <= 0 {
-			// Only try to fetch via REST API for non-critical markets
+			// For non-critical markets, ONLY use WebSocket data - no REST API calls
+			// If WebSocket data is missing, return error
 			if !ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(market) {
-				// Try to fetch latest price via REST API
-				latestPrice, err := ae.coinexClient.httpClient.GetMarketTicker(market)
-				if err != nil {
-					return 0, fmt.Errorf("failed to get latest price for %s: %v", market, err)
-				}
-
-				// Update the market data with the latest price
-				if marketData != nil {
-					marketData.Latest = latestPrice
-				}
-
-				if detectionStart.UnixNano()%100000 == 0 { // Log occasionally
-					log.Printf("  LATEST PRICE | %s | Fetched via API: %.8f", market, latestPrice)
-				}
-				return latestPrice, nil
+				return 0, fmt.Errorf("no WebSocket data available for %s", market)
 			} else {
 				// Critical market with no data - this shouldn't happen if assumed prices are set correctly
 				return 0, fmt.Errorf("critical market %s has no assumed price", market)

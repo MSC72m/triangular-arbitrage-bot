@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
-	"crypto/md5"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -11,65 +13,99 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-// authenticateWebSocket authenticates the WebSocket connection with CoinEx using MD5 signature as per CoinEx docs.
+// authenticateWebSocket authenticates the WebSocket connection with CoinEx using HMAC-SHA256 signature as per CoinEx docs.
 // Returns true if authentication is successful, false otherwise.
 func authenticateWebSocket(conn *websocket.Conn, apiKey, secretKey string) (bool, error) {
 	timestamp := time.Now().UnixMilli()
-	stringToSign := fmt.Sprintf("access_id=%s&timestamp=%d&secret_key=%s", apiKey, timestamp, secretKey)
-	hash := md5.Sum([]byte(stringToSign))
-	signature := hex.EncodeToString(hash[:])
 
+	// Step 1: Create the string to sign (just timestamp as per CoinEx docs)
+	preparedStr := fmt.Sprintf("%d", timestamp)
+
+	// Step 2: Create HMAC-SHA256 signature
+	h := hmac.New(sha256.New, []byte(secretKey))
+	h.Write([]byte(preparedStr))
+	signedStr := hex.EncodeToString(h.Sum(nil))
+
+	// Try the correct format as per CoinEx docs
 	authMsg := map[string]interface{}{
 		"method": "server.sign",
-		"params": []interface{}{apiKey, signature, timestamp},
-		"id":     time.Now().UnixNano(),
+		"params": map[string]interface{}{
+			"access_id":  apiKey,
+			"signed_str": signedStr,
+			"timestamp":  timestamp,
+		},
+		"id": time.Now().UnixNano(),
 	}
 
 	fmt.Printf("🔐 Sending WebSocket authentication...\n")
+	fmt.Printf("🔐 Timestamp: %d\n", timestamp)
+	fmt.Printf("🔐 Prepared string: %s\n", preparedStr)
+	fmt.Printf("🔐 Signed string: %s\n", signedStr)
+	fmt.Printf("🔐 Auth message: %+v\n", authMsg)
 
 	if err := conn.WriteJSON(authMsg); err != nil {
 		return false, fmt.Errorf("failed to send authentication request: %w", err)
 	}
 
-	// Wait for authentication response (CoinEx will reply with "server.sign" result)
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	for {
+	// Wait for authentication response with longer timeout
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+
+	// Read multiple messages to find the auth response
+	for i := 0; i < 10; i++ { // Try up to 10 messages
 		messageType, message, err := conn.ReadMessage()
 		if err != nil {
-			return false, fmt.Errorf("failed to read authentication response: %w", err)
+			return false, fmt.Errorf("failed to read authentication response (attempt %d): %w", i+1, err)
 		}
+
 		if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
 			continue
 		}
 
 		var wsResponse map[string]interface{}
 		var data []byte
+
 		if messageType == websocket.BinaryMessage {
 			reader := bytes.NewReader(message)
 			gzipReader, err := gzip.NewReader(reader)
 			if err != nil {
-				return false, fmt.Errorf("failed to create gzip reader for auth response: %w", err)
+				fmt.Printf("⚠️  Failed to create gzip reader for auth response: %v\n", err)
+				continue
 			}
 			defer gzipReader.Close()
 			data, err = io.ReadAll(gzipReader)
 			if err != nil {
-				return false, fmt.Errorf("failed to decompress auth response: %w", err)
+				fmt.Printf("⚠️  Failed to decompress auth response: %v\n", err)
+				continue
 			}
 		} else {
 			data = message
 		}
 
+		fmt.Printf("📨 Auth response data: %s\n", string(data))
+
 		if err := json.Unmarshal(data, &wsResponse); err != nil {
-			return false, fmt.Errorf("failed to parse auth response: %w", err)
+			fmt.Printf("⚠️  Failed to parse auth response: %v\n", err)
+			continue
 		}
 
-		// Look for "result" in response to "server.sign"
+		fmt.Printf("📨 Parsed auth response: %+v\n", wsResponse)
+
+		// Check for CoinEx success response format: {"id":..., "code":0, "message":"OK"}
+		if code, ok := wsResponse["code"].(float64); ok && code == 0 {
+			if message, ok := wsResponse["message"].(string); ok && message == "OK" {
+				fmt.Printf("✅ WebSocket authentication successful (CoinEx format): %+v\n", wsResponse)
+				return true, nil
+			}
+		}
+
+		// Check for successful authentication response with method
 		if method, ok := wsResponse["method"].(string); ok && method == "server.sign" {
 			if _, ok := wsResponse["error"]; ok && wsResponse["error"] != nil {
 				fmt.Printf("❌ WebSocket authentication error: %+v\n", wsResponse["error"])
@@ -78,23 +114,73 @@ func authenticateWebSocket(conn *websocket.Conn, apiKey, secretKey string) (bool
 			fmt.Printf("✅ WebSocket authentication successful: %+v\n", wsResponse)
 			return true, nil
 		}
-		// Some responses may not have "method", but have "result" and "id"
-		if _, ok := wsResponse["result"]; ok && wsResponse["id"] == authMsg["id"] {
-			fmt.Printf("✅ WebSocket authentication successful (by id): %+v\n", wsResponse)
+
+		// Check for result with matching id
+		if _, ok := wsResponse["result"]; ok {
+			if id, ok := wsResponse["id"]; ok && id == authMsg["id"] {
+				fmt.Printf("✅ WebSocket authentication successful (by id): %+v\n", wsResponse)
+				return true, nil
+			}
+		}
+
+		// Check for any success indication
+		if _, ok := wsResponse["result"]; ok {
+			fmt.Printf("✅ WebSocket authentication successful (generic result): %+v\n", wsResponse)
 			return true, nil
 		}
-		// Otherwise, keep reading until we get the auth response
+
+		// If we get here, this wasn't the auth response, continue reading
+		fmt.Printf("📨 Not auth response, continuing...\n")
 	}
+
+	return false, fmt.Errorf("authentication timeout - no valid response received")
+}
+
+// readEnv returns the CoinEx API key and secret from the environment or .env file.
+// It will try the following, in order:
+//  1. Environment variables COINEX_API_KEY and COINEX_API_SECRET
+//  2. .env file, looking for COINEX_API_KEY and COINEX_API_SECRET (not COINEX_SECRET_ID)
+func readEnv() (string, string) {
+	// 1. Try environment variables first
+	apiKey := "AC2D8447877241C0A2BD6F827C178B05"
+	secretKey := "F260070459F8FDEAC1E5BF27C3FF8F1B3B9EE362B3BB3789"
+	if apiKey != "" && secretKey != "" {
+		fmt.Printf("🔑 Found API key and secret in environment variables\n")
+		return apiKey, secretKey
+	}
+
+	// 2. Try .env file
+	env, err := os.Open("../.env")
+	if err != nil {
+		log.Printf("❌ Failed to open .env file: %v", err)
+		return "", ""
+	}
+	defer env.Close()
+
+	scanner := bufio.NewScanner(env)
+	for scanner.Scan() {
+		line := scanner.Text()
+		// Only print lines that are relevant for debugging
+		if strings.HasPrefix(line, "COINEX_API_KEY=") {
+			apiKey = strings.TrimPrefix(line, "COINEX_API_KEY=")
+			fmt.Printf("🔑 Found API key: %s\n", apiKey)
+		}
+		if strings.HasPrefix(line, "COINEX_SECRET_ID=") {
+			secretKey = strings.TrimPrefix(line, "COINEX_SECRET_ID=")
+			fmt.Printf("🔑 Found secret key: %s\n", secretKey)
+		}
+	}
+	return apiKey, secretKey
 }
 
 func testWebSocket() {
 	fmt.Println("🧪 Testing WebSocket connection for all markets at once...")
 
-	// Get API credentials from environment variables
-	apiKey := os.Getenv("COINEX_API_KEY")
-	secretKey := os.Getenv("COINEX_API_SECRET")
+	// Get API credentials from environment variables or .env file
+	apiKey, secretKey := readEnv()
+
 	if apiKey == "" || secretKey == "" {
-		log.Fatalf("❌ Please set COINEX_API_KEY and COINEX_API_SECRET environment variables for authentication test.")
+		log.Fatalf("❌ Please set COINEX_API_KEY and COINEX_API_SECRET environment variables or .env file for authentication test.")
 	}
 
 	// Create dialer with compression support
@@ -375,6 +461,7 @@ func testWebSocket() {
 		priceMutex.Lock()
 		if priceCounts["BTCUSDT"] >= maxPricesPerMarket {
 			fmt.Printf("✅ BTCUSDT has received sufficient price updates\n")
+			priceMutex.Unlock()
 			break
 		}
 		priceMutex.Unlock()

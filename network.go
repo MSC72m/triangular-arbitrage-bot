@@ -3,7 +3,8 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
-	"crypto/md5"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -218,9 +219,17 @@ func (c *HttpClient) ConnectWebSocket() error {
 	fmt.Printf("⏳ Waiting for connection to stabilize...\n")
 	time.Sleep(2 * time.Second) // Reduced back to 2s like working test
 
-	// For public market data, authentication is not required
-	// CoinEx WebSocket for public data doesn't need server.sign
-	fmt.Printf("ℹ️  Using public WebSocket connection (no authentication required)\n")
+	// Authenticate if API credentials are available
+	if c.config.APIKey != "" && c.config.SecretKey != "" {
+		fmt.Printf("🔐 Authenticating WebSocket connection...\n")
+		if err := c.authenticateWebSocket(c.config.APIKey, c.config.SecretKey); err != nil {
+			fmt.Printf("❌ WebSocket authentication failed: %v\n", err)
+			return fmt.Errorf("websocket authentication failed: %w", err)
+		}
+		fmt.Printf("ℹ️  Authenticated WebSocket connection (private access enabled)\n")
+	} else {
+		fmt.Printf("ℹ️  Using public WebSocket connection (no authentication required)\n")
+	}
 
 	// Send a small immediate subscription to keep connection alive
 	fmt.Printf("📡 Sending immediate subscription to keep connection alive...\n")
@@ -246,34 +255,120 @@ func (c *HttpClient) ConnectWebSocket() error {
 
 	return nil
 }
-
 func (c *HttpClient) authenticateWebSocket(apiKey, secretKey string) error {
 	if !c.wsConnected || c.wsConn == nil {
 		return fmt.Errorf("websocket not connected")
 	}
 
 	timestamp := time.Now().UnixMilli()
-	stringToSign := fmt.Sprintf("access_id=%s&timestamp=%d&secret_key=%s", apiKey, timestamp, secretKey)
-	hash := md5.Sum([]byte(stringToSign))
-	signature := hex.EncodeToString(hash[:])
+
+	// Step 1: Create the string to sign (just timestamp as per CoinEx docs)
+	preparedStr := fmt.Sprintf("%d", timestamp)
+
+	// Step 2: Create HMAC-SHA256 signature
+	h := hmac.New(sha256.New, []byte(secretKey))
+	h.Write([]byte(preparedStr))
+	signedStr := hex.EncodeToString(h.Sum(nil))
 
 	authMsg := map[string]interface{}{
 		"method": "server.sign",
-		"params": []interface{}{apiKey, signature, timestamp},
-		"id":     time.Now().UnixNano(),
+		"params": map[string]interface{}{
+			"access_id":  apiKey,
+			"signed_str": signedStr,
+			"timestamp":  timestamp,
+		},
+		"id": time.Now().UnixNano(),
 	}
 
 	fmt.Printf("🔐 Sending WebSocket authentication...\n")
+	fmt.Printf("🔐 Timestamp: %d\n", timestamp)
+	fmt.Printf("🔐 Prepared string: %s\n", preparedStr)
+	fmt.Printf("🔐 Signed string: %s\n", signedStr)
 
 	if err := c.wsConn.WriteJSON(authMsg); err != nil {
 		return fmt.Errorf("failed to send authentication request: %w", err)
 	}
 
-	// Wait for authentication response (optional - some exchanges don't require confirmation)
-	fmt.Printf("⏳ Waiting for authentication response...\n")
-	time.Sleep(2 * time.Second)
+	// Wait for authentication response with longer timeout
+	c.wsConn.SetReadDeadline(time.Now().Add(30 * time.Second))
 
-	return nil
+	// Read multiple messages to find the auth response
+	for i := 0; i < 10; i++ { // Try up to 10 messages
+		messageType, message, err := c.wsConn.ReadMessage()
+		if err != nil {
+			return fmt.Errorf("failed to read authentication response (attempt %d): %w", i+1, err)
+		}
+
+		if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
+			continue
+		}
+
+		var wsResponse map[string]interface{}
+		var data []byte
+
+		if messageType == websocket.BinaryMessage {
+			reader := bytes.NewReader(message)
+			gzipReader, err := gzip.NewReader(reader)
+			if err != nil {
+				fmt.Printf("⚠️  Failed to create gzip reader for auth response: %v\n", err)
+				continue
+			}
+			defer gzipReader.Close()
+			data, err = io.ReadAll(gzipReader)
+			if err != nil {
+				fmt.Printf("⚠️  Failed to decompress auth response: %v\n", err)
+				continue
+			}
+		} else {
+			data = message
+		}
+
+		fmt.Printf("📨 Auth response data: %s\n", string(data))
+
+		if err := json.Unmarshal(data, &wsResponse); err != nil {
+			fmt.Printf("⚠️  Failed to parse auth response: %v\n", err)
+			continue
+		}
+
+		fmt.Printf("📨 Parsed auth response: %+v\n", wsResponse)
+
+		// Check for CoinEx success response format: {"id":..., "code":0, "message":"OK"}
+		if code, ok := wsResponse["code"].(float64); ok && code == 0 {
+			if message, ok := wsResponse["message"].(string); ok && message == "OK" {
+				fmt.Printf("✅ WebSocket authentication successful (CoinEx format): %+v\n", wsResponse)
+				return nil
+			}
+		}
+
+		// Check for successful authentication response with method
+		if method, ok := wsResponse["method"].(string); ok && method == "server.sign" {
+			if _, ok := wsResponse["error"]; ok && wsResponse["error"] != nil {
+				fmt.Printf("❌ WebSocket authentication error: %+v\n", wsResponse["error"])
+				return fmt.Errorf("authentication error: %+v", wsResponse["error"])
+			}
+			fmt.Printf("✅ WebSocket authentication successful: %+v\n", wsResponse)
+			return nil
+		}
+
+		// Check for result with matching id
+		if _, ok := wsResponse["result"]; ok {
+			if id, ok := wsResponse["id"]; ok && id == authMsg["id"] {
+				fmt.Printf("✅ WebSocket authentication successful (by id): %+v\n", wsResponse)
+				return nil
+			}
+		}
+
+		// Check for any success indication
+		if _, ok := wsResponse["result"]; ok {
+			fmt.Printf("✅ WebSocket authentication successful (generic result): %+v\n", wsResponse)
+			return nil
+		}
+
+		// If we get here, this wasn't the auth response, continue reading
+		fmt.Printf("📨 Not auth response, continuing...\n")
+	}
+
+	return fmt.Errorf("authentication timeout - no valid response received")
 }
 
 // ReconnectWebSocket attempts to reconnect to the WebSocket

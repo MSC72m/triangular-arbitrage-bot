@@ -429,11 +429,14 @@ func (oem *OrderExecutionManager) placeAndWaitForOrder(market, orderType string,
 		return nil
 	}
 
-	// Wait for order result - FOK behavior handles timeout internally
+	// Wait for order result - use exactly the same timeout as FOK lifecycle
+	// This ensures no gap between FOK timeout and fallback timeout
+	timeout := time.Duration(oem.config.FOKOrderSettings.FOKTimeoutSeconds) * time.Second
+
 	select {
 	case result := <-orderResultChan:
 		return result
-	case <-time.After(3 * time.Second): // Fallback timeout
+	case <-time.After(timeout):
 		return &OrderResult{
 			OrderID:       tracker.OrderID,
 			Market:        market,
@@ -446,7 +449,7 @@ func (oem *OrderExecutionManager) placeAndWaitForOrder(market, orderType string,
 			Fee:           0,
 			FeeCurrency:   "",
 			ExecutionTime: time.Since(tracker.CreatedAt).Milliseconds(),
-			ErrorMessage:  "Order timeout",
+			ErrorMessage:  fmt.Sprintf("Order timeout after %ds", oem.config.FOKOrderSettings.FOKTimeoutSeconds),
 			Timestamp:     time.Now(),
 		}
 	}
@@ -1384,6 +1387,14 @@ func (ae *ArbitrageEngine) scanForOpportunities(scannerID int, scanCount int) {
 		if ae.assetLockManager.IsAssetInCooldown(baseAsset) {
 			pathsBlocked++
 			assetsBlocked[baseAsset]++
+			continue
+		}
+
+		// FIFTH PRIORITY: Double-check execution status before calculating opportunity
+		// This prevents race conditions where multiple scanners find the same opportunity
+		if ae.assetLockManager.IsAssetInExecution(baseAsset) {
+			pathsInExecution++
+			assetsExecuting[baseAsset]++
 			continue
 		}
 

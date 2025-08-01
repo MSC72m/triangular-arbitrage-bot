@@ -1311,7 +1311,13 @@ func (c *HttpClient) performRequest(params map[string]string, method string) (ma
 	// Set proper content type for form data
 	if method == POST || method == PUT || method == PATCH || method == DELETE {
 		if _, hasBody := params["body"]; hasBody {
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			// Check if body looks like JSON (starts with { or [)
+			bodyStr := params["body"]
+			if strings.HasPrefix(strings.TrimSpace(bodyStr), "{") || strings.HasPrefix(strings.TrimSpace(bodyStr), "[") {
+				req.Header.Set("Content-Type", "application/json")
+			} else {
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			}
 		}
 	}
 

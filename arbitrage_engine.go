@@ -45,11 +45,16 @@ func (alm *AssetLockManager) TryLockAssets(assets []string) bool {
 	alm.lockMutex.Lock()
 	defer alm.lockMutex.Unlock()
 
+	// Debug: Log current state
+	log.Printf("🔍 TRYING TO LOCK ASSETS | Assets: %v | Current locks: %v", assets, alm.getLockedAssetsSnapshot())
+
 	// Check if any market would exceed max concurrent orders
 	for _, market := range assets {
 		currentOrders := alm.lockedAssets[market]
 		if alm.config.MaxConcurrentOrdersPerAsset > 0 &&
 			currentOrders >= alm.config.MaxConcurrentOrdersPerAsset {
+			log.Printf("🚫 ASSET BLOCKED | %s already has %d orders (max: %d)",
+				market, currentOrders, alm.config.MaxConcurrentOrdersPerAsset)
 			return false // Market is at max concurrent orders
 		}
 	}
@@ -57,9 +62,10 @@ func (alm *AssetLockManager) TryLockAssets(assets []string) bool {
 	// All markets can be locked, proceed to lock them
 	for _, market := range assets {
 		alm.lockedAssets[market]++
+		log.Printf("🔒 ASSET LOCKED | %s now has %d orders", market, alm.lockedAssets[market])
 	}
 
-	log.Printf("MARKETS LOCKED | %v | Current locks: %v", assets, alm.getLockedAssetsSnapshot())
+	log.Printf("✅ MARKETS LOCKED | %v | Current locks: %v", assets, alm.getLockedAssetsSnapshot())
 	return true
 }
 
@@ -72,16 +78,22 @@ func (alm *AssetLockManager) UnlockAssets(assets []string) {
 	alm.lockMutex.Lock()
 	defer alm.lockMutex.Unlock()
 
+	log.Printf("🔍 TRYING TO UNLOCK ASSETS | Assets: %v | Current locks: %v", assets, alm.getLockedAssetsSnapshot())
+
 	for _, market := range assets {
 		if count, exists := alm.lockedAssets[market]; exists && count > 0 {
 			alm.lockedAssets[market]--
+			log.Printf("🔓 ASSET UNLOCKED | %s now has %d orders", market, alm.lockedAssets[market])
 			if alm.lockedAssets[market] == 0 {
 				delete(alm.lockedAssets, market)
+				log.Printf("🗑️ ASSET REMOVED | %s has no more orders", market)
 			}
+		} else {
+			log.Printf("⚠️ ASSET NOT FOUND OR ALREADY UNLOCKED | %s", market)
 		}
 	}
 
-	log.Printf("🔓 MARKETS UNLOCKED | %v | Current locks: %v", assets, alm.getLockedAssetsSnapshot())
+	log.Printf("✅ MARKETS UNLOCKED | %v | Current locks: %v", assets, alm.getLockedAssetsSnapshot())
 }
 
 // IsPathLocked checks if any asset in the arbitrage path is locked
@@ -309,8 +321,6 @@ func (oem *OrderExecutionManager) IsShutdown() bool {
 func (oem *OrderExecutionManager) ExecuteArbitrageOrders(opportunity ArbitrageOpportunity) {
 	// Check if we're shutting down
 	if oem.IsShutdown() {
-		log.Printf("🚫 ARBITRAGE REJECTED | Shutdown in progress | Path: %s→%s→%s",
-			opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
 		return
 	}
 
@@ -322,161 +332,121 @@ func (oem *OrderExecutionManager) ExecuteArbitrageOrders(opportunity ArbitrageOp
 
 	// Try to lock markets
 	if !oem.assetLockManager.TryLockAssets(markets) {
-		log.Printf("🚫 ARBITRAGE BLOCKED | Path: %s→%s→%s | Markets locked: %v",
-			path.Market1, path.Market2, path.Market3, markets)
 		return
 	}
 
-	executionMode := map[bool]string{true: "SIMULATION", false: "REAL API"}[oem.config.SimulationMode]
-	log.Printf(" EXECUTING FOK ARBITRAGE (%s) | Path: %s→%s→%s | Markets: %v | Expected Profit: %.6f%%",
-		executionMode, path.Market1, path.Market2, path.Market3, markets, opportunity.NetProfit*100)
-
-	// Start FOK arbitrage execution with retry logic
-	log.Printf("🚀 STARTING EXECUTION | Asset: %s | Path: %s→%s→%s | Volume: $%.2f",
-		path.Asset1, path.Market1, path.Market2, path.Market3, opportunity.Volume)
-
+	// Execute FOK arbitrage with no retries
 	oem.executeFOKArbitrageWithRetry(opportunity, markets, 0)
 }
 
-// executeFOKArbitrageWithRetry executes FOK arbitrage with intelligent retry and re-evaluation
+// executeFOKArbitrageWithRetry executes FOK arbitrage with proper FOK behavior
 func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity ArbitrageOpportunity, markets []string, attemptNumber int) {
-	log.Printf(" FOK ARBITRAGE EXECUTION | Attempt: %d/%d | Path: %s→%s→%s | Profit: %.6f%%",
-		attemptNumber, oem.config.FOKOrderSettings.MaxRetryAttempts,
-		opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3,
-		opportunity.EstimatedProfit*100)
-
 	// Unlock assets when done
 	defer func() {
 		oem.assetLockManager.UnlockAssets(markets)
-		log.Printf("🔓 ASSETS UNLOCKED | Markets: %v", markets)
 	}()
 
-	// Step 1: Assume sufficient balance from config (no API call to avoid delays)
+	log.Printf("🎯 EXECUTING FOK ARBITRAGE | Path: %s→%s→%s | Profit: %.6f%% | Volume: $%.2f",
+		opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3,
+		opportunity.NetProfit, opportunity.Volume)
+
+	// Step 1: Check balance
 	requiredAmount := opportunity.Volume * opportunity.Price1
 	if requiredAmount > oem.config.OrderExecutionSettings.AccountBalance {
-		log.Printf("🚫 INSUFFICIENT CONFIG BALANCE | Required: $%.2f | Available: $%.2f | Path: %s→%s→%s",
-			requiredAmount, oem.config.OrderExecutionSettings.AccountBalance,
-			opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
+		log.Printf("❌ INSUFFICIENT BALANCE | Required: $%.2f | Available: $%.2f",
+			requiredAmount, oem.config.OrderExecutionSettings.AccountBalance)
 		return
 	}
-	log.Printf("💰 CONFIG BALANCE CHECK PASSED | Required: $%.2f | Available: $%.2f | Can execute arbitrage",
-		requiredAmount, oem.config.OrderExecutionSettings.AccountBalance)
 
-	// Step 2: Execute orders sequentially as required by specification
-	log.Printf("📤 EXECUTING FOK ORDERS SEQUENTIALLY | Attempt: %d/%d", attemptNumber, oem.config.FOKOrderSettings.MaxRetryAttempts)
+	// Step 2: Execute orders sequentially
+	// ===== LEG-1: Buy asset with USDT =====
+	log.Printf("🔄 LEG-1 START | Market: %s | Type: buy | Amount: %.6f | Price: %.8f",
+		opportunity.Path.Market1, opportunity.Volume, opportunity.Price1)
 
-	// Track all trackers for atomic execution
-	var trackers []*FOKOrderTracker
-	var results []*OrderResult
-
-	// Execute Leg-1: First order (buy asset with USDT)
-	log.Printf(" ATTEMPTING LEG-1 | Market: %s | Type: %s | Amount: %.6f | Latest Price: %.8f",
-		opportunity.Path.Market1, "buy", opportunity.Volume, opportunity.Price1)
-
-	orderResultChan1 := make(chan *OrderResult, 1)
-	tracker1 := oem.coinexClient.PlaceFOKOrder(opportunity.Path.Market1, "buy", opportunity.Volume, opportunity.Price1, orderResultChan1)
-	if tracker1 == nil {
-		log.Printf(" LEG-1 REJECTED | Market: %s | Aborting arbitrage", opportunity.Path.Market1)
+	result1 := oem.placeAndWaitForOrder(opportunity.Path.Market1, "buy", opportunity.Volume, opportunity.Price1, "Leg-1")
+	if result1 == nil {
+		log.Printf("❌ LEG-1 FAILED | Result is nil")
 		return
 	}
-	trackers = append(trackers, tracker1)
+	if result1.Status != OrderStatusFilled {
+		log.Printf("❌ LEG-1 FAILED | Status: %s | Error: %s", result1.Status, result1.ErrorMessage)
+		return
+	}
+	log.Printf("✅ LEG-1 SUCCESS | Filled: %.6f | Avg Price: %.8f", result1.FilledAmount, result1.AvgPrice)
 
-	// Wait for Leg-1 result with timeout
+	// ===== LEG-2: Sell asset for USDC =====
+	leg2Amount := result1.FilledAmount
+	log.Printf("🔄 LEG-2 START | Market: %s | Type: sell | Amount: %.6f | Price: %.8f",
+		opportunity.Path.Market2, leg2Amount, opportunity.Price2)
+
+	result2 := oem.placeAndWaitForOrder(opportunity.Path.Market2, "sell", leg2Amount, opportunity.Price2, "Leg-2")
+	if result2 == nil {
+		log.Printf("❌ LEG-2 FAILED | Result is nil | Completing cycle with Leg-1 only")
+		oem.completeArbitrageCycle([]*OrderResult{result1}, nil, opportunity.Path)
+		return
+	}
+	if result2.Status != OrderStatusFilled {
+		log.Printf("❌ LEG-2 FAILED | Status: %s | Error: %s | Completing cycle with Leg-1 only",
+			result2.Status, result2.ErrorMessage)
+		oem.completeArbitrageCycle([]*OrderResult{result1}, nil, opportunity.Path)
+		return
+	}
+	log.Printf("✅ LEG-2 SUCCESS | Filled: %.6f | Avg Price: %.8f", result2.FilledAmount, result2.AvgPrice)
+
+	// ===== LEG-3: Buy USDT with USDC =====
+	leg3Amount := result2.FilledAmount * result2.AvgPrice
+	log.Printf("🔄 LEG-3 START | Market: %s | Type: buy | Amount: %.6f | Price: %.8f",
+		opportunity.Path.Market3, leg3Amount, opportunity.Price3)
+
+	result3 := oem.placeAndWaitForOrder(opportunity.Path.Market3, "buy", leg3Amount, opportunity.Price3, "Leg-3")
+	if result3 == nil {
+		log.Printf("❌ LEG-3 FAILED | Result is nil | Completing cycle with Leg-1 and Leg-2")
+		oem.completeArbitrageCycle([]*OrderResult{result1, result2}, nil, opportunity.Path)
+		return
+	}
+	if result3.Status != OrderStatusFilled {
+		log.Printf("❌ LEG-3 FAILED | Status: %s | Error: %s | Completing cycle with Leg-1 and Leg-2",
+			result3.Status, result3.ErrorMessage)
+		oem.completeArbitrageCycle([]*OrderResult{result1, result2}, nil, opportunity.Path)
+		return
+	}
+	log.Printf("✅ LEG-3 SUCCESS | Filled: %.6f | Avg Price: %.8f", result3.FilledAmount, result3.AvgPrice)
+
+	log.Printf("🎉 ARBITRAGE COMPLETE | All three legs executed successfully")
+}
+
+// placeAndWaitForOrder places an order and waits for the result with FOK behavior
+func (oem *OrderExecutionManager) placeAndWaitForOrder(market, orderType string, amount, price float64, legName string) *OrderResult {
+	// Create result channel
+	orderResultChan := make(chan *OrderResult, 1)
+
+	// Place the order
+	tracker := oem.coinexClient.PlaceFOKOrder(market, orderType, amount, price, orderResultChan)
+	if tracker == nil {
+		return nil
+	}
+
+	// Wait for order result - FOK behavior handles timeout internally
 	select {
-	case result1 := <-orderResultChan1:
-		results = append(results, result1)
-		if result1.Status != OrderStatusFilled {
-			log.Printf(" LEG-1 FAILED | Status: %s | Error: %s | Aborting arbitrage", result1.Status, result1.ErrorMessage)
-			// Cancel any active orders from this attempt
-			oem.cancelAllActiveOrders(trackers)
-			return
+	case result := <-orderResultChan:
+		return result
+	case <-time.After(3 * time.Second): // Fallback timeout
+		return &OrderResult{
+			OrderID:       tracker.OrderID,
+			Market:        market,
+			Type:          orderType,
+			Amount:        amount,
+			Price:         price,
+			Status:        OrderStatusFailed,
+			FilledAmount:  0,
+			AvgPrice:      0,
+			Fee:           0,
+			FeeCurrency:   "",
+			ExecutionTime: time.Since(tracker.CreatedAt).Milliseconds(),
+			ErrorMessage:  "Order timeout",
+			Timestamp:     time.Now(),
 		}
-		log.Printf("✅ LEG-1 SUCCESS | ID: %s | Status: %s | Filled Amount: %.6f", result1.OrderID, result1.Status, result1.FilledAmount)
-	case <-time.After(5 * time.Second): // 5 second timeout for order placement
-		log.Printf(" LEG-1 TIMEOUT | Order placement took too long, aborting arbitrage")
-		// Cancel any active orders from this attempt
-		oem.cancelAllActiveOrders(trackers)
-		return
 	}
-
-	// Calculate Leg-2 amount based on Leg-1 result
-	leg2Amount := results[0].FilledAmount // Use the actual filled amount from Leg-1
-	log.Printf(" CALCULATING LEG-2 AMOUNT | From Leg-1 filled: %.6f | For Leg-2: %.6f", results[0].FilledAmount, leg2Amount)
-
-	// Execute Leg-2: Second order (sell asset for USDC)
-	log.Printf(" ATTEMPTING LEG-2 | Market: %s | Type: %s | Amount: %.6f | Latest Price: %.8f",
-		opportunity.Path.Market2, "sell", leg2Amount, opportunity.Price2)
-
-	orderResultChan2 := make(chan *OrderResult, 1)
-	tracker2 := oem.coinexClient.PlaceFOKOrder(opportunity.Path.Market2, "sell", leg2Amount, opportunity.Price2, orderResultChan2)
-	if tracker2 == nil {
-		log.Printf(" LEG-2 REJECTED | Market: %s | Completing cycle with Leg-1 only", opportunity.Path.Market2)
-		// Complete the cycle by selling the asset we bought in Leg-1
-		oem.completeArbitrageCycle(results, trackers, opportunity.Path)
-		return
-	}
-	trackers = append(trackers, tracker2)
-
-	// Wait for Leg-2 result
-	select {
-	case result2 := <-orderResultChan2:
-		results = append(results, result2)
-		if result2.Status != OrderStatusFilled {
-			log.Printf(" LEG-2 FAILED | Status: %s | Error: %s | Completing cycle with Leg-1 only", result2.Status, result2.ErrorMessage)
-			// Complete the cycle by selling the asset we bought in Leg-1
-			oem.completeArbitrageCycle(results, trackers, opportunity.Path)
-			return
-		}
-		log.Printf("✅ LEG-2 SUCCESS | ID: %s | Status: %s | Filled Amount: %.6f", result2.OrderID, result2.Status, result2.FilledAmount)
-	case <-time.After(5 * time.Second): // 5 second timeout for order placement
-		log.Printf(" LEG-2 TIMEOUT | Order placement took too long, completing cycle with Leg-1 only")
-		// Complete the cycle by selling the asset we bought in Leg-1
-		oem.completeArbitrageCycle(results, trackers, opportunity.Path)
-		return
-	}
-
-	// Calculate Leg-3 amount based on Leg-2 result
-	// For Leg-3, we need to convert the USDC amount to USDT amount
-	leg3Amount := results[1].FilledAmount * results[1].AvgPrice // Convert USDC to USDT equivalent
-	log.Printf(" CALCULATING LEG-3 AMOUNT | From Leg-2 filled: %.6f | Avg Price: %.8f | For Leg-3: %.6f",
-		results[1].FilledAmount, results[1].AvgPrice, leg3Amount)
-
-	// Execute Leg-3: Third order (buy USDT with USDC)
-	log.Printf(" ATTEMPTING LEG-3 | Market: %s | Type: %s | Amount: %.6f | Latest Price: %.8f",
-		opportunity.Path.Market3, "buy", leg3Amount, opportunity.Price3)
-
-	orderResultChan3 := make(chan *OrderResult, 1)
-	tracker3 := oem.coinexClient.PlaceFOKOrder(opportunity.Path.Market3, "buy", leg3Amount, opportunity.Price3, orderResultChan3)
-	if tracker3 == nil {
-		log.Printf(" LEG-3 REJECTED | Market: %s | Completing cycle with Leg-1 and Leg-2", opportunity.Path.Market3)
-		// Complete the cycle by converting USDC back to USDT
-		oem.completeArbitrageCycle(results, trackers, opportunity.Path)
-		return
-	}
-	trackers = append(trackers, tracker3)
-
-	// Wait for Leg-3 result
-	select {
-	case result3 := <-orderResultChan3:
-		results = append(results, result3)
-		if result3.Status != OrderStatusFilled {
-			log.Printf(" LEG-3 FAILED | Status: %s | Error: %s | Completing cycle with Leg-1 and Leg-2", result3.Status, result3.ErrorMessage)
-			// Complete the cycle by converting USDC back to USDT
-			oem.completeArbitrageCycle(results, trackers, opportunity.Path)
-			return
-		}
-		log.Printf("✅ LEG-3 SUCCESS | ID: %s | Status: %s | Filled Amount: %.6f", result3.OrderID, result3.Status, result3.FilledAmount)
-	case <-time.After(5 * time.Second): // 5 second timeout for order placement
-		log.Printf(" LEG-3 TIMEOUT | Order placement took too long, completing cycle with Leg-1 and Leg-2")
-		// Complete the cycle by converting USDC back to USDT
-		oem.completeArbitrageCycle(results, trackers, opportunity.Path)
-		return
-	}
-
-	// All three legs completed successfully
-	log.Printf("✅ ARBITRAGE COMPLETED | All three legs executed successfully")
-	log.Printf("📊 ARBITRAGE SUMMARY | Leg-1: %.6f → Leg-2: %.6f → Leg-3: %.6f",
-		results[0].FilledAmount, results[1].FilledAmount, results[2].FilledAmount)
 }
 
 // checkBalanceBeforeArbitrage checks if we have sufficient balance to execute the arbitrage
@@ -565,7 +535,7 @@ func (oem *OrderExecutionManager) cancelAllActiveOrders(trackers []*FOKOrderTrac
 		return
 	}
 
-	log.Printf("🛑 CANCELLING %d ACTIVE ORDERS | Atomic execution failed", len(trackers))
+	log.Printf("🛑 CANCELLING %d ACTIVE ORDERS | FOK execution failed", len(trackers))
 
 	for i, tracker := range trackers {
 		if tracker != nil {
@@ -768,6 +738,12 @@ func (ae *ArbitrageEngine) executionWorker() {
 		case <-ae.stopChan:
 			return
 		case opportunity := <-ae.executionChan:
+			// Log execution worker status
+			channelLength := len(ae.executionChan)
+			channelCapacity := cap(ae.executionChan)
+			log.Printf("🔧 EXECUTION WORKER | Processing opportunity | Channel: %d/%d | Path: %s→%s→%s",
+				channelLength, channelCapacity, opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
+
 			// Check if we're shutting down before processing
 			if ae.orderExecutionManager.IsShutdown() {
 				log.Printf("🚫 EXECUTION REJECTED | Shutdown in progress | Path: %s→%s→%s",
@@ -879,7 +855,7 @@ func NewArbitrageEngine(config *Config, marketDepths *MarketDepths, metrics *Met
 		assetLockManager:      assetLockManager,
 		orderExecutionManager: orderExecutionManager,
 		activeTrades:          make(map[string]*ArbitrageTrade),
-		executionChan:         make(chan ArbitrageOpportunity, 2000),
+		executionChan:         make(chan ArbitrageOpportunity, config.OrderExecutionSettings.MaxConcurrentArbitrages),
 		stopChan:              make(chan struct{}),
 	}
 }
@@ -1433,14 +1409,23 @@ func (ae *ArbitrageEngine) scanForOpportunities(scannerID int, scanCount int) {
 
 				// Mark asset as in execution before sending to channel
 				if ae.assetLockManager.MarkAssetInExecution(path) {
+					// Check execution channel capacity before sending
+					channelCapacity := cap(ae.executionChan)
+					channelLength := len(ae.executionChan)
+
+					log.Printf("📊 EXECUTION CHANNEL STATUS | Capacity: %d | Current: %d | Available: %d",
+						channelCapacity, channelLength, channelCapacity-channelLength)
+
 					// Send to execution channel (non-blocking)
 					select {
 					case ae.executionChan <- *opportunity:
-						log.Printf(" QUEUED | Scanner %d | Opportunity sent to execution", scannerID)
+						log.Printf(" QUEUED | Scanner %d | Opportunity sent to execution | Channel: %d/%d",
+							scannerID, channelLength+1, channelCapacity)
 					default:
 						// If channel is full, unmark the asset since we're not executing
 						ae.assetLockManager.UnmarkAssetInExecution(path)
-						log.Printf("  DROPPED | Scanner %d | Execution channel full", scannerID)
+						log.Printf("  DROPPED | Scanner %d | Execution channel full (%d/%d) | Max concurrent arbitrages reached",
+							scannerID, channelLength, channelCapacity)
 					}
 				} else {
 					log.Printf(" DUPLICATE SKIPPED | Scanner %d | Asset %s already in execution", scannerID, baseAsset)
@@ -2066,4 +2051,40 @@ func (oem *OrderExecutionManager) getCurrentMarketPrice(market string) float64 {
 	}
 
 	return 1.0 // Default fallback
+}
+
+// trackFailedOrder tracks a failed order for emergency conversion
+func (oem *OrderExecutionManager) trackFailedOrder(orderID string, market string, orderType string, amount float64, price float64) {
+	log.Printf("📊 TRACKING FAILED ORDER | ID: %s | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
+		orderID, market, orderType, amount, price)
+	// TODO: Implement failed order tracking for emergency conversion
+}
+
+// emergencyConvertAsset converts an asset back to USDT when an order fails
+func (oem *OrderExecutionManager) emergencyConvertAsset(asset string, amount float64, fromMarket string, toMarket string) {
+	log.Printf("🚨 EMERGENCY CONVERSION | Asset: %s | Amount: %.6f | From: %s | To: %s",
+		asset, amount, fromMarket, toMarket)
+
+	// Place emergency sell order
+	orderResultChan := make(chan *OrderResult, 1)
+	tracker := oem.coinexClient.PlaceFOKOrder(toMarket, "sell", amount, 0, orderResultChan) // Use market price
+
+	if tracker == nil {
+		log.Printf("❌ EMERGENCY CONVERSION FAILED | Could not place emergency order")
+		return
+	}
+
+	// Wait for emergency order result
+	select {
+	case result := <-orderResultChan:
+		if result.Status == OrderStatusFilled {
+			log.Printf("✅ EMERGENCY CONVERSION SUCCESS | Asset: %s | Filled: %.6f | Avg Price: %.8f",
+				asset, result.FilledAmount, result.AvgPrice)
+		} else {
+			log.Printf("❌ EMERGENCY CONVERSION FAILED | Status: %s | Error: %s",
+				result.Status, result.ErrorMessage)
+		}
+	case <-time.After(5 * time.Second):
+		log.Printf("⏰ EMERGENCY CONVERSION TIMEOUT | Asset: %s", asset)
+	}
 }

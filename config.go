@@ -17,17 +17,17 @@ type FOKOrderSettings struct {
 
 // OrderExecutionSettings configures order execution rate and amount management
 type OrderExecutionSettings struct {
-	MaxOrdersPerSecond     float64 `json:"maxOrdersPerSecond"`     // Maximum orders per second (e.g., 0.5 = 1 order every 2 seconds)
-	MaxConcurrentOrders    int     `json:"maxConcurrentOrders"`    // Maximum concurrent orders across all markets
-	OrderAmountType        string  `json:"orderAmountType"`        // "static" or "dynamic"
-	StaticOrderAmount      float64 `json:"staticOrderAmount"`      // Fixed USD amount per order (when static)
-	DynamicOrderPercentage float64 `json:"dynamicOrderPercentage"` // Percentage of available balance (when dynamic)
-	MaxVolumeFraction      float64 `json:"maxVolumeFraction"`      // Maximum fraction of available order book depth to use (0.0-1.0)
-	MaxDailySpend          float64 `json:"maxDailySpend"`          // Maximum USD to spend per day
-	AccountBalance         float64 `json:"accountBalance"`         // Current account balance (USD)
-	EnableSpendingLimits   bool    `json:"enableSpendingLimits"`   // Enable spending protection
-	MinOrderAmount         float64 `json:"minOrderAmount"`         // Minimum order amount (USD)
-	MaxOrderAmount         float64 `json:"maxOrderAmount"`         // Maximum order amount (USD)
+	MaxOrdersPerSecond      float64 `json:"maxOrdersPerSecond"`      // Maximum orders per second (e.g., 0.5 = 1 order every 2 seconds)
+	MaxConcurrentArbitrages int     `json:"maxConcurrentArbitrages"` // Maximum concurrent arbitrage cycles (each cycle = 3 orders)
+	OrderAmountType         string  `json:"orderAmountType"`         // "static" or "dynamic"
+	StaticOrderAmount       float64 `json:"staticOrderAmount"`       // Fixed USD amount per order (when static)
+	DynamicOrderPercentage  float64 `json:"dynamicOrderPercentage"`  // Percentage of available balance (when dynamic)
+	MaxVolumeFraction       float64 `json:"maxVolumeFraction"`       // Maximum fraction of available order book depth to use (0.0-1.0)
+	MaxDailySpend           float64 `json:"maxDailySpend"`           // Maximum USD to spend per day
+	AccountBalance          float64 `json:"accountBalance"`          // Current account balance (USD)
+	EnableSpendingLimits    bool    `json:"enableSpendingLimits"`    // Enable spending protection
+	MinOrderAmount          float64 `json:"minOrderAmount"`          // Minimum order amount (USD)
+	MaxOrderAmount          float64 `json:"maxOrderAmount"`          // Maximum order amount (USD)
 }
 
 type Config struct {
@@ -147,17 +147,17 @@ func DefaultConfig() *Config {
 
 		// Order Execution Settings
 		OrderExecutionSettings: OrderExecutionSettings{
-			MaxOrdersPerSecond:     0.5, // 1 order every 2 seconds
-			MaxConcurrentOrders:    5,   // 5 concurrent orders max
-			OrderAmountType:        "static",
-			StaticOrderAmount:      3.5,  // $3.50 per order
-			DynamicOrderPercentage: 0.25, // 25% of available balance
-			MaxVolumeFraction:      0.5,  // Use up to 50% of order book depth
-			MaxDailySpend:          20.0, // $20 max per day
-			AccountBalance:         1.5,  // $1.50 available balance
-			EnableSpendingLimits:   true, // Enable spending protection
-			MinOrderAmount:         0.5,  // $0.50 minimum order
-			MaxOrderAmount:         10.0, // $10.00 maximum order
+			MaxOrdersPerSecond:      0.5, // 1 order every 2 seconds
+			MaxConcurrentArbitrages: 3,   // 3 concurrent arbitrage cycles max (each cycle = 3 orders)
+			OrderAmountType:         "static",
+			StaticOrderAmount:       3.5,  // $3.50 per order
+			DynamicOrderPercentage:  0.25, // 25% of available balance
+			MaxVolumeFraction:       0.5,  // Use up to 50% of order book depth
+			MaxDailySpend:           20.0, // $20 max per day
+			AccountBalance:          1.5,  // $1.50 available balance
+			EnableSpendingLimits:    true, // Enable spending protection
+			MinOrderAmount:          0.5,  // $0.50 minimum order
+			MaxOrderAmount:          10.0, // $10.00 maximum order
 		},
 	}
 }
@@ -212,7 +212,7 @@ func LoadConfig(path string) (*Config, error) {
 	fmt.Printf("       Cancel All on Single Failure: %v\n", config.FOKOrderSettings.CancelAllOnSingleFailure)
 	fmt.Printf("    Order Execution Settings:\n")
 	fmt.Printf("       Max Orders Per Second: %.2f\n", config.OrderExecutionSettings.MaxOrdersPerSecond)
-	fmt.Printf("       Max Concurrent Orders: %d\n", config.OrderExecutionSettings.MaxConcurrentOrders)
+	fmt.Printf("       Max Concurrent Arbitrage Cycles: %d\n", config.OrderExecutionSettings.MaxConcurrentArbitrages)
 	fmt.Printf("       Order Amount Type: %s\n", config.OrderExecutionSettings.OrderAmountType)
 	fmt.Printf("       Dynamic Order Percentage: %.2f%%\n", config.OrderExecutionSettings.DynamicOrderPercentage*100)
 	fmt.Printf("       Max Volume Fraction: %.2f%%\n", config.OrderExecutionSettings.MaxVolumeFraction*100)
@@ -281,8 +281,8 @@ func (c *Config) Validate() error {
 	if c.OrderExecutionSettings.MaxOrdersPerSecond <= 0 {
 		return fmt.Errorf("orderExecutionSettings.maxOrdersPerSecond must be positive")
 	}
-	if c.OrderExecutionSettings.MaxConcurrentOrders <= 0 {
-		return fmt.Errorf("orderExecutionSettings.maxConcurrentOrders must be positive")
+	if c.OrderExecutionSettings.MaxConcurrentArbitrages <= 0 {
+		return fmt.Errorf("orderExecutionSettings.maxConcurrentArbitrages must be positive")
 	}
 	if c.OrderExecutionSettings.DynamicOrderPercentage <= 0 || c.OrderExecutionSettings.DynamicOrderPercentage > 1 {
 		return fmt.Errorf("orderExecutionSettings.dynamicOrderPercentage must be between 0 and 1")

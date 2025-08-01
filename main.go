@@ -46,7 +46,7 @@ func main() {
 	log.Printf("   Max Orders Per Second: %.2f (1 order every %.1fs)",
 		config.OrderExecutionSettings.MaxOrdersPerSecond,
 		1.0/config.OrderExecutionSettings.MaxOrdersPerSecond)
-	log.Printf("   Max Concurrent Orders: %d", config.OrderExecutionSettings.MaxConcurrentOrders)
+	log.Printf("   Max Concurrent Arbitrage Cycles: %d", config.OrderExecutionSettings.MaxConcurrentArbitrages)
 	log.Printf("   Order Amount Type: %s", config.OrderExecutionSettings.OrderAmountType)
 
 	if config.OrderExecutionSettings.OrderAmountType == "static" {
@@ -77,7 +77,7 @@ func main() {
 	// Display current order execution state
 	concurrent, dailySpent, availableBalance := coinexClient.GetOrderExecutionStats()
 	log.Printf("CURRENT ORDER EXECUTION STATE:")
-	log.Printf("   Active Concurrent Orders: %d/%d", concurrent, config.OrderExecutionSettings.MaxConcurrentOrders)
+	log.Printf("   Active Concurrent Arbitrage Cycles: %d/%d", concurrent, config.OrderExecutionSettings.MaxConcurrentArbitrages)
 	log.Printf("   Daily Spent: $%.2f/$%.2f", dailySpent, config.OrderExecutionSettings.MaxDailySpend)
 	log.Printf("   Available Balance: $%.2f", availableBalance)
 
@@ -88,12 +88,37 @@ func main() {
 	}
 
 	// Test connection
-	log.Println("Testing exchange connection...")
-	testResponse, err := coinexClient.TestConnection()
+	log.Println("🔗 Testing connection...")
+	connectionInfo, err := coinexClient.TestConnection()
 	if err != nil {
-		log.Fatalf("Connection test failed: %v", err)
+		log.Fatalf("❌ Connection test failed: %v", err)
 	}
-	log.Printf("Connection test successful: %s", testResponse[:Min(100, len(testResponse))])
+	log.Printf("✅ Connection successful: %s", connectionInfo)
+
+	// Reset concurrent orders counter to ensure clean state
+	log.Println("🔄 Resetting concurrent orders counter to ensure clean state...")
+	coinexClient.resetConcurrentOrders()
+	coinexClient.syncConcurrentOrders()
+
+	// Get initial order execution stats
+	concurrent, totalSpent, avgOrderValue := coinexClient.GetOrderExecutionStats()
+	log.Printf("📊 Initial order stats - Active: %d/%d | Total spent: $%.2f | Avg order: $%.2f",
+		concurrent, config.OrderExecutionSettings.MaxConcurrentArbitrages, totalSpent, avgOrderValue)
+
+	// Debug: Check and sync concurrent orders state
+	log.Println("🔍 Checking concurrent orders state...")
+	concurrent, _, _ = coinexClient.GetOrderExecutionStats()
+	debugActiveTrackers := coinexClient.GetActiveTrackers()
+	log.Printf("🔍 CONCURRENT ORDERS DEBUG | Counter: %d | Active trackers: %d", concurrent, len(debugActiveTrackers))
+
+	if concurrent != len(debugActiveTrackers) {
+		log.Printf("⚠️ MISMATCH DETECTED | Syncing concurrent orders counter...")
+		coinexClient.syncConcurrentOrders()
+		concurrent, _, _ = coinexClient.GetOrderExecutionStats()
+		log.Printf("✅ SYNCED | Counter: %d | Active trackers: %d", concurrent, len(debugActiveTrackers))
+	} else {
+		log.Printf("✅ CONCURRENT ORDERS SYNCED | Counter: %d | Active trackers: %d", concurrent, len(debugActiveTrackers))
+	}
 
 	// Initialize core components
 	marketDepths := NewMarketDepths()
@@ -348,6 +373,22 @@ func main() {
 				}
 				lastMessageCount = currentMessageCount
 				lastHealthCheck = time.Now()
+
+				// Periodic concurrent orders health check
+				concurrent, _, _ := coinexClient.GetOrderExecutionStats()
+				activeTrackers := coinexClient.GetActiveTrackers()
+				if concurrent != len(activeTrackers) {
+					log.Printf("⚠️ CONCURRENT ORDERS MISMATCH | Counter: %d | Active trackers: %d | Auto-syncing...",
+						concurrent, len(activeTrackers))
+					coinexClient.syncConcurrentOrders()
+				}
+
+				// Check if counter is stuck at maximum limit
+				if concurrent >= config.OrderExecutionSettings.MaxConcurrentArbitrages && len(activeTrackers) == 0 {
+					log.Printf("🚨 CONCURRENT ORDERS STUCK | Counter: %d/%d | Active trackers: 0 | Resetting counter...",
+						concurrent, config.OrderExecutionSettings.MaxConcurrentArbitrages)
+					coinexClient.resetConcurrentOrders()
+				}
 			}
 		}
 	}()
@@ -361,9 +402,9 @@ func main() {
 
 	// Wait for shutdown signal
 	<-quit
-	log.Println("Shutdown signal received, stopping bot...")
+	log.Println("🛑 Shutdown signal received, starting graceful shutdown...")
 
-	// Graceful shutdown
+	// Graceful shutdown with proper timeout
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -383,8 +424,18 @@ func main() {
 	log.Println("🛑 Step 3: Waiting for ALL active FOK orders to complete...")
 	activeTrackers := coinexClient.GetActiveTrackers()
 
-	if len(activeTrackers) > 0 {
-		log.Printf("🔄 %d FOK orders still active - waiting for completion...", len(activeTrackers))
+	// Check for any open orders on the exchange that might not be tracked
+	exchangeOrders, err := coinexClient.GetOpenOrders()
+	if err != nil {
+		log.Printf("⚠️ Cannot check exchange orders: %v", err)
+		exchangeOrders = []map[string]interface{}{} // Empty slice to avoid nil
+	}
+
+	totalActiveOrders := len(activeTrackers) + len(exchangeOrders)
+
+	if totalActiveOrders > 0 {
+		log.Printf("🔄 %d tracked orders + %d exchange orders = %d total active orders - waiting for completion...",
+			len(activeTrackers), len(exchangeOrders), totalActiveOrders)
 
 		// Wait up to 15 seconds for orders to complete
 		orderWaitCtx, orderCancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -396,30 +447,59 @@ func main() {
 		for {
 			select {
 			case <-orderWaitCtx.Done():
-				log.Printf("⏰ Timeout waiting for %d orders - forcing cancellation", len(coinexClient.GetActiveTrackers()))
+				log.Printf("⏰ Timeout waiting for orders - forcing cancellation")
 				// Cancel all remaining orders
 				coinexClient.CancelAllActiveOrders()
 				break
 			case <-ticker.C:
-				remaining := coinexClient.GetActiveTrackers()
-				if len(remaining) == 0 {
+				remainingTrackers := coinexClient.GetActiveTrackers()
+				remainingExchangeOrders, _ := coinexClient.GetOpenOrders()
+				totalRemaining := len(remainingTrackers) + len(remainingExchangeOrders)
+
+				if totalRemaining == 0 {
 					log.Println("✅ All orders completed successfully")
 					break
 				}
-				log.Printf("⏳ Still waiting for %d orders...", len(remaining))
+				log.Printf("⏳ Still waiting for %d tracked + %d exchange = %d total orders...",
+					len(remainingTrackers), len(remainingExchangeOrders), totalRemaining)
 			}
 		}
 	} else {
 		log.Println("✅ No active orders to wait for")
 	}
 
-	// Step 4: Final check for any remaining orders
-	finalActiveTrackers := coinexClient.GetActiveTrackers()
-	if len(finalActiveTrackers) > 0 {
-		log.Printf("⚠️ %d FOK orders still active after engine stop - forcing cancellation", len(finalActiveTrackers))
+	// Step 3.5: Reset concurrent orders if needed
+	log.Println("🛑 Step 3.5: Checking and resetting concurrent orders state...")
+	resetConcurrentOrdersIfNeeded(coinexClient)
 
-		// Force cancel all remaining orders
+	// Step 4: Final check for any remaining orders and force cancellation
+	finalActiveTrackers := coinexClient.GetActiveTrackers()
+	finalExchangeOrders, _ := coinexClient.GetOpenOrders()
+	totalFinalOrders := len(finalActiveTrackers) + len(finalExchangeOrders)
+
+	if totalFinalOrders > 0 {
+		log.Printf("⚠️ %d tracked + %d exchange = %d total orders still active after engine stop - forcing cancellation",
+			len(finalActiveTrackers), len(finalExchangeOrders), totalFinalOrders)
+
+		// Force cancel all remaining tracked orders
 		coinexClient.CancelAllActiveOrders()
+
+		// Cancel all exchange orders by market
+		marketsToCancel := make(map[string]bool)
+		for _, order := range finalExchangeOrders {
+			if market, ok := order["market"].(string); ok {
+				marketsToCancel[market] = true
+			}
+		}
+
+		// Cancel all orders for each market
+		for market := range marketsToCancel {
+			if err := coinexClient.CancelAllOrders(market); err != nil {
+				log.Printf("❌ Failed to cancel all orders for market %s: %v", market, err)
+			} else {
+				log.Printf("✅ Cancelled all orders for market %s", market)
+			}
+		}
 
 		// Wait up to 5 seconds for cancellation to complete
 		remainingWaitCtx, remainingCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -431,15 +511,22 @@ func main() {
 		for {
 			select {
 			case <-remainingWaitCtx.Done():
-				log.Printf("⏰ Timeout waiting for %d remaining orders - forcing shutdown", len(coinexClient.GetActiveTrackers()))
+				finalRemainingTrackers := coinexClient.GetActiveTrackers()
+				finalRemainingExchange, _ := coinexClient.GetOpenOrders()
+				totalRemaining := len(finalRemainingTrackers) + len(finalRemainingExchange)
+				log.Printf("⏰ Timeout waiting for %d remaining orders - forcing shutdown", totalRemaining)
 				goto ClosingProgram
 			case <-ticker.C:
-				remaining := coinexClient.GetActiveTrackers()
-				if len(remaining) == 0 {
+				remainingTrackers := coinexClient.GetActiveTrackers()
+				remainingExchange, _ := coinexClient.GetOpenOrders()
+				totalRemaining := len(remainingTrackers) + len(remainingExchange)
+
+				if totalRemaining == 0 {
 					log.Println("✅ All remaining orders cancelled")
 					break
 				}
-				log.Printf("⏳ Still waiting for %d orders to cancel...", len(remaining))
+				log.Printf("⏳ Still waiting for %d tracked + %d exchange = %d total orders to cancel...",
+					len(remainingTrackers), len(remainingExchange), totalRemaining)
 			}
 		}
 	ClosingProgram:
@@ -471,4 +558,19 @@ func main() {
 	}
 
 	log.Println("🛑 Triangular Arbitrage Bot stopped")
+}
+
+// resetConcurrentOrdersIfNeeded resets the concurrent orders counter if there's a mismatch
+func resetConcurrentOrdersIfNeeded(coinexClient *coinexClient) {
+	concurrent, _, _ := coinexClient.GetOrderExecutionStats()
+	activeTrackers := coinexClient.GetActiveTrackers()
+
+	if concurrent != len(activeTrackers) {
+		log.Printf("⚠️ CONCURRENT ORDERS MISMATCH | Counter: %d | Active trackers: %d | Resetting...",
+			concurrent, len(activeTrackers))
+		coinexClient.resetConcurrentOrders()
+		coinexClient.syncConcurrentOrders()
+		concurrent, _, _ = coinexClient.GetOrderExecutionStats()
+		log.Printf("✅ CONCURRENT ORDERS RESET | Counter: %d | Active trackers: %d", concurrent, len(activeTrackers))
+	}
 }

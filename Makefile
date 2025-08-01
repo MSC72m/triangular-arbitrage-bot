@@ -46,6 +46,13 @@ run: build
 	@echo "Running $(BINARY_NAME)..."
 	./$(BUILD_DIR)/$(BINARY_NAME)
 
+# Run with logging to file
+.PHONY: run-log
+run-log: build
+	@echo "Running $(BINARY_NAME) with logging..."
+	@mkdir -p logs
+	@echo "Logs will be saved to logs/bot-$(shell date +%Y%m%d-%H%M%S).log"
+	./$(BUILD_DIR)/$(BINARY_NAME) 2>&1 | tee logs/bot-$(shell date +%Y%m%d-%H%M%S).log
 
 
 # Run without building (if binary exists)

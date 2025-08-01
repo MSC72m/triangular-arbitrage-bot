@@ -351,7 +351,8 @@ func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity Arbit
 		opportunity.NetProfit, opportunity.Volume)
 
 	// Step 1: Check balance
-	requiredAmount := opportunity.Volume * opportunity.Price1
+	// Use static order amount from config instead of opportunity volume
+	requiredAmount := oem.config.OrderExecutionSettings.StaticOrderAmount
 	if requiredAmount > oem.config.OrderExecutionSettings.AccountBalance {
 		log.Printf("❌ INSUFFICIENT BALANCE | Required: $%.2f | Available: $%.2f",
 			requiredAmount, oem.config.OrderExecutionSettings.AccountBalance)
@@ -360,10 +361,12 @@ func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity Arbit
 
 	// Step 2: Execute orders sequentially
 	// ===== LEG-1: Buy asset with USDT =====
+	// Use static amount from config instead of opportunity volume
+	leg1Amount := oem.config.OrderExecutionSettings.StaticOrderAmount / opportunity.Price1
 	log.Printf("🔄 LEG-1 START | Market: %s | Type: buy | Amount: %.6f | Price: %.8f",
-		opportunity.Path.Market1, opportunity.Volume, opportunity.Price1)
+		opportunity.Path.Market1, leg1Amount, opportunity.Price1)
 
-	result1 := oem.placeAndWaitForOrder(opportunity.Path.Market1, "buy", opportunity.Volume, opportunity.Price1, "Leg-1")
+	result1 := oem.placeAndWaitForOrder(opportunity.Path.Market1, "buy", leg1Amount, opportunity.Price1, "Leg-1")
 	if result1 == nil {
 		log.Printf("❌ LEG-1 FAILED | Result is nil")
 		return

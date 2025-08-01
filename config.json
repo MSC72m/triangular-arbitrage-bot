@@ -32,7 +32,9 @@
     "orderTimeoutSeconds": 3,
     "maxRetryAttempts": 0,
     "enableAggressiveReEvaluation": false,
-    "cancelAllOnSingleFailure": true
+    "cancelAllOnSingleFailure": true,
+    "fokTimeoutSeconds": 4,
+    "fokPollingFrequencyHz": 5.0
   },
   "orderExecutionSettings": {
     "maxOrdersPerSecond": 3.0,

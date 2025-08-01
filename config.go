@@ -13,6 +13,8 @@ type FOKOrderSettings struct {
 	MaxRetryAttempts             int     `json:"maxRetryAttempts"`             // Max attempts to retry arbitrage
 	EnableAggressiveReEvaluation bool    `json:"enableAggressiveReEvaluation"` // Enable aggressive profit re-evaluation
 	CancelAllOnSingleFailure     bool    `json:"cancelAllOnSingleFailure"`     // Cancel all orders if one fails
+	FOKTimeoutSeconds            int     `json:"fokTimeoutSeconds"`            // FOK order timeout in seconds (3-4 seconds)
+	FOKPollingFrequencyHz        float64 `json:"fokPollingFrequencyHz"`        // FOK polling frequency in Hz (5 Hz = 5 times per second)
 }
 
 // OrderExecutionSettings configures order execution rate and amount management
@@ -143,6 +145,8 @@ func DefaultConfig() *Config {
 			MaxRetryAttempts:             3,    // 3 retry attempts
 			EnableAggressiveReEvaluation: true, // Re-evaluate profit after each order
 			CancelAllOnSingleFailure:     true, // Cancel all orders if one fails
+			FOKTimeoutSeconds:            3,    // 3 second FOK timeout
+			FOKPollingFrequencyHz:        5.0,  // 5 Hz FOK polling frequency
 		},
 
 		// Order Execution Settings
@@ -210,6 +214,8 @@ func LoadConfig(path string) (*Config, error) {
 	fmt.Printf("       Max Retry Attempts: %d\n", config.FOKOrderSettings.MaxRetryAttempts)
 	fmt.Printf("       Enable Aggressive Re-evaluation: %v\n", config.FOKOrderSettings.EnableAggressiveReEvaluation)
 	fmt.Printf("       Cancel All on Single Failure: %v\n", config.FOKOrderSettings.CancelAllOnSingleFailure)
+	fmt.Printf("       FOK Timeout: %d seconds\n", config.FOKOrderSettings.FOKTimeoutSeconds)
+	fmt.Printf("       FOK Polling Frequency: %.1fHz\n", config.FOKOrderSettings.FOKPollingFrequencyHz)
 	fmt.Printf("    Order Execution Settings:\n")
 	fmt.Printf("       Max Orders Per Second: %.2f\n", config.OrderExecutionSettings.MaxOrdersPerSecond)
 	fmt.Printf("       Max Concurrent Arbitrage Cycles: %d\n", config.OrderExecutionSettings.MaxConcurrentArbitrages)

@@ -61,6 +61,8 @@ type FOKOrderTracker struct {
 	mu            sync.RWMutex
 	// Add flag to track if CancelChan has been closed
 	cancelChanClosed bool
+	// Add sync.Once to ensure channel is only closed once
+	cancelOnce sync.Once
 }
 
 // OrderTrackingManager manages multiple FOK orders with polling
@@ -101,10 +103,13 @@ func (otm *OrderTrackingManager) RemoveTracker(orderID string) {
 		if tracker.PollingTicker != nil {
 			tracker.PollingTicker.Stop()
 		}
-		if tracker.CancelChan != nil && !tracker.cancelChanClosed {
-			close(tracker.CancelChan)
-			tracker.cancelChanClosed = true
-			log.Printf("🔍 CANCEL CHANNEL CLOSED | ID: %s", orderID)
+		if tracker.CancelChan != nil {
+			// Use sync.Once to ensure channel is only closed once
+			tracker.cancelOnce.Do(func() {
+				close(tracker.CancelChan)
+				tracker.cancelChanClosed = true
+				log.Printf("🔍 CANCEL CHANNEL CLOSED | ID: %s", orderID)
+			})
 		}
 		tracker.IsActive = false
 		tracker.mu.Unlock()
@@ -1357,45 +1362,72 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 	c.orderTrackingManager.RemoveTracker(oldID)
 	c.orderTrackingManager.AddTracker(tracker)
 
-	// FOK behavior: Check status rapidly for 2 seconds
-	timeout := time.After(2 * time.Second)
-	ticker := time.NewTicker(250 * time.Millisecond) // Check 4 times per second
+	// FOK behavior: Check status rapidly for configurable timeout
+	timeoutDuration := time.Duration(c.config.FOKOrderSettings.FOKTimeoutSeconds) * time.Second
+	pollingInterval := time.Duration(1000/c.config.FOKOrderSettings.FOKPollingFrequencyHz) * time.Millisecond
+
+	timeout := time.After(timeoutDuration)
+	ticker := time.NewTicker(pollingInterval) // Use configurable polling frequency
 	defer ticker.Stop()
 
+	log.Printf("⏱️ FOK CONFIG | Timeout: %ds | Polling: %.1fHz (every %dms)",
+		c.config.FOKOrderSettings.FOKTimeoutSeconds,
+		c.config.FOKOrderSettings.FOKPollingFrequencyHz,
+		int(pollingInterval.Milliseconds()))
+
 	pollCount := 0
+	pollResults := make(chan *OrderResult, 1) // Buffer for concurrent polling
+
 	for {
 		select {
 		case <-ticker.C:
 			pollCount++
 			log.Printf("🔍 POLLING ORDER | ID: %s | Attempt: %d", actualOrderID, pollCount)
 
-			orderStatus, err := c.pollRealOrderStatus(tracker)
-			if err != nil {
-				log.Printf("⚠️ POLL ERROR | ID: %s | Error: %v", actualOrderID, err)
-				continue // Try again on next tick
-			}
+			// Poll in a goroutine to avoid blocking
+			go func() {
+				orderStatus, err := c.pollRealOrderStatus(tracker)
+				if err != nil {
+					log.Printf("⚠️ POLL ERROR | ID: %s | Error: %v", actualOrderID, err)
+					return // Don't send result on error, just continue
+				}
 
+				// Send result to channel
+				select {
+				case pollResults <- orderStatus:
+				default:
+					// Channel is full, skip this result
+				}
+			}()
+
+		case result := <-pollResults:
 			// Update tracker status
 			tracker.mu.Lock()
-			tracker.Status = orderStatus.Status
+			tracker.Status = result.Status
 			tracker.LastChecked = time.Now()
 			tracker.mu.Unlock()
 
 			log.Printf("📊 ORDER STATUS | ID: %s | Status: %s | Filled: %.6f/%.6f",
-				actualOrderID, orderStatus.Status, orderStatus.FilledAmount, orderStatus.Amount)
+				actualOrderID, result.Status, result.FilledAmount, result.Amount)
 
 			// If order is filled, return success immediately
-			if orderStatus.Status == OrderStatusFilled {
+			if result.Status == OrderStatusFilled {
 				log.Printf("✅ ORDER FILLED | ID: %s | Filled: %.6f | Avg Price: %.8f",
-					actualOrderID, orderStatus.FilledAmount, orderStatus.AvgPrice)
-				orderResultChan <- orderStatus
+					actualOrderID, result.FilledAmount, result.AvgPrice)
+				orderResultChan <- result
 				return
 			}
 
 		case <-timeout:
-			// 2 second timeout - cancel order and return failure
-			log.Printf("⏰ FOK TIMEOUT | ID: %s | Cancelling order after 2 seconds", actualOrderID)
-			c.cancelRealOrder(tracker)
+			// Configurable timeout - cancel order and return failure
+			log.Printf("⏰ FOK TIMEOUT | ID: %s | Cancelling order after %d seconds",
+				actualOrderID, c.config.FOKOrderSettings.FOKTimeoutSeconds)
+
+			// Cancel the order
+			cancelErr := c.cancelRealOrder(tracker)
+			if cancelErr != nil {
+				log.Printf("⚠️ CANCELLATION FAILED | ID: %s | Error: %v", actualOrderID, cancelErr)
+			}
 
 			result := &OrderResult{
 				OrderID:       actualOrderID,
@@ -1409,7 +1441,7 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 				Fee:           0,
 				FeeCurrency:   "",
 				ExecutionTime: time.Since(tracker.CreatedAt).Milliseconds(),
-				ErrorMessage:  "FOK timeout - order not filled within 2 seconds",
+				ErrorMessage:  fmt.Sprintf("FOK timeout - order not filled within %d seconds", c.config.FOKOrderSettings.FOKTimeoutSeconds),
 				Timestamp:     time.Now(),
 			}
 			orderResultChan <- result
@@ -1514,16 +1546,15 @@ func (c *coinexClient) placeRealLimitOrder(tracker *FOKOrderTracker) (string, er
 
 // pollRealOrderStatus polls the real order status from CoinEx API v2
 func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (*OrderResult, error) {
-	// Use v2 API for order status query
+	// Use correct endpoint for order status query according to CoinEx docs
 	timestamp := time.Now().UnixMilli()
 	method := "GET"
-	requestPath := "/v2/spot/order"
+	requestPath := "/v2/spot/order-status" // Correct endpoint from docs
 
-	// Build query string for v2 API
+	// Build query string for order status API
 	queryParams := map[string]string{
-		"market":      tracker.Market,
-		"market_type": "SPOT",
-		"order_id":    tracker.OrderID,
+		"market":   tracker.Market,
+		"order_id": tracker.OrderID,
 	}
 
 	// Build query string
@@ -1595,13 +1626,17 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (*OrderResu
 		Timestamp:     time.Now(),
 	}
 
-	// Parse status
+	// Parse status according to CoinEx API docs
 	if statusStr, ok := data["status"].(string); ok {
 		switch statusStr {
-		case "done", "filled":
+		case "done":
 			result.Status = OrderStatusFilled
 		case "canceled", "cancelled":
 			result.Status = OrderStatusCancelled
+		case "part_deal":
+			result.Status = OrderStatusPartial
+		case "not_deal":
+			result.Status = OrderStatusPending
 		default:
 			result.Status = OrderStatusFailed
 		}
@@ -1621,7 +1656,7 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (*OrderResu
 	}
 
 	// Parse average price
-	if avgPriceStr, ok := data["last_filled_price"].(string); ok {
+	if avgPriceStr, ok := data["last_fill_price"].(string); ok {
 		if avgPrice, err := strconv.ParseFloat(avgPriceStr, 64); err == nil {
 			result.AvgPrice = avgPrice
 		}
@@ -1638,12 +1673,12 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (*OrderResu
 func (c *coinexClient) cancelRealOrder(tracker *FOKOrderTracker) error {
 	log.Printf("🛑 CANCELLING ORDER | ID: %s | Market: %s", tracker.OrderID, tracker.Market)
 
-	// Use v2 API for order cancellation
+	// Use correct v2 endpoint for order cancellation according to CoinEx docs
 	timestamp := time.Now().UnixMilli()
 	method := "POST"
-	requestPath := "/v2/spot/cancel-order" // Use v2 endpoint
+	requestPath := "/v2/spot/cancel-order" // Correct v2 endpoint from docs
 
-	// Prepare JSON body for v2 API
+	// Prepare JSON body for v2 cancel API
 	cancelData := map[string]interface{}{
 		"market":      tracker.Market,
 		"market_type": "SPOT",

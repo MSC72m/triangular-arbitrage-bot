@@ -38,7 +38,7 @@
   },
   "orderExecutionSettings": {
     "maxOrdersPerSecond": 3.0,
-    "maxConcurrentArbitrages": 5,
+    "maxConcurrentArbitrages": 3,
     "orderAmountType": "static",
     "staticOrderAmount": 4,
     "dynamicOrderPercentage": 0.25,

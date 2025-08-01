@@ -207,7 +207,6 @@ func (c *coinexClient) generateRESTSignature(method, requestPath, queryString, b
 	}
 
 	// Create the string to sign: method + request_path + body + timestamp
-	// The body should be included as a string literal (with quotes)
 	var stringToSign string
 	if body != "" {
 		// For POST/PUT requests with body, include the body as a string literal
@@ -225,13 +224,9 @@ func (c *coinexClient) generateRESTSignature(method, requestPath, queryString, b
 	// Debug logging
 	log.Printf("🔐 REST SIGNATURE DEBUG | Method: %s | Path: %s | Query: %s | Body: %s | Timestamp: %d",
 		method, requestPath, queryString, body, timestamp)
-	log.Printf("🔐 REST SIGNATURE DEBUG | Body type: %T | Body length: %d", body, len(body))
 	log.Printf("🔐 REST SIGNATURE DEBUG | Full request path: %s", fullRequestPath)
-	log.Printf("🔐 REST SIGNATURE DEBUG | Timestamp string: %s", strconv.FormatInt(timestamp, 10))
 	log.Printf("🔐 REST SIGNATURE DEBUG | String to sign: %s", stringToSign)
-	log.Printf("🔐 REST SIGNATURE DEBUG | Secret key: %s", c.secretID)
 	log.Printf("🔐 REST SIGNATURE DEBUG | Signature: %s", signature)
-	log.Printf("🔐 REST SIGNATURE DEBUG | Signature length: %d", len(signature))
 
 	return signature
 }
@@ -1549,26 +1544,34 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 	for i := 0; i < 4; i++ {
 		timestamp := time.Now().UnixMilli()
 		method := "GET"
-		requestPath := "/v2/spot/order-status" // Use v2 API path
+		requestPath := "/v2/spot/order-status" // Keep /v2/ as requested
 
-		// Build query string for order status API
+		// Build query string for order status API - MUST be sorted alphabetically
 		queryParams := map[string]string{
 			"market":   tracker.Market,
 			"order_id": tracker.OrderID,
 		}
 
-		// Build query string
+		// Sort parameters alphabetically (required for signature)
+		keys := make([]string, 0, len(queryParams))
+		for k := range queryParams {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		// Build query string in sorted order (no URL encoding for signature)
 		var queryParts []string
-		for key, value := range queryParams {
-			queryParts = append(queryParts, key+"="+value)
+		for _, key := range keys {
+			queryParts = append(queryParts, key+"="+queryParams[key])
 		}
 		queryString := strings.Join(queryParts, "&")
 
 		log.Printf("🔍 POLLING ORDER | ID: %s | Attempt: %d/4", tracker.OrderID, i+1)
+		log.Printf("🔍 POLL DEBUG | Market: %s | OrderID: %s | Query: %s", tracker.Market, tracker.OrderID, queryString)
 
 		// For GET requests: method + request_path + timestamp (no body)
-		fullRequestPath := requestPath + "?" + queryString
-		signature := c.generateRESTSignature(method, fullRequestPath, "", "", timestamp)
+		// Pass query string separately to signature generation
+		signature := c.generateRESTSignature(method, requestPath, queryString, "", timestamp)
 
 		// Set authentication headers
 		authHeaders := map[string]string{
@@ -1580,11 +1583,13 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 		// Merge auth headers with existing headers
 		c.httpClient.mergeHeaders(authHeaders)
 
-		// Prepare request parameters
+		// Prepare request parameters - use exact same URL as working test
 		requestParams := map[string]string{
-			"url":    "https://api.coinex.com" + fullRequestPath,
+			"url":    "https://api.coinex.com" + requestPath + "?" + queryString,
 			"method": method,
 		}
+
+		log.Printf("🔍 POLL REQUEST | URL: %s", requestParams["url"])
 
 		// Make API call
 		response, err := c.httpClient.performRequest(requestParams, GET)
@@ -1630,15 +1635,14 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 func (c *coinexClient) cancelRealOrder(tracker *FOKOrderTracker) error {
 	log.Printf("🛑 CANCELLING ORDER | ID: %s | Market: %s", tracker.OrderID, tracker.Market)
 
-	// Use correct v2 endpoint for order cancellation according to CoinEx docs
 	timestamp := time.Now().UnixMilli()
 	method := "POST"
-	requestPath := "/v2/spot/cancel-order" // Correct v2 endpoint from docs
+	requestPath := "/v2/spot/cancel-order" // Keep /v2/ as requested
 
-	// Prepare JSON body for v2 cancel API
+	// Prepare JSON body for cancel order API
 	cancelData := map[string]interface{}{
 		"market":      tracker.Market,
-		"market_type": "SPOT",
+		"market_type": "SPOT", // Required parameter
 		"order_id":    tracker.OrderID,
 	}
 
@@ -1650,6 +1654,8 @@ func (c *coinexClient) cancelRealOrder(tracker *FOKOrderTracker) error {
 	}
 	body := string(bodyBytes)
 
+	log.Printf("📋 CANCELLATION DATA | ID: %s | Body: %s", tracker.OrderID, body)
+
 	// Generate v2 signature
 	signature := c.generateRESTSignature(method, requestPath, "", body, timestamp)
 
@@ -1658,7 +1664,6 @@ func (c *coinexClient) cancelRealOrder(tracker *FOKOrderTracker) error {
 		"X-COINEX-KEY":       c.apiKey,
 		"X-COINEX-SIGN":      signature,
 		"X-COINEX-TIMESTAMP": strconv.FormatInt(timestamp, 10),
-		"Content-Type":       "application/json",
 	}
 
 	// Merge auth headers with existing headers
@@ -1677,7 +1682,7 @@ func (c *coinexClient) cancelRealOrder(tracker *FOKOrderTracker) error {
 	response, err := c.httpClient.performRequest(requestParams, POST)
 	if err != nil {
 		log.Printf("❌ CANCELLATION REQUEST FAILED | ID: %s | Error: %v", tracker.OrderID, err)
-		return fmt.Errorf("order cancellation API request failed: %w", err)
+		return fmt.Errorf("cancel API request failed: %w", err)
 	}
 
 	log.Printf("📥 CANCELLATION RESPONSE | ID: %s | Response: %+v", tracker.OrderID, response)
@@ -1689,14 +1694,7 @@ func (c *coinexClient) cancelRealOrder(tracker *FOKOrderTracker) error {
 		return fmt.Errorf("CoinEx API error: code=%.0f, message=%s", code, message)
 	}
 
-	log.Printf("✅ ORDER CANCELLED | ID: %s | Market: %s", tracker.OrderID, tracker.Market)
-
-	// Update tracker status
-	tracker.mu.Lock()
-	tracker.Status = OrderStatusCancelled
-	tracker.IsActive = false
-	tracker.mu.Unlock()
-
+	log.Printf("✅ ORDER CANCELLED SUCCESSFULLY | ID: %s", tracker.OrderID)
 	return nil
 }
 
@@ -1937,15 +1935,34 @@ func (c *coinexClient) GetOpenOrders() ([]map[string]interface{}, error) {
 	method := "GET"
 	requestPath := "/v2/spot/pending-order" // Get unfilled orders endpoint
 
-	// Generate v2 signature (no body for GET request)
-	signature := c.generateRESTSignature(method, requestPath, "", "", timestamp)
+	// Build query string - MUST be sorted alphabetically
+	queryParams := map[string]string{
+		"limit":       "100",
+		"market_type": "SPOT",
+	}
+
+	// Sort parameters alphabetically (required for signature)
+	keys := make([]string, 0, len(queryParams))
+	for k := range queryParams {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// Build query string in sorted order (no URL encoding for signature)
+	var queryParts []string
+	for _, key := range keys {
+		queryParts = append(queryParts, key+"="+queryParams[key])
+	}
+	queryString := strings.Join(queryParts, "&")
+
+	// Generate v2 signature with query string
+	signature := c.generateRESTSignature(method, requestPath, queryString, "", timestamp)
 
 	// Set v2 authentication headers
 	authHeaders := map[string]string{
 		"X-COINEX-KEY":       c.apiKey,
 		"X-COINEX-SIGN":      signature,
 		"X-COINEX-TIMESTAMP": strconv.FormatInt(timestamp, 10),
-		"Content-Type":       "application/json",
 	}
 
 	// Merge auth headers with existing headers
@@ -1953,7 +1970,7 @@ func (c *coinexClient) GetOpenOrders() ([]map[string]interface{}, error) {
 
 	// Prepare request parameters
 	requestParams := map[string]string{
-		"url":    "https://api.coinex.com" + requestPath + "?market_type=SPOT&limit=100", // Get up to 100 orders
+		"url":    "https://api.coinex.com" + requestPath + "?" + queryString,
 		"method": method,
 	}
 

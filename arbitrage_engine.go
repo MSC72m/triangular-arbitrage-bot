@@ -361,9 +361,9 @@ func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity Arbit
 
 	// Step 2: Execute orders sequentially
 	// ===== LEG-1: Buy asset with USDT =====
-	// Use static amount from config instead of opportunity volume
-	leg1Amount := oem.config.OrderExecutionSettings.StaticOrderAmount / opportunity.Price1
-	log.Printf("🔄 LEG-1 START | Market: %s | Type: buy | Amount: %.6f | Price: %.8f",
+	// Use static USD amount from config for market orders
+	leg1Amount := oem.config.OrderExecutionSettings.StaticOrderAmount // USD amount for market order
+	log.Printf("🔄 LEG-1 START | Market: %s | Type: buy | Amount: $%.2f USD | Price: %.8f",
 		opportunity.Path.Market1, leg1Amount, opportunity.Price1)
 
 	result1 := oem.placeAndWaitForOrder(opportunity.Path.Market1, "buy", leg1Amount, opportunity.Price1, "Leg-1")
@@ -382,6 +382,7 @@ func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity Arbit
 	log.Printf("🔄 LEG-2 START | Market: %s | Type: sell | Amount: %.6f | Price: %.8f",
 		opportunity.Path.Market2, leg2Amount, opportunity.Price2)
 
+	// Use the executable price we already validated during opportunity detection
 	result2 := oem.placeAndWaitForOrder(opportunity.Path.Market2, "sell", leg2Amount, opportunity.Price2, "Leg-2")
 	if result2 == nil {
 		log.Printf("❌ LEG-2 FAILED | Result is nil | Completing cycle with Leg-1 only")
@@ -397,10 +398,11 @@ func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity Arbit
 	log.Printf("✅ LEG-2 SUCCESS | Filled: %.6f | Avg Price: %.8f", result2.FilledAmount, result2.AvgPrice)
 
 	// ===== LEG-3: Buy USDT with USDC =====
-	leg3Amount := result2.FilledAmount * result2.AvgPrice
-	log.Printf("🔄 LEG-3 START | Market: %s | Type: buy | Amount: %.6f | Price: %.8f",
+	leg3Amount := result2.FilledAmount // Use the actual USDC amount, not USD value
+	log.Printf("🔄 LEG-3 START | Market: %s | Type: buy | Amount: %.6f USDC | Price: %.8f",
 		opportunity.Path.Market3, leg3Amount, opportunity.Price3)
 
+	// Use the executable price we already validated during opportunity detection
 	result3 := oem.placeAndWaitForOrder(opportunity.Path.Market3, "buy", leg3Amount, opportunity.Price3, "Leg-3")
 	if result3 == nil {
 		log.Printf("❌ LEG-3 FAILED | Result is nil | Completing cycle with Leg-1 and Leg-2")
@@ -429,9 +431,9 @@ func (oem *OrderExecutionManager) placeAndWaitForOrder(market, orderType string,
 		return nil
 	}
 
-	// Wait for order result - use exactly the same timeout as FOK lifecycle
-	// This ensures no gap between FOK timeout and fallback timeout
-	timeout := time.Duration(oem.config.FOKOrderSettings.FOKTimeoutSeconds) * time.Second
+	// Wait for order result - use shorter timeout for market orders since they should fill immediately
+	// Market orders should fill within 5 seconds, limit orders can take longer
+	timeout := 5 * time.Second // Reduced from FOK timeout to 5 seconds for market orders
 
 	select {
 	case result := <-orderResultChan:
@@ -449,7 +451,7 @@ func (oem *OrderExecutionManager) placeAndWaitForOrder(market, orderType string,
 			Fee:           0,
 			FeeCurrency:   "",
 			ExecutionTime: time.Since(tracker.CreatedAt).Milliseconds(),
-			ErrorMessage:  fmt.Sprintf("Order timeout after %ds", oem.config.FOKOrderSettings.FOKTimeoutSeconds),
+			ErrorMessage:  fmt.Sprintf("Order timeout after %ds", int(timeout.Seconds())),
 			Timestamp:     time.Now(),
 		}
 	}
@@ -2101,4 +2103,100 @@ func (oem *OrderExecutionManager) emergencyConvertAsset(asset string, amount flo
 	case <-time.After(5 * time.Second):
 		log.Printf("⏰ EMERGENCY CONVERSION TIMEOUT | Asset: %s", asset)
 	}
+}
+
+// validateExecutablePrices validates that we have enough volume at executable prices for each leg
+func (ae *ArbitrageEngine) validateExecutablePrices(path TriangularPath, market1Data, market2Data, market3Data *OrderBook, detectionStart time.Time) (float64, float64, float64, bool) {
+	// Calculate required amounts for each leg
+	leg1Amount := ae.config.OrderExecutionSettings.StaticOrderAmount // USD amount for Leg-1
+	leg2Amount := leg1Amount / 1.0                                   // Conservative estimate - will be refined after Leg-1
+	leg3Amount := leg2Amount * 1.0                                   // Conservative estimate - will be refined after Leg-2
+
+	// Helper function to validate executable price and volume for a market
+	validateExecutablePrice := func(market string, marketData *OrderBook, direction string, requiredAmount float64) (float64, bool) {
+		// Check if this is a critical market
+		if ae.coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(market) {
+			// For critical markets, always use the assumed price
+			if assumedPrice, exists := ae.coinexClient.criticalMarketPriceManager.GetAssumedPrice(market); exists {
+				return assumedPrice, true
+			}
+			return 0, false
+		}
+
+		// Check if we have order book data
+		if marketData == nil || len(marketData.Bids) == 0 || len(marketData.Asks) == 0 {
+			return 0, false
+		}
+
+		// Calculate executable price and check volume
+		var executablePrice float64
+		var availableVolume float64
+
+		if direction == "buy" {
+			// For buy orders, look at asks (sell orders) - we need to buy
+			for _, ask := range marketData.Asks {
+				price, _ := strconv.ParseFloat(ask.Price, 64)
+				amount, _ := strconv.ParseFloat(ask.Amount, 64)
+
+				// Convert to USD value for volume calculation
+				volumeUSD := price * amount
+				availableVolume += volumeUSD
+
+				// Use this price level if we have enough volume
+				if availableVolume >= requiredAmount {
+					executablePrice = price
+					break
+				}
+			}
+		} else {
+			// For sell orders, look at bids (buy orders) - we need to sell
+			for _, bid := range marketData.Bids {
+				price, _ := strconv.ParseFloat(bid.Price, 64)
+				amount, _ := strconv.ParseFloat(bid.Amount, 64)
+
+				// Convert to USD value for volume calculation
+				volumeUSD := price * amount
+				availableVolume += volumeUSD
+
+				// Use this price level if we have enough volume
+				if availableVolume >= requiredAmount {
+					executablePrice = price
+					break
+				}
+			}
+		}
+
+		// Check if we have enough volume
+		if availableVolume < requiredAmount {
+			return 0, false
+		}
+
+		// Add small slippage for immediate fill
+		if direction == "buy" {
+			executablePrice *= 1.000005 // 0.0005% above for immediate fill
+		} else {
+			executablePrice *= 0.999995 // 0.0005% below for immediate fill
+		}
+
+		return executablePrice, true
+	}
+
+	// Validate executable prices for all markets
+	executablePrice1, hasVolume1 := validateExecutablePrice(path.Market1, market1Data, path.Direction1, leg1Amount)
+	if !hasVolume1 {
+		return 0, 0, 0, false
+	}
+
+	executablePrice2, hasVolume2 := validateExecutablePrice(path.Market2, market2Data, path.Direction2, leg2Amount)
+	if !hasVolume2 {
+		return 0, 0, 0, false
+	}
+
+	executablePrice3, hasVolume3 := validateExecutablePrice(path.Market3, market3Data, path.Direction3, leg3Amount)
+	if !hasVolume3 {
+		return 0, 0, 0, false
+	}
+
+	// All markets have enough volume at executable prices
+	return executablePrice1, executablePrice2, executablePrice3, true
 }

@@ -1551,33 +1551,33 @@ func (c *coinexClient) placeRealLimitOrder(tracker *FOKOrderTracker) (string, er
 		return "", fmt.Errorf("invalid response format: missing data")
 	}
 
-	// For limit orders, we need to get the order_id for polling
+	// For market orders, we need to get the order_id for polling
 	if orderIDValue, exists := data["order_id"]; exists {
 		if orderIDStr, ok := orderIDValue.(string); ok && orderIDStr != "" {
-			log.Printf("✅ ORDER PLACED SUCCESSFULLY | Market: %s | ID: %s", tracker.Market, orderIDStr)
+			log.Printf("✅ MARKET ORDER PLACED SUCCESSFULLY | Market: %s | ID: %s", tracker.Market, orderIDStr)
 			return orderIDStr, nil
 		} else if orderIDFloat, ok := orderIDValue.(float64); ok {
 			orderIDStr := fmt.Sprintf("%.0f", orderIDFloat)
-			log.Printf("✅ ORDER PLACED SUCCESSFULLY | Market: %s | ID: %s", tracker.Market, orderIDStr)
+			log.Printf("✅ MARKET ORDER PLACED SUCCESSFULLY | Market: %s | ID: %s", tracker.Market, orderIDStr)
 			return orderIDStr, nil
 		}
 	}
 
 	log.Printf("❌ ORDER ID MISSING | Market: %s | Data: %+v", tracker.Market, data)
-	return "", fmt.Errorf("invalid limit order response format - no order_id")
+	return "", fmt.Errorf("invalid market order response format - no order_id")
 }
 
 // pollRealOrderStatus polls the real order status from CoinEx API until timeout
 func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, error) {
 	timeoutDuration := time.Duration(c.config.FOKOrderSettings.FOKTimeoutSeconds) * time.Second
-	pollingInterval := time.Duration(1000/c.config.FOKOrderSettings.FOKPollingFrequencyHz) * time.Millisecond
+	// Use much faster polling for market orders - every 100ms instead of 1000ms
+	pollingInterval := 100 * time.Millisecond
 
 	pollCount := 0
 	timeout := time.After(timeoutDuration)
 
-	log.Printf("⏱️ POLLING CONFIG | Timeout: %ds | Polling: %.1fHz (every %dms)",
+	log.Printf("⏱️ POLLING CONFIG | Timeout: %ds | Polling: every %dms (aggressive)",
 		c.config.FOKOrderSettings.FOKTimeoutSeconds,
-		c.config.FOKOrderSettings.FOKPollingFrequencyHz,
 		int(pollingInterval.Milliseconds()))
 
 	// Loop until timeout or filled
@@ -1591,7 +1591,9 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 		default:
 			// Poll the order status
 			pollCount++
-			log.Printf("🔍 POLLING ORDER | ID: %s | Attempt: %d", tracker.OrderID, pollCount)
+			if pollCount <= 3 || pollCount%10 == 0 { // Log first 3 attempts, then every 10th
+				log.Printf("🔍 POLLING ORDER | ID: %s | Attempt: %d", tracker.OrderID, pollCount)
+			}
 
 			// Single poll attempt
 			timestamp := time.Now().UnixMilli()
@@ -1618,7 +1620,9 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 			}
 			queryString := strings.Join(queryParts, "&")
 
-			log.Printf("🔍 POLL DEBUG | Market: %s | OrderID: %s | Query: %s", tracker.Market, tracker.OrderID, queryString)
+			if pollCount <= 3 { // Only log debug info for first few attempts
+				log.Printf("🔍 POLL DEBUG | Market: %s | OrderID: %s | Query: %s", tracker.Market, tracker.OrderID, queryString)
+			}
 
 			// For GET requests: method + request_path + timestamp (no body)
 			// Pass query string separately to signature generation
@@ -1634,7 +1638,9 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 			// Prepare request URL - use exact same URL as working test
 			requestURL := "https://api.coinex.com" + requestPath + "?" + queryString
 
-			log.Printf("🔍 POLL REQUEST | URL: %s", requestURL)
+			if pollCount <= 3 { // Only log URL for first few attempts
+				log.Printf("🔍 POLL REQUEST | URL: %s", requestURL)
+			}
 
 			// Create HTTP request directly like the test
 			req, err := http.NewRequest(method, requestURL, nil)
@@ -1649,7 +1655,7 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 			}
 
 			// Send request directly like the test
-			client := &http.Client{Timeout: 10 * time.Second}
+			client := &http.Client{Timeout: 5 * time.Second} // Shorter timeout for faster polling
 			resp, err := client.Do(req)
 			if err != nil {
 				log.Printf("❌ HTTP REQUEST FAILED | Error: %v", err)
@@ -1664,8 +1670,10 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 				return false, fmt.Errorf("failed to read response: %w", err)
 			}
 
-			log.Printf("📥 RESPONSE STATUS | %s", resp.Status)
-			log.Printf("📥 RESPONSE BODY | %s", string(body))
+			if pollCount <= 3 { // Only log response for first few attempts
+				log.Printf("📥 RESPONSE STATUS | %s", resp.Status)
+				log.Printf("📥 RESPONSE BODY | %s", string(body))
+			}
 
 			// Parse response
 			var response map[string]interface{}
@@ -1688,16 +1696,31 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 				return false, fmt.Errorf("invalid response format: missing data")
 			}
 
-			// Check status - accept both "done" and "filled"
+			// Check status - accept multiple status values for market orders
 			if statusStr, ok := data["status"].(string); ok {
-				if statusStr == "done" || statusStr == "filled" {
+				// Market orders should fill immediately, so check for various completion statuses
+				if statusStr == "done" || statusStr == "filled" || statusStr == "closed" || statusStr == "completed" {
 					log.Printf("✅ ORDER FILLED | ID: %s | Status: %s | Attempt: %d", tracker.OrderID, statusStr, pollCount)
 					return true, nil // Order is filled
+				}
+
+				// Check for partial fills or pending status
+				if statusStr == "pending" || statusStr == "open" {
+					// Check if there's any filled amount
+					if filledAmount, exists := data["deal_amount"].(string); exists {
+						if filled, err := strconv.ParseFloat(filledAmount, 64); err == nil && filled > 0 {
+							log.Printf("✅ ORDER PARTIALLY FILLED | ID: %s | Filled: %.6f | Status: %s | Attempt: %d",
+								tracker.OrderID, filled, statusStr, pollCount)
+							return true, nil // Consider partial fills as success for market orders
+						}
+					}
 				}
 			}
 
 			// Order is not filled yet, wait before next poll
-			log.Printf("❌ ORDER NOT FILLED | ID: %s | Attempt: %d", tracker.OrderID, pollCount)
+			if pollCount <= 3 || pollCount%10 == 0 { // Only log occasionally
+				log.Printf("❌ ORDER NOT FILLED | ID: %s | Attempt: %d", tracker.OrderID, pollCount)
+			}
 			time.Sleep(pollingInterval)
 		}
 	}
@@ -2163,4 +2186,129 @@ func getMapKeysBool(m map[string]bool) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// getOrderFillData retrieves actual fill data from the order status API
+func (c *coinexClient) getOrderFillData(tracker *FOKOrderTracker) (float64, float64, float64) {
+	// Get order status to retrieve fill data
+	timestamp := time.Now().UnixMilli()
+	method := "GET"
+	requestPath := "/v2/spot/order-status"
+
+	// Build query string for order status API
+	queryParams := map[string]string{
+		"market":   tracker.Market,
+		"order_id": tracker.OrderID,
+	}
+
+	// Sort parameters alphabetically (required for signature)
+	keys := make([]string, 0, len(queryParams))
+	for k := range queryParams {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// Build query string in sorted order
+	var queryParts []string
+	for _, key := range keys {
+		queryParts = append(queryParts, key+"="+queryParams[key])
+	}
+	queryString := strings.Join(queryParts, "&")
+
+	// Generate signature
+	signature := c.generateRESTSignature(method, requestPath, queryString, "", timestamp)
+
+	// Set authentication headers
+	authHeaders := map[string]string{
+		"X-COINEX-KEY":       c.apiKey,
+		"X-COINEX-SIGN":      signature,
+		"X-COINEX-TIMESTAMP": strconv.FormatInt(timestamp, 10),
+	}
+
+	// Prepare request URL
+	requestURL := "https://api.coinex.com" + requestPath + "?" + queryString
+
+	// Create HTTP request
+	req, err := http.NewRequest(method, requestURL, nil)
+	if err != nil {
+		log.Printf("❌ FAILED TO CREATE FILL DATA REQUEST | Error: %v", err)
+		return tracker.Amount, tracker.Price, 0 // Return defaults on error
+	}
+
+	// Add headers
+	for key, value := range authHeaders {
+		req.Header.Set(key, value)
+	}
+
+	// Send request
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("❌ FILL DATA REQUEST FAILED | Error: %v", err)
+		return tracker.Amount, tracker.Price, 0 // Return defaults on error
+	}
+	defer resp.Body.Close()
+
+	// Read response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("❌ FAILED TO READ FILL DATA RESPONSE | Error: %v", err)
+		return tracker.Amount, tracker.Price, 0 // Return defaults on error
+	}
+
+	// Parse response
+	var response map[string]interface{}
+	if err := json.Unmarshal(body, &response); err != nil {
+		log.Printf("❌ FAILED TO PARSE FILL DATA RESPONSE | Error: %v", err)
+		return tracker.Amount, tracker.Price, 0 // Return defaults on error
+	}
+
+	// Check response
+	if code, ok := response["code"].(float64); !ok || code != 0 {
+		message, _ := response["message"].(string)
+		log.Printf("⚠️ FILL DATA API ERROR | Code: %.0f | Message: %s", code, message)
+		return tracker.Amount, tracker.Price, 0 // Return defaults on error
+	}
+
+	// Extract order data
+	data, ok := response["data"].(map[string]interface{})
+	if !ok {
+		log.Printf("⚠️ FILL DATA RESPONSE FORMAT ERROR")
+		return tracker.Amount, tracker.Price, 0 // Return defaults on error
+	}
+
+	// Extract fill data
+	var filledAmount, avgPrice, fee float64
+
+	// Get filled amount
+	if dealAmount, exists := data["deal_amount"].(string); exists {
+		if filled, err := strconv.ParseFloat(dealAmount, 64); err == nil {
+			filledAmount = filled
+		}
+	}
+
+	// Get average price
+	if dealPrice, exists := data["deal_price"].(string); exists {
+		if price, err := strconv.ParseFloat(dealPrice, 64); err == nil {
+			avgPrice = price
+		}
+	}
+
+	// Get fee
+	if dealFee, exists := data["deal_fee"].(string); exists {
+		if feeVal, err := strconv.ParseFloat(dealFee, 64); err == nil {
+			fee = feeVal
+		}
+	}
+
+	// Use defaults if API data is missing
+	if filledAmount == 0 {
+		filledAmount = tracker.Amount
+	}
+	if avgPrice == 0 {
+		avgPrice = tracker.Price
+	}
+
+	log.Printf("📊 FILL DATA | Amount: %.6f | Avg Price: %.8f | Fee: %.6f", filledAmount, avgPrice, fee)
+	return filledAmount, avgPrice, fee
 }

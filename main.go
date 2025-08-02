@@ -293,26 +293,28 @@ func main() {
 		log.Printf("   Dead markets (first 10): %v", deadWsMarkets[:Min(10, len(deadWsMarkets))])
 	}
 
-	// Define critical markets that MUST have data - only quote currency variations
+	// Define critical markets that MUST have WebSocket data
 	criticalMarkets := config.CriticalMarkets
 
-	// ALWAYS assume critical markets exist and have sufficient liquidity
-	log.Printf("CRITICAL MARKETS: %v (assumed to exist with sufficient liquidity)", criticalMarkets)
-	log.Printf("   No price data fetching needed - critical markets are assumed to exist")
-	log.Printf("   No depth/volume checks performed for critical markets")
+	// Subscribe to critical markets via WebSocket
+	log.Printf("CRITICAL MARKETS: %v (subscribing via WebSocket)", criticalMarkets)
+	log.Printf("   All critical markets must have WebSocket data - no REST fallback")
 
-	// Combine WebSocket and REST data for final arbitrage markets
+	// Subscribe to critical markets via WebSocket
+	coinexClient.FetchCriticalMarketsViaWebSocket(criticalMarkets, marketDepths)
+
+	// Combine all markets for final arbitrage markets
 	allActiveMarkets := make([]string, 0, len(arbitrageMarkets)+len(criticalMarkets))
 	allActiveMarkets = append(allActiveMarkets, arbitrageMarkets...)
 
-	// Add critical markets to active list (assumed to exist)
+	// Add critical markets to active list (subscribed via WebSocket)
 	for _, critical := range criticalMarkets {
 		allActiveMarkets = append(allActiveMarkets, critical)
-		log.Printf("Added critical market to active list: %s (assumed to exist)", critical)
+		log.Printf("Added critical market to active list: %s (subscribed via WebSocket)", critical)
 	}
 
-	log.Printf("Final active markets count: %d (WebSocket: %d + REST fallback: %d)",
-		len(allActiveMarkets), len(arbitrageMarkets), len(allActiveMarkets)-len(arbitrageMarkets))
+	log.Printf("Final active markets count: %d (WebSocket only: %d)",
+		len(allActiveMarkets), len(allActiveMarkets))
 
 	arbitrageEngine.UpdateTriangularPaths(allActiveMarkets, completeAssets)
 
@@ -358,8 +360,25 @@ func main() {
 					log.Printf("WebSocket Status: Disconnected")
 				}
 			case <-criticalDataTicker.C:
-				// Critical markets are assumed to exist - no periodic refresh needed
-				log.Printf("Critical markets assumed to exist: %v", config.CriticalMarkets)
+				// Monitor critical markets via WebSocket
+				log.Printf("Monitoring critical markets via WebSocket: %v", config.CriticalMarkets)
+				// Check if critical markets have WebSocket data
+				for _, critical := range config.CriticalMarkets {
+					if orderBook, exists := marketDepths.Load(critical); exists && orderBook != nil {
+						if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
+							log.Printf("✅ Critical market %s has WebSocket data | Bids: %d | Asks: %d",
+								critical, len(orderBook.Bids), len(orderBook.Asks))
+						} else {
+							log.Printf("⚠️ Critical market %s has empty order book", critical)
+							// Add to retry queue
+							httpClient.AddFailedMarket(critical)
+						}
+					} else {
+						log.Printf("❌ Critical market %s has no WebSocket data", critical)
+						// Add to retry queue
+						httpClient.AddFailedMarket(critical)
+					}
+				}
 			case <-dataValidationTicker.C:
 				// Validate WebSocket data accuracy against REST API
 				httpClient.ValidateWebSocketDataAccuracy(arbitrageMarkets)

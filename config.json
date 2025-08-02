@@ -1,7 +1,7 @@
 {
   "apiBaseURL": "https://api.coinex.com/v1",
   "apiBaseURLV2": "https://api.coinex.com/v2/",
-  "profitThreshold": 0.00001,
+  "profitThreshold": 0.0005,
   "simulationMode": false,
   "concurrentScans": 160,
   "wsSubscriptionsBatchSize": 50,
@@ -9,7 +9,7 @@
   "rateLimitPerSecond": 15,
   "rateLimitPerMinute": 300,
   "quoteCurrencies": ["USDT", "USDC"],
-  "criticalMarkets": ["USDCUSDT", "USDTUSDC"],
+  "criticalMarkets": ["USDCUSDT"],
   "includeBTC": false,
   "enableAssetLocking": true,
   "orderExecutionTimeMs": 1500,
@@ -24,7 +24,7 @@
   },
   "defaultTradingFee": 0.002,
   "webSocketTimeout": 30,
-  "reconnectAttempts": 5,
+  "reconnectAttempts": 3,
   "orderTimeout": 30,
   "enablePaperTrading": false,
   "fokOrderSettings": {
@@ -33,14 +33,14 @@
     "maxRetryAttempts": 0,
     "enableAggressiveReEvaluation": false,
     "cancelAllOnSingleFailure": true,
-    "fokTimeoutSeconds": 4,
-    "fokPollingFrequencyHz": 5.0
+    "fokTimeoutSeconds": 2,
+    "fokPollingFrequencyHz": 10.0
   },
   "orderExecutionSettings": {
     "maxOrdersPerSecond": 3.0,
     "maxConcurrentArbitrages": 3,
     "orderAmountType": "static",
-    "staticOrderAmount": 4,
+    "staticOrderAmount": 3,
     "dynamicOrderPercentage": 0.25,
     "maxVolumeFraction": 0.5,
     "accountBalance": 20,

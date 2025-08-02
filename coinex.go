@@ -992,157 +992,132 @@ func (c *coinexClient) GetArbitrageMarkets() ([]string, []string, error) {
 	markets := marketList["data"].([]interface{})
 	fmt.Printf(" Total markets from CoinEx: %d\n", len(markets))
 
-	// Step 1: Find theoretical triangular arbitrage opportunities
-	fmt.Printf(" Step 1: Finding theoretical triangular markets...\n")
-	triangularMarkets, completeAssets := c.findTriangularArbitrageMarkets(markets)
+	// Step 1: Find all USDT and USDC assets separately
+	fmt.Printf(" Step 1: Finding all USDT and USDC assets...\n")
+	usdtAssets, usdcAssets := c.findUSDTAndUSDCAssets(markets)
 
-	// Step 2: Get real market activity data (24H volume) for ALL markets
-	fmt.Printf(" Step 2: Fetching real market activity data from CoinEx...\n")
-	tickerData, err := c.GetAllMarketTickers()
-	if err != nil {
-		fmt.Printf("  Failed to get market ticker data, using heuristic filtering: %v\n", err)
-		// Fallback to heuristic filtering
-		activeMarkets, _ := c.validateMarketActivity(triangularMarkets)
-		activeCompleteAssets := c.filterCompleteAssetsByActiveMarkets(completeAssets, activeMarkets)
-		return activeMarkets, activeCompleteAssets, nil
-	}
+	fmt.Printf(" Found %d USDT assets and %d USDC assets\n", len(usdtAssets), len(usdcAssets))
 
-	// Step 3: Filter markets based on real 24H volume data
-	activeMarkets, deadMarkets := c.filterMarketsByRealActivity(triangularMarkets, tickerData)
+	// Step 2: Find assets that have BOTH USDT and USDC pairs
+	fmt.Printf(" Step 2: Finding assets with both USDT and USDC pairs...\n")
+	completeAssets, triangularMarkets := c.findCompleteAssets(usdtAssets, usdcAssets)
 
-	fmt.Printf("\n REAL DATA FILTERING RESULTS:\n")
-	fmt.Printf("    Theoretical markets: %d\n", len(triangularMarkets))
-	fmt.Printf("    Active markets (with volume): %d\n", len(activeMarkets))
-	fmt.Printf("   💀 Dead markets (no volume): %d\n", len(deadMarkets))
-	fmt.Printf("    Efficiency gain: %.1f%% reduction in subscriptions\n",
-		float64(len(deadMarkets))/float64(len(triangularMarkets))*100)
+	fmt.Printf(" Found %d complete assets with both USDT and USDC pairs\n", len(completeAssets))
 
-	if len(deadMarkets) > 0 {
-		fmt.Printf("   🚫 Dead markets (no 24H volume): %v\n", deadMarkets[:Min(10, len(deadMarkets))])
-		if len(deadMarkets) > 10 {
-			fmt.Printf("   ... and %d more dead markets\n", len(deadMarkets)-10)
-		}
-	}
-
-	// Update complete assets based on active markets only
-	activeCompleteAssets := c.filterCompleteAssetsByActiveMarkets(completeAssets, activeMarkets)
-
-	fmt.Printf("    Complete assets with active markets: %d (from %d)\n",
-		len(activeCompleteAssets), len(completeAssets))
-
-	if len(activeCompleteAssets) > 0 {
-		fmt.Printf("    Active triangular assets: %v\n", activeCompleteAssets)
-	}
-
-	return activeMarkets, activeCompleteAssets, nil
-}
-
-// findTriangularArbitrageMarkets finds markets suitable for triangular arbitrage cycles
-func (c *coinexClient) findTriangularArbitrageMarkets(markets []interface{}) ([]string, []string) {
-	// Group markets by the configured quote currencies only
-	usdtMarkets := make(map[string]string) // asset -> market (e.g., BTC -> BTCUSDT)
-	usdcMarkets := make(map[string]string) // asset -> market (e.g., BTC -> BTCUSDC)
-
-	fmt.Printf(" Analyzing markets for triangular arbitrage with quote currencies: %v\n", c.allowedMarkets)
-
-	// Parse all markets and categorize them by configured quote currencies
+	// Step 3: Add the critical USDCUSDT pair
+	usdcusdtFound := false
 	for _, market := range markets {
 		marketStr := market.(string)
-
-		for _, quote := range c.allowedMarkets {
-			if strings.HasSuffix(marketStr, quote) {
-				asset := strings.TrimSuffix(marketStr, quote)
-				if asset != "" {
-					// Store by quote currency
-					if quote == "USDT" && asset != "USDC" {
-						usdtMarkets[asset] = marketStr
-					} else if quote == "USDC" && asset != "USDT" {
-						usdcMarkets[asset] = marketStr
-					}
-				}
-				break
-			}
+		if marketStr == "USDCUSDT" {
+			triangularMarkets = append(triangularMarkets, marketStr)
+			fmt.Printf("    Added critical quote pair: %s\n", marketStr)
+			usdcusdtFound = true
+			break
 		}
 	}
 
-	fmt.Printf(" Market Analysis Results:\n")
-	fmt.Printf("    USDT pairs: %d\n", len(usdtMarkets))
-	fmt.Printf("   💎 USDC pairs: %d\n", len(usdcMarkets))
+	if !usdcusdtFound {
+		fmt.Printf("    ⚠️ WARNING: USDCUSDT pair not found in market list!\n")
+		fmt.Printf("    💡 This pair is critical for triangular arbitrage\n")
+	}
 
-	// Debug: Show actual USDC markets found
-	if len(usdcMarkets) > 0 {
-		fmt.Printf("    USDC markets found: ")
-		for _, market := range usdcMarkets {
+	fmt.Printf(" Final result: %d triangular markets and %d complete assets\n", len(triangularMarkets), len(completeAssets))
+
+	return triangularMarkets, completeAssets, nil
+}
+
+// findUSDTAndUSDCAssets finds all USDT and USDC assets separately
+func (c *coinexClient) findUSDTAndUSDCAssets(markets []interface{}) ([]string, []string) {
+	usdtAssets := []string{}
+	usdcAssets := []string{}
+
+	fmt.Printf("    Analyzing %d total markets for USDT and USDC pairs...\n", len(markets))
+
+	for _, market := range markets {
+		marketStr := market.(string)
+		if strings.HasSuffix(marketStr, "USDT") {
+			usdtAssets = append(usdtAssets, marketStr)
+		} else if strings.HasSuffix(marketStr, "USDC") {
+			usdcAssets = append(usdcAssets, marketStr)
+		}
+	}
+
+	// Debug: Show some examples of discovered markets
+	fmt.Printf("    USDT markets found (first 10): ")
+	for i, market := range usdtAssets {
+		if i < 10 {
 			fmt.Printf("%s ", market)
 		}
-		fmt.Printf("\n")
-	} else {
-		fmt.Printf("     NO USDC markets found in CoinEx market list!\n")
 	}
+	if len(usdtAssets) > 10 {
+		fmt.Printf("... and %d more", len(usdtAssets)-10)
+	}
+	fmt.Printf("\n")
 
-	// Find assets that have BOTH quote currency pairs (required for triangular arbitrage)
+	fmt.Printf("    USDC markets found (first 10): ")
+	for i, market := range usdcAssets {
+		if i < 10 {
+			fmt.Printf("%s ", market)
+		}
+	}
+	if len(usdcAssets) > 10 {
+		fmt.Printf("... and %d more", len(usdcAssets)-10)
+	}
+	fmt.Printf("\n")
+
+	return usdtAssets, usdcAssets
+}
+
+// findCompleteAssets finds assets that have both USDT and USDC pairs
+func (c *coinexClient) findCompleteAssets(usdtAssets, usdcAssets []string) ([]string, []string) {
 	completeAssets := []string{}
 	triangularMarkets := []string{}
 
-	for asset := range usdtMarkets {
-		if _, hasUSDC := usdcMarkets[asset]; hasUSDC {
+	// Create maps for quick lookup
+	usdtAssetMap := make(map[string]string) // asset -> market
+	usdcAssetMap := make(map[string]string) // asset -> market
+
+	// Parse USDT assets
+	for _, market := range usdtAssets {
+		asset := strings.TrimSuffix(market, "USDT")
+		if asset != "" && asset != "USDC" { // Exclude USDCUSDT
+			usdtAssetMap[asset] = market
+		}
+	}
+
+	// Parse USDC assets
+	for _, market := range usdcAssets {
+		asset := strings.TrimSuffix(market, "USDC")
+		if asset != "" && asset != "USDT" { // Exclude USDTUSDC
+			usdcAssetMap[asset] = market
+		}
+	}
+
+	fmt.Printf("    USDT assets found: %d\n", len(usdtAssetMap))
+	fmt.Printf("    USDC assets found: %d\n", len(usdcAssetMap))
+
+	// Find assets that have both USDT and USDC pairs
+	for asset := range usdtAssetMap {
+		if usdcMarket, hasUSDC := usdcAssetMap[asset]; hasUSDC {
 			completeAssets = append(completeAssets, asset)
 			// Add both markets for this asset
-			triangularMarkets = append(triangularMarkets, usdtMarkets[asset])
-			triangularMarkets = append(triangularMarkets, usdcMarkets[asset])
-			fmt.Printf("    Complete asset: %s → Markets: %s, %s\n",
-				asset, usdtMarkets[asset], usdcMarkets[asset])
+			triangularMarkets = append(triangularMarkets, usdtAssetMap[asset])
+			triangularMarkets = append(triangularMarkets, usdcMarket)
+			fmt.Printf("    ✅ Complete asset: %s → Markets: %s, %s\n",
+				asset, usdtAssetMap[asset], usdcMarket)
+		} else {
+			fmt.Printf("    ❌ Incomplete asset: %s (has USDT but no USDC)\n", asset)
 		}
 	}
 
-	// NO PRIORITY LOGIC - All tokens treated equally as requested
-	fmt.Printf("   💡 All %d assets treated equally (no priorities)\n", len(completeAssets))
-
-	// Add the direct quote pair if it exists (USDC/USDT)
-	for _, market := range markets {
-		marketStr := market.(string)
-		if marketStr == "USDCUSDT" || marketStr == "USDTUSDC" {
-			triangularMarkets = append(triangularMarkets, marketStr)
-			fmt.Printf("    Added critical quote pair: %s\n", marketStr)
+	// Check for assets that have USDC but no USDT
+	for asset := range usdcAssetMap {
+		if _, hasUSDT := usdtAssetMap[asset]; !hasUSDT {
+			fmt.Printf("    ❌ Incomplete asset: %s (has USDC but no USDT)\n", asset)
 		}
 	}
 
-	fmt.Printf("\n TRIANGULAR ARBITRAGE SUMMARY:\n")
-	fmt.Printf("    Assets with both quote pairs: %d\n", len(completeAssets))
-	fmt.Printf("    Markets to subscribe: %d (vs %d total)\n", len(triangularMarkets), len(markets))
-	fmt.Printf("    Efficiency gain: %.1f%% reduction in subscriptions\n",
-		float64(len(markets)-len(triangularMarkets))/float64(len(markets))*100)
-
-	if len(completeAssets) > 0 {
-		fmt.Printf("    Triangular assets: %v\n", completeAssets)
-		fmt.Printf("    Example cycle: USDT → %s → USDC → USDT\n", completeAssets[0])
-	} else {
-		fmt.Printf("     WARNING: No assets found with both USDT and USDC pairs!\n")
-		fmt.Printf("   💡 Suggestion: Check if CoinEx supports USDC markets\n")
-
-		// Show what we do have for debugging
-		if len(usdtMarkets) > 0 {
-			usdtSample := make([]string, 0, 5)
-			for asset := range usdtMarkets {
-				if len(usdtSample) < 5 {
-					usdtSample = append(usdtSample, asset)
-				}
-			}
-			fmt.Printf("    Sample USDT assets: %v\n", usdtSample)
-		}
-
-		if len(usdcMarkets) > 0 {
-			usdcSample := make([]string, 0, 5)
-			for asset := range usdcMarkets {
-				if len(usdcSample) < 5 {
-					usdcSample = append(usdcSample, asset)
-				}
-			}
-			fmt.Printf("   💎 Sample USDC assets: %v\n", usdcSample)
-		}
-	}
-
-	return triangularMarkets, completeAssets
+	return completeAssets, triangularMarkets
 }
 
 // filterMarketsByRealActivity filters markets based on real 24H volume data from CoinEx
@@ -1153,13 +1128,13 @@ func (c *coinexClient) filterMarketsByRealActivity(markets []string, tickerData 
 	data, ok := tickerData["data"].(map[string]interface{})
 	if !ok {
 		fmt.Printf("     Invalid ticker data format, falling back to heuristic filtering\n")
-		return c.validateMarketActivity(markets)
+		return c.validateMarketActivity(markets, nil) // Pass nil for marketDepths as fallback
 	}
 
 	tickers, ok := data["ticker"].(map[string]interface{})
 	if !ok {
 		fmt.Printf("     Invalid ticker format, falling back to heuristic filtering\n")
-		return c.validateMarketActivity(markets)
+		return c.validateMarketActivity(markets, nil) // Pass nil for marketDepths as fallback
 	}
 
 	activeMarkets := []string{}
@@ -1239,7 +1214,7 @@ func (c *coinexClient) filterMarketsByRealActivity(markets []string, tickerData 
 }
 
 // validateMarketActivity tests markets for actual trading activity before subscription
-func (c *coinexClient) validateMarketActivity(markets []string) ([]string, []string) {
+func (c *coinexClient) validateMarketActivity(markets []string, marketDepths *MarketDepths) ([]string, []string) {
 	fmt.Printf("    Testing %d markets for trading activity...\n", len(markets))
 
 	activeMarkets := []string{}
@@ -1249,7 +1224,7 @@ func (c *coinexClient) validateMarketActivity(markets []string) ([]string, []str
 	// In production, you'd want to call CoinEx API to check 24h volume or recent trades
 
 	for _, market := range markets {
-		isActive := c.isMarketActive(market)
+		isActive := c.isMarketActive(market, marketDepths)
 
 		if isActive {
 			activeMarkets = append(activeMarkets, market)
@@ -1274,37 +1249,37 @@ func (c *coinexClient) validateMarketActivity(markets []string) ([]string, []str
 	return activeMarkets, deadMarkets
 }
 
-// isMarketActive determines if a market is likely to be active based on heuristics
-func (c *coinexClient) isMarketActive(market string) bool {
-	// Major liquid assets (high priority - likely active)
-	majorAssets := []string{"BTC", "ETH", "BNB", "SOL", "ADA", "DOT", "AVAX", "MATIC", "LINK", "UNI", "DOGE", "LTC", "XRP"}
-
-	for _, major := range majorAssets {
-		if strings.Contains(market, major) {
-			return true // Major assets are almost always active
+// isMarketActive determines if a market is likely to be active by checking WebSocket data availability
+func (c *coinexClient) isMarketActive(market string, marketDepths *MarketDepths) bool {
+	// Check if we have WebSocket data for this market
+	if orderBook, exists := marketDepths.Load(market); exists && orderBook != nil {
+		if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
+			return true // Market has WebSocket data
 		}
 	}
 
+	// If no WebSocket data, use heuristic fallback
 	// Critical pairs (always include)
 	if market == "USDCUSDT" || market == "USDTUSDC" {
 		return true
 	}
 
-	// USDC markets are often illiquid on CoinEx (be selective)
+	// USDT markets are generally more liquid
+	if strings.HasSuffix(market, "USDT") {
+		return true
+	}
+
+	// USDC markets - be more selective
 	if strings.HasSuffix(market, "USDC") {
-		// Only include USDC pairs for major assets
+		// Only include USDC pairs for major assets that are likely to have both USDT and USDC pairs
 		asset := strings.TrimSuffix(market, "USDC")
+		majorAssets := []string{"BTC", "ETH", "BNB", "SOL", "ADA", "DOT", "AVAX", "MATIC", "LINK", "UNI", "DOGE", "LTC", "XRP"}
 		for _, major := range majorAssets {
 			if asset == major {
 				return true
 			}
 		}
-		return false // Most USDC pairs are dead on CoinEx
-	}
-
-	// USDT markets are generally more liquid
-	if strings.HasSuffix(market, "USDT") {
-		return true
+		return false // Most USDC pairs are less liquid
 	}
 
 	return false // Conservative approach - exclude unknown patterns
@@ -1832,12 +1807,12 @@ func (c *coinexClient) buildQueryString(params map[string]string) string {
 	return strings.Join(parts, "&")
 }
 
-// EnsureCriticalMarketData ensures critical markets have data via WebSocket first, then REST API fallback
+// EnsureCriticalMarketData ensures critical markets have data via WebSocket only
 func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, marketDepths *MarketDepths) {
-	log.Printf(" Ensuring quote currency markets have data: %v", criticalMarkets)
+	log.Printf(" Ensuring critical markets have WebSocket data: %v", criticalMarkets)
 
 	for _, market := range criticalMarkets {
-		// First, check if market already has data in marketDepths (from WebSocket)
+		// Check if market already has data in marketDepths (from WebSocket)
 		if orderBook, exists := marketDepths.Load(market); exists && orderBook != nil {
 			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
 				// Market already has WebSocket data, skip
@@ -1846,7 +1821,7 @@ func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, market
 			}
 		}
 
-		// Try to subscribe to the market via WebSocket first
+		// Try to subscribe to the market via WebSocket
 		log.Printf(" Attempting WebSocket subscription for %s...", market)
 		if err := c.httpClient.SubscribeWebSocketWithRetry([]string{market}, 2); err != nil {
 			log.Printf(" WebSocket subscription failed for %s: %v", market, err)
@@ -1867,73 +1842,61 @@ func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, market
 			}
 		}
 
-		// If WebSocket failed or no data received, fall back to REST API
-		log.Printf(" Fetching %s via REST API (WebSocket data missing)...", market)
-
-		// Use the HttpClient's REST API fallback method
-		restOrderBook, err := c.httpClient.GetOrderBookREST(market)
-		if err != nil {
-			log.Printf(" Failed to get %s via REST: %v", market, err)
-			continue
-		}
-
-		if len(restOrderBook.Bids) > 0 && len(restOrderBook.Asks) > 0 {
-			// Store in marketDepths so arbitrage engine can find it
-			marketDepths.Store(market, restOrderBook)
-
-			// Also store in HttpClient's market data cache for consistency
-			c.httpClient.marketDataMu.Lock()
-			c.httpClient.marketData[market] = restOrderBook
-			c.httpClient.marketDataMu.Unlock()
-
-			log.Printf(" Quote currency market %s data restored via REST | Bids: %d | Asks: %d",
-				market, len(restOrderBook.Bids), len(restOrderBook.Asks))
-		} else {
-			log.Printf("  Quote currency market %s has empty order book even via REST", market)
-		}
+		// No REST API fallback - if WebSocket fails, add to retry queue
+		log.Printf(" ⚠️ %s has no WebSocket data, added to retry queue", market)
+		c.httpClient.AddFailedMarket(market)
 	}
 }
 
-// FetchCriticalMarketsViaREST fetches order book data for critical markets via REST API
+// FetchCriticalMarketsViaWebSocket fetches order book data for critical markets via WebSocket only
 // This is used as a primary data source for quote currencies and other critical markets
-func (c *coinexClient) FetchCriticalMarketsViaREST(markets []string, marketDepths *MarketDepths) {
-	log.Printf(" Fetching critical markets via REST API: %v", markets)
+func (c *coinexClient) FetchCriticalMarketsViaWebSocket(markets []string, marketDepths *MarketDepths) {
+	log.Printf(" Subscribing to critical markets via WebSocket: %v", markets)
 
 	successCount := 0
 	failedCount := 0
 
 	for _, market := range markets {
-		log.Printf(" Fetching %s via REST API...", market)
+		log.Printf(" 🔍 Subscribing to %s via WebSocket...", market)
 
-		restOrderBook, err := c.httpClient.GetOrderBookREST(market)
-		if err != nil {
-			log.Printf(" Failed to fetch %s via REST: %v", market, err)
+		// Subscribe via WebSocket
+		if err := c.httpClient.SubscribeWebSocketWithRetry([]string{market}, 2); err != nil {
+			log.Printf(" ❌ Failed to subscribe to %s via WebSocket: %v", market, err)
 			failedCount++
+			// Add to retry queue for later
+			c.httpClient.AddFailedMarket(market)
 			continue
 		}
 
-		if len(restOrderBook.Bids) > 0 && len(restOrderBook.Asks) > 0 {
-			// Store in marketDepths
-			marketDepths.Store(market, restOrderBook)
+		log.Printf(" ✅ WebSocket subscription successful for %s", market)
 
-			// Also store in HttpClient's market data cache for consistency
-			c.httpClient.marketDataMu.Lock()
-			c.httpClient.marketData[market] = restOrderBook
-			c.httpClient.marketDataMu.Unlock()
+		// Wait a moment for data to arrive
+		time.Sleep(1 * time.Second)
 
-			log.Printf(" %s fetched via REST | Bids: %d | Asks: %d",
-				market, len(restOrderBook.Bids), len(restOrderBook.Asks))
-			successCount++
+		// Check if we have WebSocket data
+		if orderBook, exists := marketDepths.Load(market); exists && orderBook != nil {
+			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
+				log.Printf(" ✅ %s subscribed via WebSocket | Bids: %d | Asks: %d",
+					market, len(orderBook.Bids), len(orderBook.Asks))
+				successCount++
+			} else {
+				log.Printf(" ⚠️ %s has empty order book via WebSocket", market)
+				failedCount++
+				// Add to retry queue for later
+				c.httpClient.AddFailedMarket(market)
+			}
 		} else {
-			log.Printf("  %s has empty order book via REST", market)
+			log.Printf(" ❌ %s has no WebSocket data", market)
 			failedCount++
+			// Add to retry queue for later
+			c.httpClient.AddFailedMarket(market)
 		}
 
-		// Small delay to avoid overwhelming the API
+		// Small delay to avoid overwhelming the WebSocket connection
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	log.Printf(" REST API fetch complete: %d success, %d failed", successCount, failedCount)
+	log.Printf(" 📊 WebSocket subscription complete: %d success, %d failed", successCount, failedCount)
 }
 
 // GetQuoteCurrencyMarkets returns all markets for the configured quote currencies
@@ -1973,39 +1936,18 @@ func (c *coinexClient) GetQuoteCurrencyMarkets() []string {
 
 // CriticalMarketPriceManager handles critical market data efficiently
 type CriticalMarketPriceManager struct {
-	config        *Config
-	assumedPrices map[string]float64 // Critical market -> assumed price
+	config *Config
 }
 
 // NewCriticalMarketPriceManager creates a new critical market price manager
 func NewCriticalMarketPriceManager(coinexClient *coinexClient, config *Config) *CriticalMarketPriceManager {
-	// Initialize assumed prices for critical markets
-	assumedPrices := make(map[string]float64)
-	for _, market := range config.CriticalMarkets {
-		// For stablecoin pairs like USDCUSDT, assume price of 1.0
-		if strings.Contains(market, "USDC") && strings.Contains(market, "USDT") {
-			assumedPrices[market] = 1.0
-		} else {
-			// For other critical markets, use a reasonable default
-			assumedPrices[market] = 1.0
-		}
-	}
-
-	// Extract keys for logging
-	keys := make([]string, 0, len(assumedPrices))
-	for key := range assumedPrices {
-		keys = append(keys, key)
-	}
-
-	log.Printf("🔧 CRITICAL MARKET PRICE MANAGER | Initialized with %d markets: %v", len(assumedPrices), keys)
-
+	log.Printf("🔧 CRITICAL MARKET PRICE MANAGER | Initialized - all markets use WebSocket data")
 	return &CriticalMarketPriceManager{
-		config:        config,
-		assumedPrices: assumedPrices,
+		config: config,
 	}
 }
 
-// IsCriticalMarket checks if a market is critical (should be assumed to exist)
+// IsCriticalMarket checks if a market is critical (should be prioritized for WebSocket subscription)
 func (cmm *CriticalMarketPriceManager) IsCriticalMarket(market string) bool {
 	for _, critical := range cmm.config.CriticalMarkets {
 		if market == critical {
@@ -2015,20 +1957,17 @@ func (cmm *CriticalMarketPriceManager) IsCriticalMarket(market string) bool {
 	return false
 }
 
-// AssumeCriticalMarketExists returns true for critical markets (no checks needed)
+// AssumeCriticalMarketExists returns false - no markets are assumed to exist without WebSocket data
 func (cmm *CriticalMarketPriceManager) AssumeCriticalMarketExists(market string) bool {
-	return cmm.IsCriticalMarket(market)
+	return false // All markets must have WebSocket data
 }
 
-// GetAssumedPrice returns the assumed price for a critical market
+// GetAssumedPrice returns 0 - no assumed prices, all prices come from WebSocket
 func (cmm *CriticalMarketPriceManager) GetAssumedPrice(market string) (float64, bool) {
-	if price, exists := cmm.assumedPrices[market]; exists {
-		return price, true
-	}
-	return 0.0, false
+	return 0.0, false // No assumed prices
 }
 
-// GetCriticalMarketSnapshot returns empty snapshot for critical markets (we don't need price data)
+// GetCriticalMarketSnapshot returns empty snapshot - we don't need price data
 func (cmm *CriticalMarketPriceManager) GetCriticalMarketSnapshot() map[string]*OrderBook {
 	// Return empty snapshot - we don't need price data for critical markets
 	// The arbitrage engine will handle critical markets differently

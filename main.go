@@ -371,12 +371,12 @@ func main() {
 						} else {
 							log.Printf("⚠️ Critical market %s has empty order book", critical)
 							// Add to retry queue
-							httpClient.AddFailedMarket(critical)
+							// httpClient.AddFailedMarket(critical) // COMMENTED OUT: No retry queue
 						}
 					} else {
 						log.Printf("❌ Critical market %s has no WebSocket data", critical)
 						// Add to retry queue
-						httpClient.AddFailedMarket(critical)
+						// httpClient.AddFailedMarket(critical) // COMMENTED OUT: No retry queue
 					}
 				}
 			case <-dataValidationTicker.C:

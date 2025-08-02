@@ -365,76 +365,48 @@ func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity Arbit
 		amount2, getBaseAsset(opportunity.Path.Market2),
 		amount3, getBaseAsset(opportunity.Path.Market3))
 
-	// Place all three orders with exact amounts and FOK execution
-	trackers := make([]*FOKOrderTracker, 0, 3)
+	// Execute legs sequentially - each must complete before the next starts
+	results := make([]*OrderResult, 0, 3)
 
-	// Place Leg 1: Buy Asset with USDT
-	log.Printf("📤 PLACING LEG 1 | Market: %s | Type: buy | Amount: %.6f | Price: %.8f",
-		opportunity.Path.Market1, amount1, opportunity.Price1)
-	tracker1 := oem.coinexClient.PlaceFOKOrder(opportunity.Path.Market1, "buy", amount1, opportunity.Price1, oem.orderResultChan)
-	if tracker1 == nil {
-		log.Printf("❌ LEG 1 ORDER FAILED | Market: %s", opportunity.Path.Market1)
+	// Leg 1: Buy Asset with USDT
+	log.Printf("📤 PLACING LEG 1 | Market: %s | Type: buy | Amount: %.6f",
+		opportunity.Path.Market1, amount1)
+	result1 := oem.placeAndWaitForOrder(opportunity.Path.Market1, "buy", amount1, 0, "Leg 1") // Price 0 for market orders
+	if result1 == nil || result1.Status != OrderStatusFilled {
+		log.Printf("❌ LEG 1 FAILED | Market: %s | Status: %s", opportunity.Path.Market1, result1.Status)
 		return
 	}
-	trackers = append(trackers, tracker1)
+	results = append(results, result1)
+	log.Printf("✅ LEG 1 COMPLETED | Market: %s | Filled: %.6f", opportunity.Path.Market1, result1.FilledAmount)
 
-	// Place Leg 2: Sell Asset for USDC
-	log.Printf("📤 PLACING LEG 2 | Market: %s | Type: sell | Amount: %.6f | Price: %.8f",
-		opportunity.Path.Market2, amount2, opportunity.Price2)
-	tracker2 := oem.coinexClient.PlaceFOKOrder(opportunity.Path.Market2, "sell", amount2, opportunity.Price2, oem.orderResultChan)
-	if tracker2 == nil {
-		log.Printf("❌ LEG 2 ORDER FAILED | Market: %s", opportunity.Path.Market2)
-		oem.cancelAllActiveOrders(trackers)
+	// Leg 2: Sell Asset for USDC
+	log.Printf("📤 PLACING LEG 2 | Market: %s | Type: sell | Amount: %.6f",
+		opportunity.Path.Market2, amount2)
+	result2 := oem.placeAndWaitForOrder(opportunity.Path.Market2, "sell", amount2, 0, "Leg 2") // Price 0 for market orders
+	if result2 == nil || result2.Status != OrderStatusFilled {
+		log.Printf("❌ LEG 2 FAILED | Market: %s | Status: %s", opportunity.Path.Market2, result2.Status)
 		return
 	}
-	trackers = append(trackers, tracker2)
+	results = append(results, result2)
+	log.Printf("✅ LEG 2 COMPLETED | Market: %s | Filled: %.6f", opportunity.Path.Market2, result2.FilledAmount)
 
-	// Place Leg 3: Sell USDC for USDT
-	log.Printf("📤 PLACING LEG 3 | Market: %s | Type: sell | Amount: %.6f | Price: %.8f",
-		opportunity.Path.Market3, amount3, opportunity.Price3)
-	tracker3 := oem.coinexClient.PlaceFOKOrder(opportunity.Path.Market3, "sell", amount3, opportunity.Price3, oem.orderResultChan)
-	if tracker3 == nil {
-		log.Printf("❌ LEG 3 ORDER FAILED | Market: %s", opportunity.Path.Market3)
-		oem.cancelAllActiveOrders(trackers)
+	// Leg 3: Sell USDC for USDT
+	log.Printf("📤 PLACING LEG 3 | Market: %s | Type: sell | Amount: %.6f",
+		opportunity.Path.Market3, amount3)
+	result3 := oem.placeAndWaitForOrder(opportunity.Path.Market3, "sell", amount3, 0, "Leg 3") // Price 0 for market orders
+	if result3 == nil || result3.Status != OrderStatusFilled {
+		log.Printf("❌ LEG 3 FAILED | Market: %s | Status: %s", opportunity.Path.Market3, result3.Status)
 		return
 	}
-	trackers = append(trackers, tracker3)
+	results = append(results, result3)
+	log.Printf("✅ LEG 3 COMPLETED | Market: %s | Filled: %.6f", opportunity.Path.Market3, result3.FilledAmount)
 
-	// Wait for all three orders to complete (success or failure)
-	log.Printf("⏳ WAITING FOR ALL THREE LEGS TO COMPLETE | Trackers: %d", len(trackers))
-
-	completedResults := make([]*OrderResult, 0, 3)
-	timeout := time.After(time.Duration(oem.config.FOKOrderSettings.OrderTimeoutSeconds) * time.Second)
-
-	for len(completedResults) < 3 {
-		select {
-		case result := <-oem.orderResultChan:
-			// Check if this result belongs to one of our trackers
-			for i, tracker := range trackers {
-				if tracker.OrderID == result.OrderID {
-					log.Printf("✅ LEG %d COMPLETED | OrderID: %s | Status: %s | Filled: %.6f",
-						i+1, result.OrderID, result.Status, result.FilledAmount)
-					completedResults = append(completedResults, result)
-
-					// Remove completed tracker
-					trackers = append(trackers[:i], trackers[i+1:]...)
-					break
-				}
-			}
-
-		case <-timeout:
-			log.Printf("⏰ ARBITRAGE TIMEOUT | Completed: %d/3 legs", len(completedResults))
-			oem.cancelAllActiveOrders(trackers)
-			return
-		}
-	}
-
-	// Analyze results and decide next action
-	log.Printf("📊 ARBITRAGE COMPLETE | Results: %d/3 legs completed", len(completedResults))
+	// All three legs completed successfully
+	log.Printf("🎉 TRIANGULAR ARBITRAGE COMPLETE | All 3 legs executed successfully")
 	oem.analyzeFOKResultsAndDecide(opportunity, markets, map[int]*OrderResult{
-		0: completedResults[0],
-		1: completedResults[1],
-		2: completedResults[2],
+		0: results[0],
+		1: results[1],
+		2: results[2],
 	}, attemptNumber)
 }
 
@@ -1157,9 +1129,9 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 				if marketSet[critical] {
 					quotePair = critical
 					if strings.HasSuffix(critical, "USDT") {
-						quoteDirection = "sell" // Selling USDC for USDT (for USDT→Asset→USDC→USDT path)
+						quoteDirection = "buy" // Buying USDT with USDC (for USDT→Asset→USDC→USDT path)
 					} else {
-						quoteDirection = "buy" // Buying USDT with USDC (for reverse path)
+						quoteDirection = "sell" // Selling USDC for USDT (for reverse path)
 					}
 					log.Printf("    Using direct quote pair: %s (%s)", critical, quoteDirection)
 					break
@@ -1177,10 +1149,10 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 							Asset2:     "USDC",
 							Market1:    asset + "USDT", // Buy asset with USDT
 							Market2:    asset + "USDC", // Sell asset for USDC
-							Market3:    quotePair,      // Sell USDC for USDT
+							Market3:    quotePair,      // Buy USDT with USDC
 							Direction1: "buy",          // Buy asset with USDT
 							Direction2: "sell",         // Sell asset for USDC
-							Direction3: "sell",         // Sell USDC for USDT (FIXED: was "buy")
+							Direction3: "buy",          // Buy USDT with USDC (FIXED: was "sell")
 						}
 
 						paths = append(paths, path1)
@@ -1607,14 +1579,14 @@ func (ae *ArbitrageEngine) validateMarketData(path TriangularPath, snapshot map[
 		// ALL markets must have WebSocket order book data - no REST API fallback
 		if marketData == nil {
 			// Add to retry queue for later WebSocket subscription
-			ae.coinexClient.httpClient.AddFailedMarket(market)
+			// ae.coinexClient.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
 			return nil, false
 		}
 
 		// Check if we have sufficient order book data
 		if len(marketData.Bids) == 0 || len(marketData.Asks) == 0 {
 			// Add to retry queue for later WebSocket subscription
-			ae.coinexClient.httpClient.AddFailedMarket(market)
+			// ae.coinexClient.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
 			return nil, false
 		}
 
@@ -1624,14 +1596,14 @@ func (ae *ArbitrageEngine) validateMarketData(path TriangularPath, snapshot map[
 
 		if bidErr != nil || askErr != nil || bestBidPrice <= 0 || bestAskPrice <= 0 {
 			// Add to retry queue for later WebSocket subscription
-			ae.coinexClient.httpClient.AddFailedMarket(market)
+			// ae.coinexClient.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
 			return nil, false
 		}
 
 		// Validate spread (ask should be >= bid)
 		if bestAskPrice < bestBidPrice {
 			// Add to retry queue for later WebSocket subscription
-			ae.coinexClient.httpClient.AddFailedMarket(market)
+			// ae.coinexClient.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
 			return nil, false
 		}
 
@@ -1642,7 +1614,7 @@ func (ae *ArbitrageEngine) validateMarketData(path TriangularPath, snapshot map[
 
 		if bestBidAmount < minDepth || bestAskAmount < minDepth {
 			// Add to retry queue for later WebSocket subscription
-			ae.coinexClient.httpClient.AddFailedMarket(market)
+			// ae.coinexClient.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
 			return nil, false
 		}
 
@@ -1692,7 +1664,7 @@ func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, mar
 
 		// Use order book prices based on direction
 		if direction == "buy" {
-			// For buy orders, use the ask price (asks[0])
+			// For buy orders, use the ask price (asks[0]) - what sellers are asking for
 			if len(marketData.Asks) == 0 {
 				return 0, fmt.Errorf("no ask orders available for %s", market)
 			}
@@ -1701,7 +1673,7 @@ func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, mar
 				return 0, fmt.Errorf("invalid ask price format for %s: %v", market, err)
 			}
 		} else if direction == "sell" {
-			// For sell orders, use the bid price (bids[0])
+			// For sell orders, use the bid price (bids[0]) - what buyers are bidding for
 			if len(marketData.Bids) == 0 {
 				return 0, fmt.Errorf("no bid orders available for %s", market)
 			}

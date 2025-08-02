@@ -262,8 +262,14 @@ func (c *coinexClient) PlaceOrder() string {
 
 // PlaceFOKOrder places a Fill-or-Kill order with automatic simulation/real API switching and spending controls
 func (c *coinexClient) PlaceFOKOrder(market, orderType string, amount, price float64, orderResultChan chan<- *OrderResult) *FOKOrderTracker {
-	log.Printf("🎯 PLACE FOK ORDER START | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
-		market, orderType, amount, price)
+	// For market orders, price should be 0 since they execute at current market price
+	if price == 0 {
+		log.Printf("🎯 PLACE MARKET ORDER START | Market: %s | Type: %s | Amount: %.6f",
+			market, orderType, amount)
+	} else {
+		log.Printf("🎯 PLACE FOK ORDER START | Market: %s | Type: %s | Amount: %.6f | Price: %.8f | Value: $%.2f",
+			market, orderType, amount, price, price*amount)
+	}
 
 	// Check rate limit before placing order
 	if !c.checkRateLimit() {
@@ -272,8 +278,15 @@ func (c *coinexClient) PlaceFOKOrder(market, orderType string, amount, price flo
 	}
 
 	// Check balance before placing order
-	if !c.CanPlaceOrder(price * amount) {
-		log.Printf("🚫 INSUFFICIENT BALANCE | Cannot place order of value $%.2f", price*amount)
+	orderValue := price * amount
+	if price == 0 {
+		// For market orders, use a conservative estimate for balance check
+		// We'll use a rough estimate based on current market conditions
+		orderValue = amount * 1.0 // Conservative estimate - will be refined after order placement
+	}
+
+	if !c.CanPlaceOrder(orderValue) {
+		log.Printf("🚫 INSUFFICIENT BALANCE | Cannot place order of value $%.2f", orderValue)
 		return nil
 	}
 
@@ -356,12 +369,22 @@ func (c *coinexClient) calculateOrderAmount(requestedAmount, price float64) (flo
 	if settings.OrderAmountType == "static" {
 		// Static USD amount
 		orderValue = settings.StaticOrderAmount
-		orderAmount = orderValue / price
+		if price > 0 {
+			orderAmount = orderValue / price
+		} else {
+			// For market orders, use a conservative estimate
+			orderAmount = orderValue // Assume 1:1 ratio for market orders
+		}
 	} else {
 		// Dynamic percentage of available balance
 		availableBalance := settings.AccountBalance
 		orderValue = availableBalance * settings.DynamicOrderPercentage
-		orderAmount = orderValue / price
+		if price > 0 {
+			orderAmount = orderValue / price
+		} else {
+			// For market orders, use a conservative estimate
+			orderAmount = orderValue // Assume 1:1 ratio for market orders
+		}
 
 		// In dynamic mode, we ignore requestedAmount and use our configured percentage
 		// The requestedAmount is just the arbitrage engine's suggestion, but we want
@@ -376,7 +399,11 @@ func (c *coinexClient) calculateOrderAmount(requestedAmount, price float64) (flo
 	}
 	if orderValue > settings.MaxOrderAmount {
 		orderValue = settings.MaxOrderAmount
-		orderAmount = orderValue / price
+		if price > 0 {
+			orderAmount = orderValue / price
+		} else {
+			orderAmount = orderValue // Assume 1:1 ratio for market orders
+		}
 	}
 
 	return orderAmount, orderValue, nil
@@ -714,38 +741,39 @@ func (c *coinexClient) getTradingFee(market string) float64 {
 
 // CancelAllActiveOrders cancels all active orders (real API or simulation)
 func (c *coinexClient) CancelAllActiveOrders() {
-	activeTrackers := c.orderTrackingManager.GetActiveTrackers()
+	log.Printf("🛑 CANCELLING ALL ACTIVE ORDERS | Mode: %s",
+		map[bool]string{true: "SIMULATION", false: "REAL API"}[c.config.SimulationMode])
 
-	log.Printf("🛑 CANCELLING ALL ACTIVE ORDERS | Count: %d | Mode: %s",
-		len(activeTrackers), map[bool]string{true: "SIMULATION", false: "REAL API"}[c.config.SimulationMode])
-
-	if len(activeTrackers) == 0 {
-		log.Printf("✅ NO ACTIVE ORDERS TO CANCEL | All orders already completed")
-		return
-	}
-
-	// In real API mode, use the efficient Cancel All Orders API
+	// In real API mode, first try cancel all orders for all markets without checking active orders
 	if !c.config.SimulationMode {
-		// Get unique markets from active trackers
+		// Get all markets that might have orders (from active trackers)
+		activeTrackers := c.orderTrackingManager.GetActiveTrackers()
 		marketsToCancel := make(map[string]bool)
 		for _, tracker := range activeTrackers {
 			marketsToCancel[tracker.Market] = true
 		}
 
-		log.Printf("🛑 USING CANCEL ALL ORDERS API | Markets: %v", getMapKeysBool(marketsToCancel))
+		log.Printf("🛑 FIRST ATTEMPT: CANCEL ALL ORDERS API | Markets: %v", getMapKeysBool(marketsToCancel))
 
-		// Cancel all orders for each unique market
+		// Try to cancel all orders for each market using the cancel all API
+		allCancelled := true
 		for market := range marketsToCancel {
 			log.Printf("🛑 CANCELLING ALL ORDERS FOR MARKET | %s", market)
 			err := c.CancelAllOrders(market)
 			if err != nil {
 				log.Printf("❌ FAILED TO CANCEL ALL ORDERS | Market: %s | Error: %v", market, err)
-				// Fall back to individual cancellations for this market
-				log.Printf("🔄 FALLING BACK TO INDIVIDUAL CANCELLATIONS | Market: %s", market)
-				c.cancelIndividualOrdersForMarket(market, activeTrackers)
+				allCancelled = false
 			} else {
 				log.Printf("✅ SUCCESSFULLY CANCELLED ALL ORDERS | Market: %s", market)
 			}
+		}
+
+		// If cancel all API failed for any market, fall back to individual cancellation
+		if !allCancelled {
+			log.Printf("🔄 FALLING BACK TO INDIVIDUAL CANCELLATIONS | Some cancel all API calls failed")
+			c.cancelIndividualOrdersForMarket("", activeTrackers) // Empty market means cancel all individual orders
+		} else {
+			log.Printf("✅ ALL ORDERS CANCELLED VIA API | No individual cancellation needed")
 		}
 
 		// Also check for any untracked orders on the exchange
@@ -792,6 +820,7 @@ func (c *coinexClient) CancelAllActiveOrders() {
 		}
 	} else {
 		// Simulation mode - use channel cancellation
+		activeTrackers := c.orderTrackingManager.GetActiveTrackers()
 		for i, tracker := range activeTrackers {
 			log.Printf("🛑 CANCELLING TRACKER %d/%d | ID: %s | Market: %s | IsActive: %v",
 				i+1, len(activeTrackers), tracker.OrderID, tracker.Market, tracker.IsActive)
@@ -812,15 +841,15 @@ func (c *coinexClient) CancelAllActiveOrders() {
 		}
 	}
 
-	log.Printf("✅ CANCELLATION COMPLETE | Processed %d active trackers", len(activeTrackers))
+	log.Printf("✅ CANCELLATION COMPLETE")
 }
 
 // cancelIndividualOrdersForMarket cancels individual orders for a specific market (fallback method)
 func (c *coinexClient) cancelIndividualOrdersForMarket(market string, activeTrackers []*FOKOrderTracker) {
-	log.Printf("🛑 CANCELLING INDIVIDUAL ORDERS | Market: %s", market)
-
-	for _, tracker := range activeTrackers {
-		if tracker.Market == market {
+	if market == "" {
+		// Cancel all individual orders for all markets
+		log.Printf("🛑 CANCELLING ALL INDIVIDUAL ORDERS | All markets")
+		for _, tracker := range activeTrackers {
 			log.Printf("🛑 CANCELLING INDIVIDUAL ORDER | ID: %s | Market: %s", tracker.OrderID, tracker.Market)
 
 			err := c.cancelRealOrder(tracker)
@@ -828,6 +857,22 @@ func (c *coinexClient) cancelIndividualOrdersForMarket(market string, activeTrac
 				log.Printf("❌ INDIVIDUAL CANCELLATION FAILED | ID: %s | Error: %v", tracker.OrderID, err)
 			} else {
 				log.Printf("✅ INDIVIDUAL CANCELLATION SUCCESS | ID: %s", tracker.OrderID)
+			}
+		}
+	} else {
+		// Cancel individual orders for a specific market
+		log.Printf("🛑 CANCELLING INDIVIDUAL ORDERS | Market: %s", market)
+
+		for _, tracker := range activeTrackers {
+			if tracker.Market == market {
+				log.Printf("🛑 CANCELLING INDIVIDUAL ORDER | ID: %s | Market: %s", tracker.OrderID, tracker.Market)
+
+				err := c.cancelRealOrder(tracker)
+				if err != nil {
+					log.Printf("❌ INDIVIDUAL CANCELLATION FAILED | ID: %s | Error: %v", tracker.OrderID, err)
+				} else {
+					log.Printf("✅ INDIVIDUAL CANCELLATION SUCCESS | ID: %s", tracker.OrderID)
+				}
 			}
 		}
 	}
@@ -1077,6 +1122,13 @@ func (c *coinexClient) findCompleteAssets(usdtAssets, usdcAssets []string) ([]st
 	usdtAssetMap := make(map[string]string) // asset -> market
 	usdcAssetMap := make(map[string]string) // asset -> market
 
+	// Blacklist of USDC markets to ignore
+	ignoredUSDCMarkets := map[string]bool{
+		"ETCUSDC": true,
+		"BTCUSDC": true,
+		"BNBUSDC": true,
+	}
+
 	// Parse USDT assets
 	for _, market := range usdtAssets {
 		asset := strings.TrimSuffix(market, "USDT")
@@ -1085,8 +1137,14 @@ func (c *coinexClient) findCompleteAssets(usdtAssets, usdcAssets []string) ([]st
 		}
 	}
 
-	// Parse USDC assets
+	// Parse USDC assets (excluding blacklisted ones)
 	for _, market := range usdcAssets {
+		// Skip blacklisted USDC markets
+		if ignoredUSDCMarkets[market] {
+			fmt.Printf("    ⚠️ Ignoring blacklisted USDC market: %s\n", market)
+			continue
+		}
+
 		asset := strings.TrimSuffix(market, "USDC")
 		if asset != "" && asset != "USDT" { // Exclude USDTUSDC
 			usdcAssetMap[asset] = market
@@ -1094,7 +1152,7 @@ func (c *coinexClient) findCompleteAssets(usdtAssets, usdcAssets []string) ([]st
 	}
 
 	fmt.Printf("    USDT assets found: %d\n", len(usdtAssetMap))
-	fmt.Printf("    USDC assets found: %d\n", len(usdcAssetMap))
+	fmt.Printf("    USDC assets found: %d (excluding blacklisted)\n", len(usdcAssetMap))
 
 	// Find assets that have both USDT and USDC pairs
 	for asset := range usdtAssetMap {
@@ -1322,11 +1380,11 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 		map[bool]string{true: "SIMULATION", false: "REAL API"}[c.config.SimulationMode],
 		tracker.Market, tracker.Type, tracker.Amount, tracker.Price)
 
-	// Place limit order instead of FOK
-	log.Printf("📤 PLACING FOK ORDER | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
-		tracker.Market, tracker.Type, tracker.Amount, tracker.Price)
+	// Place market order for FOK behavior
+	log.Printf("📤 PLACING FOK ORDER | Market: %s | Type: %s | Amount: %.6f",
+		tracker.Market, tracker.Type, tracker.Amount)
 
-	actualOrderID, err := c.placeRealLimitOrder(tracker)
+	actualOrderID, err := c.placeRealMarketOrder(tracker)
 	if err != nil {
 		log.Printf("❌ ORDER PLACEMENT FAILED | Market: %s | Error: %v", tracker.Market, err)
 		result := &OrderResult{
@@ -1448,27 +1506,27 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 	}
 }
 
-// placeRealLimitOrder places a real limit order via CoinEx API v2
-func (c *coinexClient) placeRealLimitOrder(tracker *FOKOrderTracker) (string, error) {
-	log.Printf("📤 PLACING LIMIT ORDER | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
-		tracker.Market, tracker.Type, tracker.Amount, tracker.Price)
+// placeRealMarketOrder places a real market order via CoinEx API v2
+func (c *coinexClient) placeRealMarketOrder(tracker *FOKOrderTracker) (string, error) {
+	log.Printf("📤 PLACING FOK ORDER | Market: %s | Type: %s | Amount: %.6f",
+		tracker.Market, tracker.Type, tracker.Amount)
 
 	// Use v2 API for spot trading
 	timestamp := time.Now().UnixMilli()
 	method := "POST"
 	requestPath := "/v2/spot/order"
 
-	// Prepare JSON body for v2 API - Use limit order type
+	// Prepare JSON body for v2 API - Use market order type for FOK behavior
 	orderData := map[string]interface{}{
 		"market":      tracker.Market,
 		"market_type": "SPOT",
 		"side":        tracker.Type,
-		"type":        "limit",
+		"type":        "market", // Market orders for immediate fill or reject
 		"amount":      fmt.Sprintf("%.8f", tracker.Amount),
-		"price":       fmt.Sprintf("%.8f", tracker.Price),
-		"client_id":   fmt.Sprintf("LIMIT_%s_%d", tracker.Market, timestamp),
-		"is_hide":     false,
-		"stp_mode":    "both",
+		// Remove price field for market orders - they execute at current market price
+		"client_id": fmt.Sprintf("FOK_%s_%d", tracker.Market, timestamp),
+		"is_hide":   false,
+		"stp_mode":  "both",
 	}
 
 	// Convert to JSON string
@@ -1544,23 +1602,24 @@ func (c *coinexClient) placeRealLimitOrder(tracker *FOKOrderTracker) (string, er
 
 // pollRealOrderStatus polls the real order status from CoinEx API until timeout
 func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, error) {
-	timeoutDuration := time.Duration(c.config.FOKOrderSettings.FOKTimeoutSeconds) * time.Second
-	// Use much faster polling for market orders - every 100ms instead of 1000ms
+	// For FOK market orders, use a very short timeout since they should fill immediately or be rejected
+	timeoutDuration := time.Duration(2) * time.Second // Very short timeout for market orders
+	// Use fast polling for market orders
 	pollingInterval := 100 * time.Millisecond
 
 	pollCount := 0
 	timeout := time.After(timeoutDuration)
 
-	log.Printf("⏱️ POLLING CONFIG | Timeout: %ds | Polling: every %dms (aggressive)",
-		c.config.FOKOrderSettings.FOKTimeoutSeconds,
+	log.Printf("⏱️ FOK POLLING CONFIG | Timeout: %ds | Polling: every %dms (market orders)",
+		int(timeoutDuration.Seconds()),
 		int(pollingInterval.Milliseconds()))
 
 	// Loop until timeout or filled
 	for {
 		select {
 		case <-timeout:
-			// Timeout reached - order not filled
-			log.Printf("⏰ POLLING TIMEOUT | ID: %s | After %d attempts", tracker.OrderID, pollCount)
+			// Timeout reached - order not filled (FOK behavior)
+			log.Printf("⏰ FOK TIMEOUT | ID: %s | After %d attempts - cancelling order", tracker.OrderID, pollCount)
 			return false, nil
 
 		default:
@@ -1671,24 +1730,35 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 				return false, fmt.Errorf("invalid response format: missing data")
 			}
 
-			// Check status - accept multiple status values for market orders
+			// Check status - for FOK limit orders, check for filled status
 			if statusStr, ok := data["status"].(string); ok {
-				// Market orders should fill immediately, so check for various completion statuses
+				// FOK limit orders should fill immediately, so check for completion statuses
 				if statusStr == "done" || statusStr == "filled" || statusStr == "closed" || statusStr == "completed" {
-					log.Printf("✅ ORDER FILLED | ID: %s | Status: %s | Attempt: %d", tracker.OrderID, statusStr, pollCount)
+					log.Printf("✅ FOK ORDER FILLED | ID: %s | Status: %s | Attempt: %d", tracker.OrderID, statusStr, pollCount)
 					return true, nil // Order is filled
 				}
 
-				// Check for partial fills or pending status
+				// Check for partial fills
 				if statusStr == "pending" || statusStr == "open" {
 					// Check if there's any filled amount
 					if filledAmount, exists := data["deal_amount"].(string); exists {
 						if filled, err := strconv.ParseFloat(filledAmount, 64); err == nil && filled > 0 {
-							log.Printf("✅ ORDER PARTIALLY FILLED | ID: %s | Filled: %.6f | Status: %s | Attempt: %d",
+							log.Printf("✅ FOK ORDER PARTIALLY FILLED | ID: %s | Filled: %.6f | Status: %s | Attempt: %d",
 								tracker.OrderID, filled, statusStr, pollCount)
-							return true, nil // Consider partial fills as success for market orders
+							return true, nil // Consider partial fills as success for FOK orders
 						}
 					}
+				}
+
+				// Check for failed/cancelled status
+				if statusStr == "cancelled" || statusStr == "failed" || statusStr == "rejected" {
+					log.Printf("❌ FOK ORDER FAILED | ID: %s | Status: %s | Attempt: %d", tracker.OrderID, statusStr, pollCount)
+					return false, fmt.Errorf("order failed with status: %s", statusStr)
+				}
+
+				// For pending/open orders, continue polling (FOK timeout will handle cancellation)
+				if pollCount <= 3 || pollCount%5 == 0 { // Log occasionally
+					log.Printf("⏳ FOK ORDER PENDING | ID: %s | Status: %s | Attempt: %d", tracker.OrderID, statusStr, pollCount)
 				}
 			}
 
@@ -1811,6 +1881,7 @@ func (c *coinexClient) buildQueryString(params map[string]string) string {
 func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, marketDepths *MarketDepths) {
 	log.Printf(" Ensuring critical markets have WebSocket data: %v", criticalMarkets)
 
+	failedCount := 0
 	for _, market := range criticalMarkets {
 		// Check if market already has data in marketDepths (from WebSocket)
 		if orderBook, exists := marketDepths.Load(market); exists && orderBook != nil {
@@ -1825,8 +1896,9 @@ func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, market
 		log.Printf(" Attempting WebSocket subscription for %s...", market)
 		if err := c.httpClient.SubscribeWebSocketWithRetry([]string{market}, 2); err != nil {
 			log.Printf(" WebSocket subscription failed for %s: %v", market, err)
-			// Add to retry queue for later
-			c.httpClient.AddFailedMarket(market)
+			// Just log the failure, don't add to retry queue
+			// c.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
+			failedCount++
 		} else {
 			log.Printf(" WebSocket subscription successful for %s", market)
 			// Wait a moment for data to arrive
@@ -1842,10 +1914,13 @@ func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, market
 			}
 		}
 
-		// No REST API fallback - if WebSocket fails, add to retry queue
-		log.Printf(" ⚠️ %s has no WebSocket data, added to retry queue", market)
-		c.httpClient.AddFailedMarket(market)
+		// No REST API fallback - if WebSocket fails, just log it
+		log.Printf(" ⚠️ %s has no WebSocket data", market)
+		// c.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
+		failedCount++
 	}
+
+	log.Printf(" 📊 Critical markets WebSocket summary: %d failed out of %d total", failedCount, len(criticalMarkets))
 }
 
 // FetchCriticalMarketsViaWebSocket fetches order book data for critical markets via WebSocket only
@@ -1863,8 +1938,8 @@ func (c *coinexClient) FetchCriticalMarketsViaWebSocket(markets []string, market
 		if err := c.httpClient.SubscribeWebSocketWithRetry([]string{market}, 2); err != nil {
 			log.Printf(" ❌ Failed to subscribe to %s via WebSocket: %v", market, err)
 			failedCount++
-			// Add to retry queue for later
-			c.httpClient.AddFailedMarket(market)
+			// Just log the failure, don't add to retry queue
+			// c.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
 			continue
 		}
 
@@ -1882,21 +1957,21 @@ func (c *coinexClient) FetchCriticalMarketsViaWebSocket(markets []string, market
 			} else {
 				log.Printf(" ⚠️ %s has empty order book via WebSocket", market)
 				failedCount++
-				// Add to retry queue for later
-				c.httpClient.AddFailedMarket(market)
+				// Just log the failure, don't add to retry queue
+				// c.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
 			}
 		} else {
 			log.Printf(" ❌ %s has no WebSocket data", market)
 			failedCount++
-			// Add to retry queue for later
-			c.httpClient.AddFailedMarket(market)
+			// Just log the failure, don't add to retry queue
+			// c.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
 		}
 
 		// Small delay to avoid overwhelming the WebSocket connection
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	log.Printf(" 📊 WebSocket subscription complete: %d success, %d failed", successCount, failedCount)
+	log.Printf(" 📊 WebSocket subscription complete: %d success, %d failed out of %d total", successCount, failedCount, len(markets))
 }
 
 // GetQuoteCurrencyMarkets returns all markets for the configured quote currencies

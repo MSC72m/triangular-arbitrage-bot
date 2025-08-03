@@ -1,9 +1,9 @@
 {
   "apiBaseURL": "https://api.coinex.com/v1",
   "apiBaseURLV2": "https://api.coinex.com/v2/",
-  "profitThreshold": 0.0005,
+  "profitThreshold": 0.0001,
   "simulationMode": false,
-  "concurrentScans": 160,
+  "concurrentScans": 200,
   "wsSubscriptionsBatchSize": 50,
   "maxLatencyMs": 200,
   "rateLimitPerSecond": 15,
@@ -16,7 +16,7 @@
   "maxConcurrentOrdersPerAsset": 3,
   "orderTimeoutSeconds": 30,
   "enableOrderSimulation": false,
-  "orderBookDepthLimit": 10,
+  "orderBookDepthLimit": 5,
   "logLevel": "debug",
   "tradingFees": {
     "USDT": 0.002,

@@ -183,6 +183,9 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 		return fmt.Errorf("invalid depth data in depth update: %+v", data)
 	}
 
+	// Check if this is a full snapshot or incremental update
+	isFull, _ := data["is_full"].(bool)
+
 	// Extract latest price - try multiple locations
 	var latestPrice float64 = 0
 
@@ -204,40 +207,130 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 		}
 	}
 
-	// Create order book
-	orderBook := &OrderBook{
-		Asks:   []Depth{},
-		Bids:   []Depth{},
-		Latest: latestPrice,
-		Market: marketName,
+	// Get existing order book or create new one
+	var orderBook *OrderBook
+	if isFull {
+		// Full snapshot - create new order book
+		orderBook = &OrderBook{
+			Asks:   []Depth{},
+			Bids:   []Depth{},
+			Latest: latestPrice,
+			Market: marketName,
+		}
+	} else {
+		// Incremental update - get existing order book
+		existingOrderBook, exists := marketDepths.Load(marketName)
+		if !exists || existingOrderBook == nil {
+			// No existing data, create new order book
+			orderBook = &OrderBook{
+				Asks:   []Depth{},
+				Bids:   []Depth{},
+				Latest: latestPrice,
+				Market: marketName,
+			}
+		} else {
+			// Use existing order book and update latest price
+			orderBook = existingOrderBook
+			orderBook.Latest = latestPrice
+		}
 	}
 
-	// Parse asks (sell orders)
+	// Parse asks (sell orders) - accept data as provided by API
 	if asksData, ok := depthData["asks"].([]interface{}); ok {
-		for _, ask := range asksData {
-			if askArray, ok := ask.([]interface{}); ok && len(askArray) >= 2 {
-				if priceStr, ok := askArray[0].(string); ok {
-					if amountStr, ok := askArray[1].(string); ok {
-						orderBook.Asks = append(orderBook.Asks, Depth{
-							Price:  priceStr,
-							Amount: amountStr,
-						})
+		if isFull {
+			// Full snapshot - replace all asks
+			orderBook.Asks = []Depth{}
+			for _, ask := range asksData {
+				if askArray, ok := ask.([]interface{}); ok && len(askArray) >= 2 {
+					if priceStr, ok := askArray[0].(string); ok {
+						if amountStr, ok := askArray[1].(string); ok {
+							orderBook.Asks = append(orderBook.Asks, Depth{
+								Price:  priceStr,
+								Amount: amountStr,
+							})
+						}
+					}
+				}
+			}
+		} else {
+			// Incremental update - only update existing asks, don't recreate
+			for _, ask := range asksData {
+				if askArray, ok := ask.([]interface{}); ok && len(askArray) >= 2 {
+					if priceStr, ok := askArray[0].(string); ok {
+						if amountStr, ok := askArray[1].(string); ok {
+							// Find existing ask with same price
+							found := false
+							for i, existingAsk := range orderBook.Asks {
+								if existingAsk.Price == priceStr {
+									// Update amount
+									if amountStr == "0" {
+										// Remove this ask level
+										orderBook.Asks = append(orderBook.Asks[:i], orderBook.Asks[i+1:]...)
+									} else {
+										// Update amount
+										orderBook.Asks[i].Amount = amountStr
+									}
+									found = true
+									break
+								}
+							}
+							if !found && amountStr != "0" {
+								// Add new ask level - API provides them in correct order, just prepend
+								newAsk := Depth{Price: priceStr, Amount: amountStr}
+								orderBook.Asks = append([]Depth{newAsk}, orderBook.Asks...)
+							}
+						}
 					}
 				}
 			}
 		}
 	}
 
-	// Parse bids (buy orders)
+	// Parse bids (buy orders) - accept data as provided by API
 	if bidsData, ok := depthData["bids"].([]interface{}); ok {
-		for _, bid := range bidsData {
-			if bidArray, ok := bid.([]interface{}); ok && len(bidArray) >= 2 {
-				if priceStr, ok := bidArray[0].(string); ok {
-					if amountStr, ok := bidArray[1].(string); ok {
-						orderBook.Bids = append(orderBook.Bids, Depth{
-							Price:  priceStr,
-							Amount: amountStr,
-						})
+		if isFull {
+			// Full snapshot - replace all bids
+			orderBook.Bids = []Depth{}
+			for _, bid := range bidsData {
+				if bidArray, ok := bid.([]interface{}); ok && len(bidArray) >= 2 {
+					if priceStr, ok := bidArray[0].(string); ok {
+						if amountStr, ok := bidArray[1].(string); ok {
+							orderBook.Bids = append(orderBook.Bids, Depth{
+								Price:  priceStr,
+								Amount: amountStr,
+							})
+						}
+					}
+				}
+			}
+		} else {
+			// Incremental update - only update existing bids, don't recreate
+			for _, bid := range bidsData {
+				if bidArray, ok := bid.([]interface{}); ok && len(bidArray) >= 2 {
+					if priceStr, ok := bidArray[0].(string); ok {
+						if amountStr, ok := bidArray[1].(string); ok {
+							// Find existing bid with same price
+							found := false
+							for i, existingBid := range orderBook.Bids {
+								if existingBid.Price == priceStr {
+									// Update amount
+									if amountStr == "0" {
+										// Remove this bid level
+										orderBook.Bids = append(orderBook.Bids[:i], orderBook.Bids[i+1:]...)
+									} else {
+										// Update amount
+										orderBook.Bids[i].Amount = amountStr
+									}
+									found = true
+									break
+								}
+							}
+							if !found && amountStr != "0" {
+								// Add new bid level - API provides them in correct order, just prepend
+								newBid := Depth{Price: priceStr, Amount: amountStr}
+								orderBook.Bids = append([]Depth{newBid}, orderBook.Bids...)
+							}
+						}
 					}
 				}
 			}
@@ -261,36 +354,19 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 		if wsDataReceivedCounter <= 10 {
 			bidPrice := orderBook.Bids[0].Price
 			askPrice := orderBook.Asks[0].Price
-			log.Printf(" WebSocket Data Received | Market: %s | Bids: %d | Asks: %d | Best Bid: %s | Best Ask: %s | Latest: %.8f",
-				marketName, len(orderBook.Bids), len(orderBook.Asks), bidPrice, askPrice, orderBook.Latest)
+			log.Printf(" WebSocket Data Received | Market: %s | Bids: %d | Asks: %d | Best Bid: %s | Best Ask: %s | Latest: %.8f | Full: %v",
+				marketName, len(orderBook.Bids), len(orderBook.Asks), bidPrice, askPrice, orderBook.Latest, isFull)
 		}
 		// Log every 100th update to track continuous data flow
 		if wsDataReceivedCounter%100 == 0 {
 			bidPrice := orderBook.Bids[0].Price
 			askPrice := orderBook.Asks[0].Price
-			log.Printf(" WebSocket Update #%d | Market: %s | Bid: %s | Ask: %s | Latest: %.8f | Time: %s",
-				wsDataReceivedCounter, marketName, bidPrice, askPrice, orderBook.Latest, time.Now().Format("15:04:05"))
-		}
-
-		// Validate price sanity
-		bidFloat, bidErr := strconv.ParseFloat(orderBook.Bids[0].Price, 64)
-		askFloat, askErr := strconv.ParseFloat(orderBook.Asks[0].Price, 64)
-		if bidErr == nil && askErr == nil {
-			// Check for obviously wrong prices
-			if bidFloat <= 0 || askFloat <= 0 {
-				log.Printf(" INVALID PRICES | Market: %s | Bid: %s | Ask: %s | Prices are zero or negative",
-					marketName, orderBook.Bids[0].Price, orderBook.Asks[0].Price)
-			} else if askFloat < bidFloat {
-				log.Printf(" INVALID SPREAD | Market: %s | Ask (%s) < Bid (%s) - impossible spread",
-					marketName, orderBook.Asks[0].Price, orderBook.Bids[0].Price)
-			} else if (askFloat-bidFloat)/bidFloat > 0.1 {
-				log.Printf(" WIDE SPREAD | Market: %s | Spread: %.2f%% | Bid: %s | Ask: %s",
-					marketName, (askFloat-bidFloat)/bidFloat*100, orderBook.Bids[0].Price, orderBook.Asks[0].Price)
-			}
+			log.Printf(" WebSocket Update #%d | Market: %s | Bid: %s | Ask: %s | Latest: %.8f | Time: %s | Full: %v",
+				wsDataReceivedCounter, marketName, bidPrice, askPrice, orderBook.Latest, time.Now().Format("15:04:05"), isFull)
 		}
 	} else {
-		log.Printf(" WebSocket Data Received | Market: %s | Empty order book (Bids: %d, Asks: %d) | Latest: %.8f",
-			marketName, len(orderBook.Bids), len(orderBook.Asks), orderBook.Latest)
+		log.Printf(" WebSocket Data Received | Market: %s | Empty order book (Bids: %d, Asks: %d) | Latest: %.8f | Full: %v",
+			marketName, len(orderBook.Bids), len(orderBook.Asks), orderBook.Latest, isFull)
 	}
 
 	return nil

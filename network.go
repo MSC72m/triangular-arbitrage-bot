@@ -246,7 +246,7 @@ func (c *HttpClient) ConnectWebSocket() error {
 		"method": "depth.subscribe",
 		"params": map[string]interface{}{
 			"market_list": [][]interface{}{
-				{"BTCUSDT", 10, "0", true},
+				{"BTCUSDT", 10, "0", true}, // merge=0 for precise numbers
 			},
 		},
 		"id": time.Now().UnixNano(),
@@ -861,10 +861,16 @@ func (c *HttpClient) SubscribeWebSocket(markets []string) error {
 		// Prepare market list for subscription
 		var marketList = make([][]interface{}, len(batch))
 		for j, market := range batch {
-			marketList[j] = []interface{}{market, c.config.OrderBookDepthLimit, "0", true}
+			// Format: [market, depth, merge, full]
+			// - market: market name
+			// - depth: order book depth (use config value)
+			// - merge: 0 for precise numbers (no aggregation)
+			// - full: false to allow incremental updates
+			marketList[j] = []interface{}{market, c.config.OrderBookDepthLimit, "0", false}
 		}
 
 		// Use CoinEx's correct subscription format with market_list
+		// Set merge=0 for precise numbers, full=false for incremental updates
 		subMsg := map[string]interface{}{
 			"method": "depth.subscribe",
 			"params": map[string]interface{}{

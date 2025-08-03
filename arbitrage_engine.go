@@ -368,10 +368,10 @@ func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity Arbit
 	// Execute legs sequentially - each must complete before the next starts
 	results := make([]*OrderResult, 0, 3)
 
-	// Leg 1: Buy Asset with USDT
-	log.Printf("📤 PLACING LEG 1 | Market: %s | Type: buy | Amount: %.6f",
+	// Leg 1: Buy Asset with USDT (Limit Order)
+	log.Printf("📤 PLACING LEG 1 | Market: %s | Type: buy | Amount: %.6f | Order Type: LIMIT",
 		opportunity.Path.Market1, amount1)
-	result1 := oem.placeAndWaitForOrder(opportunity.Path.Market1, "buy", amount1, 0, "Leg 1") // Price 0 for market orders
+	result1 := oem.placeAndWaitForOrder(opportunity.Path.Market1, "buy", amount1, opportunity.Price1, "Leg 1") // Use limit order with calculated price
 	if result1 == nil || result1.Status != OrderStatusFilled {
 		log.Printf("❌ LEG 1 FAILED | Market: %s | Status: %s", opportunity.Path.Market1, result1.Status)
 		return
@@ -379,10 +379,10 @@ func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity Arbit
 	results = append(results, result1)
 	log.Printf("✅ LEG 1 COMPLETED | Market: %s | Filled: %.6f", opportunity.Path.Market1, result1.FilledAmount)
 
-	// Leg 2: Sell Asset for USDC
-	log.Printf("📤 PLACING LEG 2 | Market: %s | Type: sell | Amount: %.6f",
+	// Leg 2: Sell Asset for USDC (Limit Order)
+	log.Printf("📤 PLACING LEG 2 | Market: %s | Type: sell | Amount: %.6f | Order Type: LIMIT",
 		opportunity.Path.Market2, amount2)
-	result2 := oem.placeAndWaitForOrder(opportunity.Path.Market2, "sell", amount2, 0, "Leg 2") // Price 0 for market orders
+	result2 := oem.placeAndWaitForOrder(opportunity.Path.Market2, "sell", amount2, opportunity.Price2, "Leg 2") // Use limit order with calculated price
 	if result2 == nil || result2.Status != OrderStatusFilled {
 		log.Printf("❌ LEG 2 FAILED | Market: %s | Status: %s", opportunity.Path.Market2, result2.Status)
 		return
@@ -390,10 +390,10 @@ func (oem *OrderExecutionManager) executeFOKArbitrageWithRetry(opportunity Arbit
 	results = append(results, result2)
 	log.Printf("✅ LEG 2 COMPLETED | Market: %s | Filled: %.6f", opportunity.Path.Market2, result2.FilledAmount)
 
-	// Leg 3: Sell USDC for USDT
-	log.Printf("📤 PLACING LEG 3 | Market: %s | Type: sell | Amount: %.6f",
+	// Leg 3: Sell USDC for USDT (Market Order - Special Case)
+	log.Printf("📤 PLACING LEG 3 | Market: %s | Type: sell | Amount: %.6f | Order Type: MARKET (Special Case)",
 		opportunity.Path.Market3, amount3)
-	result3 := oem.placeAndWaitForOrder(opportunity.Path.Market3, "sell", amount3, 0, "Leg 3") // Price 0 for market orders
+	result3 := oem.placeAndWaitForOrder(opportunity.Path.Market3, "sell", amount3, 0, "Leg 3") // Price 0 for market order
 	if result3 == nil || result3.Status != OrderStatusFilled {
 		log.Printf("❌ LEG 3 FAILED | Market: %s | Status: %s", opportunity.Path.Market3, result3.Status)
 		return
@@ -1149,10 +1149,10 @@ func (ae *ArbitrageEngine) discoverTriangularArbitrageCycles(availableMarkets []
 							Asset2:     "USDC",
 							Market1:    asset + "USDT", // Buy asset with USDT
 							Market2:    asset + "USDC", // Sell asset for USDC
-							Market3:    quotePair,      // Buy USDT with USDC
+							Market3:    quotePair,      // Sell USDC for USDT
 							Direction1: "buy",          // Buy asset with USDT
 							Direction2: "sell",         // Sell asset for USDC
-							Direction3: "buy",          // Buy USDT with USDC (FIXED: was "sell")
+							Direction3: "sell",         // Sell USDC for USDT
 						}
 
 						paths = append(paths, path1)
@@ -1792,14 +1792,8 @@ func (ae *ArbitrageEngine) calculateProfit(path TriangularPath, price1, price2, 
 	// Sell all qty1 Asset, get USDC after fee
 	qty2 = qty1 * price2 * (1.0 - fee2)
 
-	// Leg 3: USDC to USDT (direction can be buy or sell)
-	if path.Direction3 == "buy" {
-		// Buy USDT with USDC: divide by ask price
-		qty3 = qty2 / price3 * (1.0 - fee3)
-	} else {
-		// Sell USDC for USDT: multiply by bid price
-		qty3 = qty2 * price3 * (1.0 - fee3)
-	}
+	// Leg 3: USDC to USDT (direction is always sell in this path)
+	qty3 = qty2 * price3 * (1.0 - fee3)
 
 	// Calculate final profit using the correct formula
 	// qty3 is the final quantity after completing the triangular arbitrage (with fees already deducted)

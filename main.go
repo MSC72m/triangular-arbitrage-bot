@@ -272,6 +272,10 @@ func main() {
 		}
 	}
 
+	// Wait for initial WebSocket data to arrive before checking market data
+	log.Printf("Waiting 300ms for initial WebSocket data to arrive...")
+	time.Sleep(300 * time.Millisecond)
+
 	// Update triangular paths in the arbitrage engine
 	arbitrageEngine.UpdateTriangularPaths(arbitrageMarkets, completeAssets)
 

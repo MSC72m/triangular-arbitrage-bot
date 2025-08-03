@@ -1380,11 +1380,23 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 		map[bool]string{true: "SIMULATION", false: "REAL API"}[c.config.SimulationMode],
 		tracker.Market, tracker.Type, tracker.Amount, tracker.Price)
 
-	// Place market order for FOK behavior
-	log.Printf("📤 PLACING FOK ORDER | Market: %s | Type: %s | Amount: %.6f",
-		tracker.Market, tracker.Type, tracker.Amount)
+	// Determine order type based on price
+	var actualOrderID string
+	var err error
 
-	actualOrderID, err := c.placeRealMarketOrder(tracker)
+	if strings.HasSuffix(tracker.Market, "USDT") || strings.HasSuffix(tracker.Market, "USDC") {
+		// Market order - execute at current market price
+		// Always use market order for USDCUSDT (3rd leg of arbitrage)
+		log.Printf("📤 PLACING MARKET ORDER | Market: %s | Type: %s | Amount: %.6f",
+			tracker.Market, tracker.Type, tracker.Amount)
+		actualOrderID, err = c.placeRealMarketOrder(tracker)
+	} else {
+		// Limit order - execute at specified price
+		log.Printf("📤 PLACING LIMIT ORDER | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
+			tracker.Market, tracker.Type, tracker.Amount, tracker.Price)
+		actualOrderID, err = c.placeRealLimitOrder(tracker)
+	}
+
 	if err != nil {
 		log.Printf("❌ ORDER PLACEMENT FAILED | Market: %s | Error: %v", tracker.Market, err)
 		result := &OrderResult{
@@ -1598,6 +1610,100 @@ func (c *coinexClient) placeRealMarketOrder(tracker *FOKOrderTracker) (string, e
 
 	log.Printf("❌ ORDER ID MISSING | Market: %s | Data: %+v", tracker.Market, data)
 	return "", fmt.Errorf("invalid market order response format - no order_id")
+}
+
+// placeRealLimitOrder places a real limit order via CoinEx API v2
+func (c *coinexClient) placeRealLimitOrder(tracker *FOKOrderTracker) (string, error) {
+	log.Printf("📤 PLACING LIMIT ORDER | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
+		tracker.Market, tracker.Type, tracker.Amount, tracker.Price)
+
+	// Use v2 API for spot trading
+	timestamp := time.Now().UnixMilli()
+	method := "POST"
+	requestPath := "/v2/spot/order"
+
+	// Prepare JSON body for v2 API - Use limit order type with specified price
+	orderData := map[string]interface{}{
+		"market":      tracker.Market,
+		"market_type": "SPOT",
+		"side":        tracker.Type,
+		"type":        "limit", // Limit orders with specified price
+		"amount":      fmt.Sprintf("%.8f", tracker.Amount),
+		"price":       fmt.Sprintf("%.8f", tracker.Price), // Include price for limit orders
+		"client_id":   fmt.Sprintf("FOK_%s_%d", tracker.Market, timestamp),
+		"is_hide":     false,
+		"stp_mode":    "both",
+	}
+
+	// Convert to JSON string
+	bodyBytes, err := json.Marshal(orderData)
+	if err != nil {
+		log.Printf("❌ ORDER MARSHAL ERROR | Market: %s | Error: %v", tracker.Market, err)
+		return "", fmt.Errorf("failed to marshal order data: %w", err)
+	}
+	body := string(bodyBytes)
+
+	log.Printf("📋 ORDER DATA | Market: %s | Body: %s", tracker.Market, body)
+
+	// Generate v2 signature
+	signature := c.generateRESTSignature(method, requestPath, "", body, timestamp)
+
+	// Set v2 authentication headers
+	authHeaders := map[string]string{
+		"X-COINEX-KEY":       c.apiKey,
+		"X-COINEX-SIGN":      signature,
+		"X-COINEX-TIMESTAMP": strconv.FormatInt(timestamp, 10),
+	}
+
+	// Merge auth headers with existing headers
+	c.httpClient.mergeHeaders(authHeaders)
+
+	// Prepare request parameters
+	requestParams := map[string]string{
+		"url":    "https://api.coinex.com" + requestPath,
+		"method": method,
+		"body":   body,
+	}
+
+	log.Printf("📤 SENDING ORDER REQUEST | Market: %s | URL: %s", tracker.Market, requestParams["url"])
+
+	// Make API call
+	response, err := c.httpClient.performRequest(requestParams, POST)
+	if err != nil {
+		log.Printf("❌ ORDER REQUEST FAILED | Market: %s | Error: %v", tracker.Market, err)
+		return "", fmt.Errorf("API request failed: %w", err)
+	}
+
+	log.Printf("📥 ORDER RESPONSE | Market: %s | Response: %+v", tracker.Market, response)
+
+	// Check response
+	if code, ok := response["code"].(float64); !ok || code != 0 {
+		message, _ := response["message"].(string)
+		log.Printf("❌ ORDER API ERROR | Market: %s | Code: %.0f | Message: %s", tracker.Market, code, message)
+		return "", fmt.Errorf("CoinEx API error: code=%.0f, message=%s", code, message)
+	}
+
+	// Extract order data
+	data, ok := response["data"].(map[string]interface{})
+	if !ok {
+		log.Printf("❌ ORDER RESPONSE FORMAT ERROR | Market: %s | Missing data field", tracker.Market)
+		return "", fmt.Errorf("invalid response format: missing data")
+	}
+
+	// For limit orders, we need to get the order_id for polling
+	if orderIDValue, exists := data["order_id"]; exists {
+		if orderIDStr, ok := orderIDValue.(string); ok && orderIDStr != "" {
+			log.Printf("✅ LIMIT ORDER PLACED SUCCESSFULLY | Market: %s | ID: %s", tracker.Market, orderIDStr)
+			return orderIDStr, nil
+		} else if orderIDFloat, ok := orderIDValue.(float64); ok {
+			orderIDStr := fmt.Sprintf("%.0f", orderIDFloat)
+			log.Printf("✅ LIMIT ORDER PLACED SUCCESSFULLY | Market: %s | ID: %s", tracker.Market, orderIDStr)
+			return orderIDStr, nil
+		}
+	}
+
+	log.Printf("❌ ORDER ID MISSING | Market: %s | Data: %+v", tracker.Market, data)
+	return "", fmt.Errorf("invalid limit order response format - no order_id")
 }
 
 // pollRealOrderStatus polls the real order status from CoinEx API until timeout

@@ -1662,18 +1662,12 @@ func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, mar
 		var price float64
 		var err error
 
-		// Use order book prices based on direction
-		if direction == "buy" {
-			// For buy orders, use the ask price (asks[0]) - what sellers are asking for
-			if len(marketData.Asks) == 0 {
-				return 0, fmt.Errorf("no ask orders available for %s", market)
-			}
-			price, err = strconv.ParseFloat(marketData.Asks[0].Price, 64)
-			if err != nil {
-				return 0, fmt.Errorf("invalid ask price format for %s: %v", market, err)
-			}
-		} else if direction == "sell" {
-			// For sell orders, use the bid price (bids[0]) - what buyers are bidding for
+		// Use order book prices based on direction.
+		// For "sell", use the highest price buyers are willing to pay (best bid: bids[0]).
+		// For "buy", use the lowest price sellers are willing to accept (best ask: asks[0]).
+		switch direction {
+		case "sell":
+			// Use highest bid (bids[0]) for selling (you sell to the highest bidder)
 			if len(marketData.Bids) == 0 {
 				return 0, fmt.Errorf("no bid orders available for %s", market)
 			}
@@ -1681,7 +1675,16 @@ func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, mar
 			if err != nil {
 				return 0, fmt.Errorf("invalid bid price format for %s: %v", market, err)
 			}
-		} else {
+		case "buy":
+			// Use lowest ask (asks[0]) for buying (you buy from the lowest seller)
+			if len(marketData.Asks) == 0 {
+				return 0, fmt.Errorf("no ask orders available for %s", market)
+			}
+			price, err = strconv.ParseFloat(marketData.Asks[0].Price, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid ask price format for %s: %v", market, err)
+			}
+		default:
 			return 0, fmt.Errorf("invalid direction: %s", direction)
 		}
 
@@ -1804,7 +1807,7 @@ func (ae *ArbitrageEngine) calculateProfit(path TriangularPath, price1, price2, 
 
 	// Debug logging for profit calculation
 	if detectionStart.UnixNano()%10000 == 0 { // Log ~0.01% of calculations
-		log.Printf("Path: %s→%s→%s | RoundTrip: %.8f | NetProfit: %.8f%% | Fees: %.4f%%, %.4f%%, %.4f%% | Order Book Prices: %.8f, %.8f, %.8f | Directions: %s, %s, %s",
+		log.Printf("Path: %s→%s→%s | RoundTrip: %.8f | NetProfit: %.8f%% | Fees: %.4f%%, %.4f%%, %.4f%% | Asks[0]: %.8f, Bids[0]: %.8f, Bids[0]: %.8f | Directions: %s, %s, %s",
 			path.Market1, path.Market2, path.Market3,
 			roundTripRate, netProfit*100, fee1*100, fee2*100, fee3*100, price1, price2, price3, path.Direction1, path.Direction2, path.Direction3)
 

@@ -74,9 +74,8 @@ type HttpClient struct {
 	// Market depths reference for resubscription
 	marketDepths *MarketDepths
 
-	// Flag to track initial phase (full updates only)
-	isInitialPhase bool
-	initialPhaseMu sync.RWMutex
+	// Flag to track initial phase (full updates only) - DEPRECATED
+	// We now use REST API for initial data and WebSocket with is_full=false for incremental updates
 }
 
 func newHttpClient(config *Config) *HttpClient {
@@ -84,7 +83,7 @@ func newHttpClient(config *Config) *HttpClient {
 		config:              config,
 		headers:             make(map[string]string),
 		wsSubscriptions:     make(map[string]bool),
-		wsDataFeed:          make(chan []byte, config.WebSocketBufferSize), // Configurable buffer size
+		wsDataFeed:          make(chan []byte, config.WebSocketBufferSize), // Reasonable buffer for incremental updates
 		marketData:          make(map[string]*OrderBook),
 		rateLimiter:         NewRateLimiter(config.RateLimitPerSecond, config.RateLimitPerSecond),
 		wsUrl:               "wss://socket.coinex.com/v2/spot", // Original CoinEx spot WebSocket URL
@@ -1025,126 +1024,86 @@ func (c *HttpClient) UnsubscribeWebSocket(markets []string) error {
 	return nil
 }
 
-// SwitchToIncrementalUpdates switches from full snapshots to incremental updates
-// This should be called after initial subscriptions have received data
+// SwitchToIncrementalUpdates is deprecated - we now use REST API for initial data
+// and WebSocket with is_full=false for incremental updates only
 func (c *HttpClient) SwitchToIncrementalUpdates(markets []string, marketDepths *MarketDepths) error {
-	fmt.Printf("🔄 Switching to incremental updates for %d markets...\n", len(markets))
+	fmt.Printf("⚠️ SwitchToIncrementalUpdates is deprecated - using simplified flow\n")
 
-	// First, unsubscribe from current subscriptions
-	if err := c.UnsubscribeWebSocket(markets); err != nil {
-		return fmt.Errorf("failed to unsubscribe for incremental switch: %w", err)
-	}
-
-	// Wait a moment for unsubscription to take effect
-	time.Sleep(2 * time.Second)
-
-	// Then subscribe with incremental updates (full=false)
+	// Just subscribe with is_full=false directly
 	if err := c.SubscribeWebSocket(markets, false); err != nil {
 		return fmt.Errorf("failed to subscribe for incremental updates: %w", err)
 	}
 
-	fmt.Printf("✅ Successfully switched to incremental updates for %d markets\n", len(markets))
+	fmt.Printf("✅ Subscribed to incremental updates for %d markets\n", len(markets))
 	return nil
 }
 
-// WaitForMarketData waits for data to be available for specified markets
+// WaitForMarketData is deprecated - we now use REST API for initial data
+// and don't need to wait for WebSocket data
 func (c *HttpClient) WaitForMarketData(markets []string, marketDepths *MarketDepths, timeout time.Duration) ([]string, []string) {
-	fmt.Printf("⏳ Waiting for market data for %d markets (timeout: %v)...\n", len(markets), timeout)
+	fmt.Printf("⚠️ WaitForMarketData is deprecated - using REST API for initial data\n")
 
-	startTime := time.Now()
-	availableMarkets := []string{}
-	missingMarkets := []string{}
+	// Return all markets as available since we get initial data via REST API
+	availableMarkets := make([]string, len(markets))
+	copy(availableMarkets, markets)
 
-	for time.Since(startTime) < timeout {
-		availableMarkets = []string{}
-		missingMarkets = []string{}
-
-		for _, market := range markets {
-			if orderBook, exists := marketDepths.Load(market); exists && orderBook != nil {
-				if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
-					availableMarkets = append(availableMarkets, market)
-				} else {
-					missingMarkets = append(missingMarkets, market)
-				}
-			} else {
-				missingMarkets = append(missingMarkets, market)
-			}
-		}
-
-		// If ALL markets have data, we're done
-		if len(missingMarkets) == 0 {
-			fmt.Printf("✅ ALL %d markets have data after %v\n", len(markets), time.Since(startTime))
-			return availableMarkets, missingMarkets
-		}
-
-		// Log progress every 2 seconds
-		if time.Since(startTime)%2*time.Second < 100*time.Millisecond {
-			fmt.Printf("⏳ Still waiting for %d markets: %v\n", len(missingMarkets), missingMarkets[:Min(5, len(missingMarkets))])
-		}
-
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	fmt.Printf("⚠️ Timeout reached. %d markets have data, %d still missing\n", len(availableMarkets), len(missingMarkets))
-	return availableMarkets, missingMarkets
+	return availableMarkets, []string{}
 }
 
-// SubscribeWebSocketWithFullFlow implements the complete subscription flow:
+// SubscribeWebSocketWithFullFlow implements a simplified subscription flow:
 //
-// PHASE 1 (Initial): Subscribe with full=true → Wait for full snapshots → Process ONLY full updates
-// PHASE 2 (Incremental): Unsubscribe → Resubscribe with full=false → Process both full and incremental updates
+// 1. Get initial market data via REST API for all markets
+// 2. Fill data stores with initial data
+// 3. Subscribe to WebSocket with is_full=false for incremental updates only
 //
-// CRITICAL: During PHASE 1, ONLY full updates (is_full=true) are processed.
-// Incremental updates received during PHASE 1 are SKIPPED to ensure data integrity.
-//
-// 1. Subscribe with full=true for initial snapshots ONLY
-// 2. Wait for data to arrive (ONLY full updates during this phase)
-// 3. Switch to incremental updates (full=false)
+// This approach avoids the complex full/incremental switching and ensures we have
+// initial data before starting WebSocket subscriptions.
 func (c *HttpClient) SubscribeWebSocketWithFullFlow(markets []string, marketDepths *MarketDepths) error {
-	fmt.Printf("🔄 Starting full subscription flow for %d markets...\n", len(markets))
-	fmt.Printf("📋 PHASE 1: Initial subscription with full=true ONLY (no incremental updates)\n")
+	fmt.Printf("🔄 Starting simplified subscription flow for %d markets...\n", len(markets))
 
-	// Enable initial phase - only full updates will be processed
-	c.SetInitialPhase(true)
+	// Step 1: Get initial market data via REST API
+	fmt.Printf("📡 Step 1: Getting initial market data via REST API...\n")
+	successfulMarkets := []string{}
+	failedMarkets := []string{}
 
-	// Step 1: Subscribe with full=true for initial snapshots ONLY
-	fmt.Printf("📡 Step 1: Subscribing with full=true for complete snapshots...\n")
-	if err := c.SubscribeWebSocket(markets, true); err != nil {
-		// Disable initial phase on error
-		c.SetInitialPhase(false)
-		return fmt.Errorf("failed initial subscription: %w", err)
-	}
-	fmt.Printf("✅ Step 1 complete: Subscribed with full=true for %d markets\n", len(markets))
-
-	// Step 2: Wait for data to arrive (ONLY full updates during this phase)
-	fmt.Printf("⏳ Step 2: Waiting for full snapshots to arrive (30s timeout)...\n")
-	fmt.Printf("📋 NOTE: During this phase, we expect ONLY full updates (is_full=true), NO incremental updates\n")
-	availableMarkets, missingMarkets := c.WaitForMarketData(markets, marketDepths, 30*time.Second)
-
-	if len(missingMarkets) > 0 {
-		fmt.Printf("⚠️ %d markets still missing data after initial subscription: %v\n", len(missingMarkets), missingMarkets)
-		// Continue with available markets only
-		markets = availableMarkets
-	}
-	fmt.Printf("✅ Step 2 complete: %d markets have full snapshot data\n", len(availableMarkets))
-
-	// Step 3: Switch to incremental updates for markets that have data
-	if len(markets) > 0 {
-		fmt.Printf("📋 PHASE 2: Switching to incremental updates (full=false)\n")
-		fmt.Printf("📡 Step 3: Unsubscribing and resubscribing with full=false for incremental updates...\n")
-		if err := c.SwitchToIncrementalUpdates(markets, marketDepths); err != nil {
-			// Disable initial phase on error
-			c.SetInitialPhase(false)
-			return fmt.Errorf("failed to switch to incremental updates: %w", err)
+	for i, market := range markets {
+		// Progress logging every 10 markets
+		if i%10 == 0 {
+			fmt.Printf("📡 Processing market %d/%d: %s\n", i+1, len(markets), market)
 		}
-		fmt.Printf("✅ Step 3 complete: Switched to incremental updates for %d markets\n", len(markets))
+
+		// Get initial order book via REST API
+		orderBook, err := c.GetOrderBookREST(market)
+		if err != nil {
+			fmt.Printf("❌ Failed to get initial data for %s: %v\n", market, err)
+			failedMarkets = append(failedMarkets, market)
+			continue
+		}
+
+		// Store the initial data in market depths
+		marketDepths.Store(market, orderBook)
+		successfulMarkets = append(successfulMarkets, market)
+
+		// Small delay to avoid overwhelming the REST API
+		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Disable initial phase - now allow both full and incremental updates
-	c.SetInitialPhase(false)
+	fmt.Printf("✅ Step 1 complete: %d markets have initial data, %d failed\n", len(successfulMarkets), len(failedMarkets))
 
-	fmt.Printf("✅ Full subscription flow completed for %d markets\n", len(markets))
-	fmt.Printf("📋 SUMMARY: Initial phase (full=true) → Wait for snapshots → Switch to incremental (full=false)\n")
+	// Step 2: Subscribe to WebSocket with is_full=false for incremental updates only
+	if len(successfulMarkets) > 0 {
+		fmt.Printf("📡 Step 2: Subscribing to WebSocket with incremental updates (is_full=false)...\n")
+		if err := c.SubscribeWebSocket(successfulMarkets, false); err != nil {
+			return fmt.Errorf("failed to subscribe to WebSocket: %w", err)
+		}
+		fmt.Printf("✅ Step 2 complete: Subscribed to %d markets for incremental updates\n", len(successfulMarkets))
+	} else {
+		fmt.Printf("⚠️ No markets available for WebSocket subscription\n")
+		return fmt.Errorf("no markets available for WebSocket subscription")
+	}
+
+	fmt.Printf("✅ Simplified subscription flow completed for %d markets\n", len(successfulMarkets))
+	fmt.Printf("📋 SUMMARY: REST API initial data → WebSocket incremental updates\n")
 	return nil
 }
 
@@ -1284,11 +1243,11 @@ func (c *HttpClient) ResubscribeToMarkets(marketDepths *MarketDepths) error {
 		return nil // No markets to resubscribe
 	}
 
-	fmt.Printf("🔄 Resubscribing to %d markets after reconnection with full flow...\n", len(subscribedMarkets))
+	fmt.Printf("🔄 Resubscribing to %d markets after reconnection...\n", len(subscribedMarkets))
 
-	// Use the new full subscription flow for resubscription
+	// Use the simplified subscription flow for resubscription
 	if err := c.SubscribeWebSocketWithFullFlow(subscribedMarkets, marketDepths); err != nil {
-		return fmt.Errorf("failed to resubscribe with full flow: %w", err)
+		return fmt.Errorf("failed to resubscribe: %w", err)
 	}
 
 	fmt.Printf("✅ Resubscription complete for %d markets\n", len(subscribedMarkets))
@@ -1368,12 +1327,20 @@ func (c *HttpClient) GetOrderBookREST(market string) (*OrderBook, error) {
 		}
 	}
 
-	// Fetch latest price for this market
+	// Fetch latest price for this market (optional - don't fail if unavailable)
 	if latestPrice, err := c.GetMarketTicker(market); err == nil {
 		orderBook.Latest = latestPrice
 		log.Printf("✅ REST API order book parsed for %s: %d bids, %d asks, latest: %.8f", market, len(orderBook.Bids), len(orderBook.Asks), orderBook.Latest)
 	} else {
-		log.Printf("✅ REST API order book parsed for %s: %d bids, %d asks, no latest price available", market, len(orderBook.Bids), len(orderBook.Asks))
+		// Don't fail the entire order book fetch if ticker is unavailable
+		log.Printf("⚠️ REST API order book parsed for %s: %d bids, %d asks, ticker unavailable: %v", market, len(orderBook.Bids), len(orderBook.Asks), err)
+		// Set a default latest price based on the best bid/ask if available
+		if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
+			bidPrice, _ := strconv.ParseFloat(orderBook.Bids[0].Price, 64)
+			askPrice, _ := strconv.ParseFloat(orderBook.Asks[0].Price, 64)
+			orderBook.Latest = (bidPrice + askPrice) / 2 // Use mid-price as fallback
+			log.Printf("📊 Using mid-price as latest for %s: %.8f (bid: %.8f, ask: %.8f)", market, orderBook.Latest, bidPrice, askPrice)
+		}
 	}
 
 	return orderBook, nil
@@ -1394,22 +1361,22 @@ func (c *HttpClient) GetMarketTicker(market string) (float64, error) {
 	// Parse response
 	data, ok := response["data"].(map[string]interface{})
 	if !ok {
-		return 0, fmt.Errorf("invalid response format")
+		return 0, fmt.Errorf("invalid response format - missing data field")
 	}
 
 	ticker, ok := data["ticker"].(map[string]interface{})
 	if !ok {
-		return 0, fmt.Errorf("invalid ticker format")
+		return 0, fmt.Errorf("invalid ticker format - missing ticker field")
 	}
 
 	lastPriceStr, ok := ticker["last"].(string)
 	if !ok {
-		return 0, fmt.Errorf("missing last price")
+		return 0, fmt.Errorf("missing last price in ticker data")
 	}
 
 	price, err := strconv.ParseFloat(lastPriceStr, 64)
 	if err != nil {
-		return 0, fmt.Errorf("invalid price format: %v", err)
+		return 0, fmt.Errorf("invalid price format '%s': %v", lastPriceStr, err)
 	}
 
 	return price, nil
@@ -1713,10 +1680,21 @@ func (c *HttpClient) ProcessRetryQueue(marketDepths *MarketDepths) {
 	failed := []string{}
 
 	for _, market := range readyMarkets {
-		// Use incremental subscription for retries - full=false for incremental updates
+		// First try to get initial data via REST API
+		orderBook, err := c.GetOrderBookREST(market)
+		if err != nil {
+			failed = append(failed, market)
+			log.Printf("❌ REST API retry failed for %s: %v", market, err)
+			continue
+		}
+
+		// Store the initial data
+		marketDepths.Store(market, orderBook)
+
+		// Then subscribe to WebSocket with incremental updates
 		if err := c.SubscribeWebSocket([]string{market}, false); err != nil {
 			failed = append(failed, market)
-			log.Printf("❌ Retry failed for %s: %v", market, err)
+			log.Printf("❌ WebSocket retry failed for %s: %v", market, err)
 		} else {
 			successful = append(successful, market)
 			c.RemoveFailedMarket(market)
@@ -1797,21 +1775,18 @@ func (c *HttpClient) SetMarketDepths(marketDepths *MarketDepths) {
 	c.marketDepths = marketDepths
 }
 
-// SetInitialPhase sets the initial phase flag
+// SetInitialPhase is deprecated - we now use REST API for initial data
 func (c *HttpClient) SetInitialPhase(isInitial bool) {
-	c.initialPhaseMu.Lock()
-	defer c.initialPhaseMu.Unlock()
-	c.isInitialPhase = isInitial
+	// No longer needed - we use REST API for initial data
 	if isInitial {
-		fmt.Printf("📋 INITIAL PHASE ENABLED: Only full updates (is_full=true) will be processed\n")
+		fmt.Printf("📋 INITIAL PHASE DEPRECATED: Using REST API for initial data\n")
 	} else {
-		fmt.Printf("📋 INITIAL PHASE DISABLED: Both full and incremental updates will be processed\n")
+		fmt.Printf("📋 INITIAL PHASE DEPRECATED: Using REST API for initial data\n")
 	}
 }
 
-// IsInitialPhase checks if we're in the initial phase
+// IsInitialPhase is deprecated - we now use REST API for initial data
 func (c *HttpClient) IsInitialPhase() bool {
-	c.initialPhaseMu.RLock()
-	defer c.initialPhaseMu.RUnlock()
-	return c.isInitialPhase
+	// Always return false since we don't use this logic anymore
+	return false
 }

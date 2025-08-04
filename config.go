@@ -133,7 +133,7 @@ func DefaultConfig() *Config {
 		// WebSocket defaults
 		WebSocketTimeout:    30,
 		ReconnectAttempts:   5,
-		WebSocketBufferSize: 1024, // Default buffer size
+		WebSocketBufferSize: 1024, // Reasonable buffer size for incremental updates
 
 		// Execution defaults
 		OrderTimeout:       30,

@@ -214,15 +214,8 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 	// Check if this is a full snapshot or incremental update
 	isFull, _ := data["is_full"].(bool)
 
-	// Check if we're in initial phase and enforce full updates only
-	if httpClient != nil && httpClient.IsInitialPhase() {
-		if !isFull {
-			// During initial phase, skip incremental updates
-			log.Printf("⏭️ SKIPPING INCREMENTAL UPDATE | Market: %s | Reason: Initial phase - only full updates allowed", marketName)
-			return nil
-		}
-		log.Printf("✅ PROCESSING FULL UPDATE | Market: %s | Reason: Initial phase - full updates only", marketName)
-	}
+	// Process all updates (both full and incremental) since we have initial data from REST API
+	log.Printf("📝 Processing order book update for market: %s (isFull: %v)", marketName, isFull)
 
 	// Extract latest price - try multiple locations
 	var latestPrice float64 = 0

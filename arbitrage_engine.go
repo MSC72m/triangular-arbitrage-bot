@@ -297,13 +297,6 @@ func (oem *OrderExecutionManager) IsShutdown() bool {
 
 // ExecuteArbitrageOrders executes all three legs of an arbitrage trade with advanced FOK handling
 func (oem *OrderExecutionManager) ExecuteArbitrageOrders(opportunity ArbitrageOpportunity) {
-	// GLOBAL EXECUTION LOCK - Only ONE arbitrage opportunity can be executed at a time
-	oem.executionLock.Lock()
-	defer oem.executionLock.Unlock()
-
-	log.Printf("🔒 GLOBAL EXECUTION LOCK ACQUIRED | Path: %s→%s→%s | Only ONE opportunity executing at a time",
-		opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
-
 	// Check if we're shutting down
 	if oem.IsShutdown() {
 		log.Printf("🚫 EXECUTION CANCELLED | Shutdown in progress")
@@ -312,9 +305,6 @@ func (oem *OrderExecutionManager) ExecuteArbitrageOrders(opportunity ArbitrageOp
 
 	path := opportunity.Path
 	markets := oem.assetLockManager.extractAssetsFromPath(path)
-
-	// Always unmark from execution cache at the end
-	defer oem.assetLockManager.UnmarkAssetInExecution(path)
 
 	// Log asset availability before starting
 	log.Printf("🔍 ASSET AVAILABILITY CHECK | Path: %s→%s→%s | Assets to lock: %v",
@@ -328,12 +318,12 @@ func (oem *OrderExecutionManager) ExecuteArbitrageOrders(opportunity ArbitrageOp
 	}
 	log.Printf("✅ MARKETS LOCKED | Markets: %v", markets)
 
+	// Always unmark from execution cache at the end
+	defer oem.assetLockManager.UnmarkAssetInExecution(path)
+
 	// Execute FOK arbitrage with no retries
 	log.Printf("🚀 STARTING FOK ARBITRAGE EXECUTION | Path: %s→%s→%s", path.Market1, path.Market2, path.Market3)
 	oem.executeFOKArbitrageWithRetry(opportunity, markets, 0)
-
-	log.Printf("🔓 GLOBAL EXECUTION LOCK RELEASED | Path: %s→%s→%s | Ready for next opportunity",
-		opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
 }
 
 // executeFOKArbitrageWithRetry executes a triangular arbitrage with FOK orders
@@ -796,24 +786,10 @@ func (ae *ArbitrageEngine) executionWorker() {
 			log.Printf("🔧 EXECUTION WORKER STOPPING")
 			return
 		case opportunity := <-ae.executionChan:
-			// Check if we're already executing an opportunity
-			ae.executionMutex.Lock()
-			if ae.isExecuting {
-				ae.executionMutex.Unlock()
-				log.Printf("🚫 EXECUTION BLOCKED | Another opportunity is currently executing | Path: %s→%s→%s",
-					opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
-				continue
-			}
-			ae.isExecuting = true
-			ae.executionMutex.Unlock()
-
-			// Ensure we reset the flag when done
-			defer func() {
-				ae.executionMutex.Lock()
-				ae.isExecuting = false
-				ae.executionMutex.Unlock()
-				log.Printf("🔓 EXECUTION FLAG RESET | Ready for next opportunity")
-			}()
+			// GLOBAL EXECUTION LOCK - Only ONE arbitrage opportunity can be processed at a time
+			ae.orderExecutionManager.executionLock.Lock()
+			log.Printf("🔒 GLOBAL EXECUTION LOCK ACQUIRED | Path: %s→%s→%s | Only ONE opportunity executing at a time",
+				opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
 
 			// Log execution worker status
 			channelLength := len(ae.executionChan)
@@ -826,6 +802,7 @@ func (ae *ArbitrageEngine) executionWorker() {
 			if ae.orderExecutionManager.IsShutdown() {
 				log.Printf("🚫 EXECUTION REJECTED | Shutdown in progress | Path: %s→%s→%s",
 					opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
+				ae.orderExecutionManager.executionLock.Unlock()
 				continue
 			}
 
@@ -833,6 +810,7 @@ func (ae *ArbitrageEngine) executionWorker() {
 			if ae.isOpportunityAlreadyExecuted(opportunity) {
 				log.Printf("🚫 DUPLICATE OPPORTUNITY REJECTED | Path: %s→%s→%s",
 					opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
+				ae.orderExecutionManager.executionLock.Unlock()
 				continue
 			}
 
@@ -849,10 +827,17 @@ func (ae *ArbitrageEngine) executionWorker() {
 			} else {
 				// Use the new order execution manager - this will block until completion
 				log.Printf("🚀 REAL EXECUTION MODE | Starting real arbitrage execution")
+				log.Printf("📋 ORDER EXECUTION FLOW | Leg 1: Buy %s → Leg 2: Sell %s → Leg 3: Sell %s",
+					opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
 				ae.orderExecutionManager.ExecuteArbitrageOrders(opportunity)
 			}
 
 			log.Printf("✅ EXECUTION WORKER | Completed sequential execution | Path: %s→%s→%s | Ready for next opportunity",
+				opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
+
+			// Release the execution lock
+			ae.orderExecutionManager.executionLock.Unlock()
+			log.Printf("🔓 GLOBAL EXECUTION LOCK RELEASED | Path: %s→%s→%s | Ready for next opportunity",
 				opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
 
 			// Log that execution worker is ready for next opportunity
@@ -944,10 +929,6 @@ type ArbitrageEngine struct {
 	// Track executed opportunities to prevent duplicates
 	executedOpportunities map[string]time.Time
 	executedMutex         sync.RWMutex
-
-	// Execution control - ensure only ONE opportunity is executed at a time
-	isExecuting    bool
-	executionMutex sync.Mutex
 }
 
 // NewArbitrageEngine creates a new arbitrage engine
@@ -966,8 +947,6 @@ func NewArbitrageEngine(config *Config, marketDepths *MarketDepths, metrics *Met
 		stopChan:              make(chan struct{}),
 		executedOpportunities: make(map[string]time.Time),
 		executedMutex:         sync.RWMutex{},
-		isExecuting:           false,
-		executionMutex:        sync.Mutex{},
 	}
 }
 
@@ -1543,18 +1522,6 @@ func (ae *ArbitrageEngine) scanForOpportunities(scannerID int, scanCount int) {
 
 			// Mark asset as in execution before sending to channel
 			if ae.assetLockManager.MarkAssetInExecution(path) {
-				// ADDITIONAL CHECK: Ensure we're not already executing another opportunity
-				ae.executionMutex.Lock()
-				if ae.isExecuting {
-					ae.executionMutex.Unlock()
-					log.Printf("🚫 EXECUTION BLOCKED | Another opportunity is currently executing | Path: %s→%s→%s",
-						opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3)
-					// Unmark the asset since we're not going to execute
-					ae.assetLockManager.UnmarkAssetInExecution(path)
-					continue
-				}
-				ae.executionMutex.Unlock()
-
 				// Check execution channel capacity before sending
 				log.Printf("📊 EXECUTION CHANNEL STATUS | Unbuffered channel - will block until execution worker is ready")
 

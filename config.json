@@ -25,6 +25,7 @@
   "defaultTradingFee": 0.002,
   "webSocketTimeout": 30,
   "reconnectAttempts": 3,
+  "webSocketBufferSize": 20000,
   "orderTimeout": 30,
   "enablePaperTrading": false,
   "fokOrderSettings": {

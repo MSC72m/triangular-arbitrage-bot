@@ -70,6 +70,13 @@ type HttpClient struct {
 
 	// Flag to indicate if WebSocket data processing has been stopped
 	wsProcessingStopped bool
+
+	// Market depths reference for resubscription
+	marketDepths *MarketDepths
+
+	// Flag to track initial phase (full updates only)
+	isInitialPhase bool
+	initialPhaseMu sync.RWMutex
 }
 
 func newHttpClient(config *Config) *HttpClient {
@@ -77,7 +84,7 @@ func newHttpClient(config *Config) *HttpClient {
 		config:              config,
 		headers:             make(map[string]string),
 		wsSubscriptions:     make(map[string]bool),
-		wsDataFeed:          make(chan []byte, 2000), // Buffered channel
+		wsDataFeed:          make(chan []byte, config.WebSocketBufferSize), // Configurable buffer size
 		marketData:          make(map[string]*OrderBook),
 		rateLimiter:         NewRateLimiter(config.RateLimitPerSecond, config.RateLimitPerSecond),
 		wsUrl:               "wss://socket.coinex.com/v2/spot", // Original CoinEx spot WebSocket URL
@@ -246,7 +253,7 @@ func (c *HttpClient) ConnectWebSocket() error {
 		"method": "depth.subscribe",
 		"params": map[string]interface{}{
 			"market_list": [][]interface{}{
-				{"BTCUSDT", 10, "0", true}, // merge=0 for precise numbers
+				{"BTCUSDT", 10, "0", true}, // merge=0 for precise numbers, full=true for initial
 			},
 		},
 		"id": time.Now().UnixNano(),
@@ -819,7 +826,7 @@ func (c *HttpClient) handleReconnection() {
 			time.Sleep(2 * time.Second)
 
 			// Resubscribe to previously subscribed markets
-			if err := c.ResubscribeToMarkets(); err != nil {
+			if err := c.ResubscribeToMarkets(c.marketDepths); err != nil {
 				fmt.Printf("⚠️  Failed to resubscribe to markets: %v\n", err)
 			}
 
@@ -829,7 +836,7 @@ func (c *HttpClient) handleReconnection() {
 }
 
 // SubscribeWebSocket subscribes to all markets at once using the correct format
-func (c *HttpClient) SubscribeWebSocket(markets []string) error {
+func (c *HttpClient) SubscribeWebSocket(markets []string, isFull bool) error {
 	c.mu.Lock()
 
 	if !c.wsConnected || c.wsConn == nil {
@@ -841,7 +848,7 @@ func (c *HttpClient) SubscribeWebSocket(markets []string) error {
 	totalMarkets := len(markets)
 	successfulSubscriptions := 0
 
-	fmt.Printf("📡 Subscribing to %d markets in batches of %d...\n", totalMarkets, c.config.wsSubscriptionsBatchSize)
+	fmt.Printf("📡 Subscribing to %d markets in batches of %d (isFull: %v)...\n", totalMarkets, c.config.wsSubscriptionsBatchSize, isFull)
 
 	for i := 0; i < totalMarkets; i += c.config.wsSubscriptionsBatchSize {
 		end := i + c.config.wsSubscriptionsBatchSize
@@ -865,12 +872,12 @@ func (c *HttpClient) SubscribeWebSocket(markets []string) error {
 			// - market: market name
 			// - depth: order book depth (use config value)
 			// - merge: 0 for precise numbers (no aggregation)
-			// - full: false to allow incremental updates
-			marketList[j] = []interface{}{market, c.config.OrderBookDepthLimit, "0", false}
+			// - full: isFull parameter for full vs incremental updates
+			marketList[j] = []interface{}{market, c.config.OrderBookDepthLimit, "0", isFull}
 		}
 
 		// Use CoinEx's correct subscription format with market_list
-		// Set merge=0 for precise numbers, full=false for incremental updates
+		// Set merge=0 for precise numbers, full=isFull for full/incremental updates
 		subMsg := map[string]interface{}{
 			"method": "depth.subscribe",
 			"params": map[string]interface{}{
@@ -939,11 +946,205 @@ func (c *HttpClient) SubscribeWebSocket(markets []string) error {
 
 	c.mu.Unlock()
 
-	fmt.Printf("✅ All subscriptions completed: %d/%d markets\n", successfulSubscriptions, totalMarkets)
+	fmt.Printf("✅ All subscriptions completed: %d/%d markets (isFull: %v)\n", successfulSubscriptions, totalMarkets, isFull)
 
-	// Wait a moment for all subscriptions to be processed
+	// Wait longer for initial data to arrive (as requested)
+	if isFull {
+		fmt.Printf("⏳ Waiting for initial full snapshots to arrive...\n")
+		time.Sleep(5 * time.Second) // Increased wait time for initial data
+	} else {
+		fmt.Printf("⏳ Waiting for incremental subscriptions to be processed...\n")
+		time.Sleep(2 * time.Second)
+	}
+
+	return nil
+}
+
+// UnsubscribeWebSocket unsubscribes from markets
+func (c *HttpClient) UnsubscribeWebSocket(markets []string) error {
+	c.mu.Lock()
+
+	if !c.wsConnected || c.wsConn == nil {
+		c.mu.Unlock()
+		return fmt.Errorf("websocket not connected")
+	}
+
+	fmt.Printf("📡 Unsubscribing from %d markets...\n", len(markets))
+
+	// Prepare market list for unsubscription
+	var marketList = make([][]interface{}, len(markets))
+	for j, market := range markets {
+		// Format: [market, depth, merge, full]
+		// For unsubscription, we use the same format but with depth=0 to indicate unsubscribe
+		marketList[j] = []interface{}{market, 0, "0", false}
+	}
+
+	// Use CoinEx's unsubscription format
+	unsubMsg := map[string]interface{}{
+		"method": "depth.unsubscribe",
+		"params": map[string]interface{}{
+			"market_list": marketList,
+		},
+		"id": time.Now().UnixNano(),
+	}
+
+	// Get the connection reference while holding the lock
+	conn := c.wsConn
+
+	// Remove markets from subscriptions BEFORE releasing the lock
+	for _, market := range markets {
+		delete(c.wsSubscriptions, market)
+	}
+	c.mu.Unlock()
+
+	// Set a write deadline to prevent indefinite blocking
+	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return fmt.Errorf("failed to set write deadline for unsubscription: %w", err)
+	}
+
+	// Send unsubscription message using direct WriteJSON with timeout protection
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- conn.WriteJSON(unsubMsg)
+	}()
+
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			return fmt.Errorf("websocket unsubscription write error: %w", err)
+		}
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("websocket unsubscription write timeout")
+	}
+
+	fmt.Printf("✅ Unsubscription completed for %d markets\n", len(markets))
+
+	// Wait a moment for unsubscription to be processed
+	time.Sleep(1 * time.Second)
+
+	return nil
+}
+
+// SwitchToIncrementalUpdates switches from full snapshots to incremental updates
+// This should be called after initial subscriptions have received data
+func (c *HttpClient) SwitchToIncrementalUpdates(markets []string, marketDepths *MarketDepths) error {
+	fmt.Printf("🔄 Switching to incremental updates for %d markets...\n", len(markets))
+
+	// First, unsubscribe from current subscriptions
+	if err := c.UnsubscribeWebSocket(markets); err != nil {
+		return fmt.Errorf("failed to unsubscribe for incremental switch: %w", err)
+	}
+
+	// Wait a moment for unsubscription to take effect
 	time.Sleep(2 * time.Second)
 
+	// Then subscribe with incremental updates (full=false)
+	if err := c.SubscribeWebSocket(markets, false); err != nil {
+		return fmt.Errorf("failed to subscribe for incremental updates: %w", err)
+	}
+
+	fmt.Printf("✅ Successfully switched to incremental updates for %d markets\n", len(markets))
+	return nil
+}
+
+// WaitForMarketData waits for data to be available for specified markets
+func (c *HttpClient) WaitForMarketData(markets []string, marketDepths *MarketDepths, timeout time.Duration) ([]string, []string) {
+	fmt.Printf("⏳ Waiting for market data for %d markets (timeout: %v)...\n", len(markets), timeout)
+
+	startTime := time.Now()
+	availableMarkets := []string{}
+	missingMarkets := []string{}
+
+	for time.Since(startTime) < timeout {
+		availableMarkets = []string{}
+		missingMarkets = []string{}
+
+		for _, market := range markets {
+			if orderBook, exists := marketDepths.Load(market); exists && orderBook != nil {
+				if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
+					availableMarkets = append(availableMarkets, market)
+				} else {
+					missingMarkets = append(missingMarkets, market)
+				}
+			} else {
+				missingMarkets = append(missingMarkets, market)
+			}
+		}
+
+		// If ALL markets have data, we're done
+		if len(missingMarkets) == 0 {
+			fmt.Printf("✅ ALL %d markets have data after %v\n", len(markets), time.Since(startTime))
+			return availableMarkets, missingMarkets
+		}
+
+		// Log progress every 2 seconds
+		if time.Since(startTime)%2*time.Second < 100*time.Millisecond {
+			fmt.Printf("⏳ Still waiting for %d markets: %v\n", len(missingMarkets), missingMarkets[:Min(5, len(missingMarkets))])
+		}
+
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	fmt.Printf("⚠️ Timeout reached. %d markets have data, %d still missing\n", len(availableMarkets), len(missingMarkets))
+	return availableMarkets, missingMarkets
+}
+
+// SubscribeWebSocketWithFullFlow implements the complete subscription flow:
+//
+// PHASE 1 (Initial): Subscribe with full=true → Wait for full snapshots → Process ONLY full updates
+// PHASE 2 (Incremental): Unsubscribe → Resubscribe with full=false → Process both full and incremental updates
+//
+// CRITICAL: During PHASE 1, ONLY full updates (is_full=true) are processed.
+// Incremental updates received during PHASE 1 are SKIPPED to ensure data integrity.
+//
+// 1. Subscribe with full=true for initial snapshots ONLY
+// 2. Wait for data to arrive (ONLY full updates during this phase)
+// 3. Switch to incremental updates (full=false)
+func (c *HttpClient) SubscribeWebSocketWithFullFlow(markets []string, marketDepths *MarketDepths) error {
+	fmt.Printf("🔄 Starting full subscription flow for %d markets...\n", len(markets))
+	fmt.Printf("📋 PHASE 1: Initial subscription with full=true ONLY (no incremental updates)\n")
+
+	// Enable initial phase - only full updates will be processed
+	c.SetInitialPhase(true)
+
+	// Step 1: Subscribe with full=true for initial snapshots ONLY
+	fmt.Printf("📡 Step 1: Subscribing with full=true for complete snapshots...\n")
+	if err := c.SubscribeWebSocket(markets, true); err != nil {
+		// Disable initial phase on error
+		c.SetInitialPhase(false)
+		return fmt.Errorf("failed initial subscription: %w", err)
+	}
+	fmt.Printf("✅ Step 1 complete: Subscribed with full=true for %d markets\n", len(markets))
+
+	// Step 2: Wait for data to arrive (ONLY full updates during this phase)
+	fmt.Printf("⏳ Step 2: Waiting for full snapshots to arrive (30s timeout)...\n")
+	fmt.Printf("📋 NOTE: During this phase, we expect ONLY full updates (is_full=true), NO incremental updates\n")
+	availableMarkets, missingMarkets := c.WaitForMarketData(markets, marketDepths, 30*time.Second)
+
+	if len(missingMarkets) > 0 {
+		fmt.Printf("⚠️ %d markets still missing data after initial subscription: %v\n", len(missingMarkets), missingMarkets)
+		// Continue with available markets only
+		markets = availableMarkets
+	}
+	fmt.Printf("✅ Step 2 complete: %d markets have full snapshot data\n", len(availableMarkets))
+
+	// Step 3: Switch to incremental updates for markets that have data
+	if len(markets) > 0 {
+		fmt.Printf("📋 PHASE 2: Switching to incremental updates (full=false)\n")
+		fmt.Printf("📡 Step 3: Unsubscribing and resubscribing with full=false for incremental updates...\n")
+		if err := c.SwitchToIncrementalUpdates(markets, marketDepths); err != nil {
+			// Disable initial phase on error
+			c.SetInitialPhase(false)
+			return fmt.Errorf("failed to switch to incremental updates: %w", err)
+		}
+		fmt.Printf("✅ Step 3 complete: Switched to incremental updates for %d markets\n", len(markets))
+	}
+
+	// Disable initial phase - now allow both full and incremental updates
+	c.SetInitialPhase(false)
+
+	fmt.Printf("✅ Full subscription flow completed for %d markets\n", len(markets))
+	fmt.Printf("📋 SUMMARY: Initial phase (full=true) → Wait for snapshots → Switch to incremental (full=false)\n")
 	return nil
 }
 
@@ -954,7 +1155,8 @@ func (c *HttpClient) SubscribeWebSocketWithRetry(markets []string, maxRetries in
 	}
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		err := c.SubscribeWebSocket(markets)
+		// Use the full flow to ensure proper incremental updates after initial phase
+		err := c.SubscribeWebSocketWithFullFlow(markets, c.marketDepths)
 		if err == nil {
 			return nil
 		}
@@ -1070,7 +1272,7 @@ func (c *HttpClient) ValidateWebSocketDataHealth(expectedMarkets []string) ([]st
 }
 
 // ResubscribeToMarkets resubscribes to all previously subscribed markets
-func (c *HttpClient) ResubscribeToMarkets() error {
+func (c *HttpClient) ResubscribeToMarkets(marketDepths *MarketDepths) error {
 	c.mu.RLock()
 	subscribedMarkets := make([]string, 0, len(c.wsSubscriptions))
 	for market := range c.wsSubscriptions {
@@ -1082,51 +1284,14 @@ func (c *HttpClient) ResubscribeToMarkets() error {
 		return nil // No markets to resubscribe
 	}
 
-	fmt.Printf("🔄 Resubscribing to %d markets after reconnection...\n", len(subscribedMarkets))
+	fmt.Printf("🔄 Resubscribing to %d markets after reconnection with full flow...\n", len(subscribedMarkets))
 
-	successful := []string{}
-	failed := []string{}
-
-	// Resubscribe in larger batches for faster processing
-	batchSize := 10 // Increased from 5 to 10
-	for i := 0; i < len(subscribedMarkets); i += batchSize {
-		end := i + batchSize
-		if end > len(subscribedMarkets) {
-			end = len(subscribedMarkets)
-		}
-
-		batch := subscribedMarkets[i:end]
-		fmt.Printf("   📡 Resubscribing batch %d-%d (%d markets)...\n", i+1, end, len(batch))
-
-		for _, market := range batch {
-			if err := c.SubscribeWebSocketWithRetry([]string{market}, 2); err != nil {
-				failed = append(failed, market)
-				fmt.Printf("   ❌ Failed to resubscribe to %s: %v\n", market, err)
-			} else {
-				successful = append(successful, market)
-			}
-
-			// Shorter delay between resubscriptions
-			time.Sleep(150 * time.Millisecond) // Reduced from 200ms to 150ms
-		}
-
-		// Shorter wait between batches
-		if end < len(subscribedMarkets) {
-			time.Sleep(500 * time.Millisecond) // Reduced from 1s to 500ms
-		}
+	// Use the new full subscription flow for resubscription
+	if err := c.SubscribeWebSocketWithFullFlow(subscribedMarkets, marketDepths); err != nil {
+		return fmt.Errorf("failed to resubscribe with full flow: %w", err)
 	}
 
-	fmt.Printf("🔄 Resubscription complete: %d successful, %d failed\n", len(successful), len(failed))
-
-	if len(failed) > 0 {
-		// Remove failed markets from subscription cache
-		c.mu.Lock()
-		for _, market := range failed {
-			delete(c.wsSubscriptions, market)
-		}
-		c.mu.Unlock()
-	}
-
+	fmt.Printf("✅ Resubscription complete for %d markets\n", len(subscribedMarkets))
 	return nil
 }
 
@@ -1450,7 +1615,8 @@ func (c *HttpClient) SubscribeWebSocketWithValidation(market string) error {
 		return fmt.Errorf("market %s appears to be invalid", market)
 	}
 
-	return c.SubscribeWebSocket([]string{market})
+	// Use the full flow to ensure proper incremental updates after initial phase
+	return c.SubscribeWebSocketWithFullFlow([]string{market}, c.marketDepths)
 }
 
 // TestMarketSubscription tests subscription to a specific market and provides detailed feedback
@@ -1471,8 +1637,8 @@ func (c *HttpClient) TestMarketSubscription(market string) error {
 		return fmt.Errorf("market %s appears to be invalid", market)
 	}
 
-	// Try subscription
-	err := c.SubscribeWebSocket([]string{market})
+	// Try subscription using full flow
+	err := c.SubscribeWebSocketWithFullFlow([]string{market}, c.marketDepths)
 	if err != nil {
 		return fmt.Errorf("subscription failed: %w", err)
 	}
@@ -1535,7 +1701,7 @@ func (c *HttpClient) GetFailedMarkets() []string {
 }
 
 // ProcessRetryQueue processes the retry queue for failed markets
-func (c *HttpClient) ProcessRetryQueue() {
+func (c *HttpClient) ProcessRetryQueue(marketDepths *MarketDepths) {
 	readyMarkets := c.GetFailedMarkets()
 	if len(readyMarkets) == 0 {
 		return
@@ -1547,12 +1713,14 @@ func (c *HttpClient) ProcessRetryQueue() {
 	failed := []string{}
 
 	for _, market := range readyMarkets {
-		if err := c.SubscribeWebSocketWithRetry([]string{market}, 2); err != nil {
+		// Use incremental subscription for retries - full=false for incremental updates
+		if err := c.SubscribeWebSocket([]string{market}, false); err != nil {
 			failed = append(failed, market)
 			log.Printf("❌ Retry failed for %s: %v", market, err)
 		} else {
 			successful = append(successful, market)
 			c.RemoveFailedMarket(market)
+			log.Printf("✅ Retry successful for %s", market)
 		}
 
 		// Small delay between retries
@@ -1563,7 +1731,7 @@ func (c *HttpClient) ProcessRetryQueue() {
 }
 
 // StartRetryQueueProcessor starts a background process to handle failed market retries
-func (c *HttpClient) StartRetryQueueProcessor() {
+func (c *HttpClient) StartRetryQueueProcessor(marketDepths *MarketDepths) {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds
 		defer ticker.Stop()
@@ -1574,7 +1742,7 @@ func (c *HttpClient) StartRetryQueueProcessor() {
 				return
 			case <-ticker.C:
 				if c.IsWebSocketConnected() {
-					c.ProcessRetryQueue()
+					c.ProcessRetryQueue(marketDepths)
 				}
 			}
 		}
@@ -1622,4 +1790,28 @@ func (c *HttpClient) StopWebSocketProcessing() {
 	log.Printf("🛑 WEBSOCKET DATA PROCESSING STOPPED | No new market data will be processed")
 }
 
-// CloseWebSocket closes the WebSocket connection
+// SetMarketDepths sets the market depths reference for resubscription
+func (c *HttpClient) SetMarketDepths(marketDepths *MarketDepths) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.marketDepths = marketDepths
+}
+
+// SetInitialPhase sets the initial phase flag
+func (c *HttpClient) SetInitialPhase(isInitial bool) {
+	c.initialPhaseMu.Lock()
+	defer c.initialPhaseMu.Unlock()
+	c.isInitialPhase = isInitial
+	if isInitial {
+		fmt.Printf("📋 INITIAL PHASE ENABLED: Only full updates (is_full=true) will be processed\n")
+	} else {
+		fmt.Printf("📋 INITIAL PHASE DISABLED: Both full and incremental updates will be processed\n")
+	}
+}
+
+// IsInitialPhase checks if we're in the initial phase
+func (c *HttpClient) IsInitialPhase() bool {
+	c.initialPhaseMu.RLock()
+	defer c.initialPhaseMu.RUnlock()
+	return c.isInitialPhase
+}

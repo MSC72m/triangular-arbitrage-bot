@@ -72,8 +72,9 @@ type Config struct {
 	DefaultTradingFee float64            `json:"defaultTradingFee"` // Default trading fee percentage
 
 	// WebSocket Configuration
-	WebSocketTimeout  int `json:"webSocketTimeout"`  // WebSocket timeout in seconds
-	ReconnectAttempts int `json:"reconnectAttempts"` // Max reconnection attempts
+	WebSocketTimeout    int `json:"webSocketTimeout"`    // WebSocket timeout in seconds
+	ReconnectAttempts   int `json:"reconnectAttempts"`   // Max reconnection attempts
+	WebSocketBufferSize int `json:"webSocketBufferSize"` // WebSocket data feed buffer size
 
 	// Execution Configuration
 	OrderTimeout       int  `json:"orderTimeout"`       // Order timeout in seconds
@@ -130,8 +131,9 @@ func DefaultConfig() *Config {
 		DefaultTradingFee: 0.002,
 
 		// WebSocket defaults
-		WebSocketTimeout:  30,
-		ReconnectAttempts: 5,
+		WebSocketTimeout:    30,
+		ReconnectAttempts:   5,
+		WebSocketBufferSize: 1024, // Default buffer size
 
 		// Execution defaults
 		OrderTimeout:       30,

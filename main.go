@@ -125,6 +125,9 @@ func main() {
 	metrics := NewMetrics()
 	arbitrageEngine := NewArbitrageEngine(config, marketDepths, metrics, coinexClient)
 
+	// Set market depths reference in HttpClient for resubscription
+	httpClient.SetMarketDepths(marketDepths)
+
 	// Connect to WebSocket using integrated HttpClient
 	log.Println("Connecting to WebSocket...")
 	if err := httpClient.ConnectWebSocket(); err != nil {
@@ -133,7 +136,7 @@ func main() {
 	log.Println("WebSocket connected successfully")
 
 	// Start retry queue processor for failed WebSocket markets
-	httpClient.StartRetryQueueProcessor()
+	httpClient.StartRetryQueueProcessor(marketDepths)
 	log.Println("Retry queue processor started")
 
 	// Test WebSocket connection with a single subscription
@@ -175,8 +178,8 @@ func main() {
 	log.Printf("COMPLETE ASSETS: %v", completeAssets)
 
 	// Subscribe to all markets IMMEDIATELY after discovering them
-	log.Printf("📡 Subscribing to %d markets immediately after discovery...", len(arbitrageMarkets))
-	if err := httpClient.SubscribeWebSocket(arbitrageMarkets); err != nil {
+	log.Printf("📡 Subscribing to %d markets immediately after discovery with full flow...", len(arbitrageMarkets))
+	if err := httpClient.SubscribeWebSocketWithFullFlow(arbitrageMarkets, marketDepths); err != nil {
 		log.Printf("❌ Immediate subscription failed: %v", err)
 		log.Fatal("Cannot proceed without market subscriptions")
 	}
@@ -193,13 +196,13 @@ func main() {
 			messageCounter++
 
 			// Log first few messages for debugging
-			if messageCounter <= 5 {
+			if messageCounter <= 3 {
 				log.Printf("Processing message #%d: %s", messageCounter, string(msg)[:Min(200, len(msg))])
 			}
 
 			// Process WebSocket message
 			if err := processWebSocketMessage(msg, marketDepths, metrics, httpClient); err != nil {
-				if messageCounter%100 == 0 { // Log errors more frequently for debugging
+				if messageCounter%1000 == 0 { // Reduced logging frequency to improve performance
 					log.Printf("WebSocket message processing error: %v | Message preview: %s",
 						err, string(msg)[:Min(200, len(msg))])
 				}
@@ -207,7 +210,7 @@ func main() {
 			}
 
 			// Log processing stats periodically
-			if messageCounter%1000 == 0 || messageCounter <= 10 {
+			if messageCounter%5000 == 0 || messageCounter <= 5 { // Reduced logging frequency
 				log.Printf("Processed %d WebSocket messages successfully", messageCounter)
 			}
 		}

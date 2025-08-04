@@ -1161,12 +1161,14 @@ func (c *coinexClient) findCompleteAssets(usdtAssets, usdcAssets []string) ([]st
 			// Add both markets for this asset
 			triangularMarkets = append(triangularMarkets, usdtAssetMap[asset])
 			triangularMarkets = append(triangularMarkets, usdcMarket)
-			fmt.Printf("    ✅ Complete asset: %s → Markets: %s, %s\n",
-				asset, usdtAssetMap[asset], usdcMarket)
-		} else {
-			fmt.Printf("    ❌ Incomplete asset: %s (has USDT but no USDC)\n", asset)
 		}
 	}
+
+	fmt.Printf("    Complete assets found: %d\n", len(completeAssets))
+	fmt.Printf("    Incomplete assets found: %d\n", len(usdtAssetMap)+len(usdcAssetMap)-len(completeAssets))
+	fmt.Printf("    USDT assets found: %d\n", len(usdtAssetMap))
+	fmt.Printf("    USDC assets found: %d\n", len(usdcAssetMap))
+	fmt.Printf("    Triangular markets found: %d\n", len(triangularMarkets))
 
 	// Check for assets that have USDC but no USDT
 	for asset := range usdcAssetMap {
@@ -1985,7 +1987,7 @@ func (c *coinexClient) buildQueryString(params map[string]string) string {
 
 // EnsureCriticalMarketData ensures critical markets have data via WebSocket only
 func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, marketDepths *MarketDepths) {
-	log.Printf(" Ensuring critical markets have WebSocket data: %v", criticalMarkets)
+	log.Printf("🔄 Ensuring critical markets have WebSocket data: %v", criticalMarkets)
 
 	failedCount := 0
 	for _, market := range criticalMarkets {
@@ -1993,27 +1995,23 @@ func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, market
 		if orderBook, exists := marketDepths.Load(market); exists && orderBook != nil {
 			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
 				// Market already has WebSocket data, skip
-				log.Printf(" %s already has WebSocket data, skipping", market)
+				log.Printf("✅ %s already has WebSocket data, skipping", market)
 				continue
 			}
 		}
 
-		// Try to subscribe to the market via WebSocket
-		log.Printf(" Attempting WebSocket subscription for %s...", market)
-		if err := c.httpClient.SubscribeWebSocketWithRetry([]string{market}, 2); err != nil {
-			log.Printf(" WebSocket subscription failed for %s: %v", market, err)
-			// Just log the failure, don't add to retry queue
-			// c.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
+		// Try to subscribe to the market via WebSocket using full flow
+		log.Printf("🔄 Attempting WebSocket subscription for %s with full flow...", market)
+		if err := c.httpClient.SubscribeWebSocketWithFullFlow([]string{market}, marketDepths); err != nil {
+			log.Printf("❌ WebSocket subscription failed for %s: %v", market, err)
 			failedCount++
 		} else {
-			log.Printf(" WebSocket subscription successful for %s", market)
-			// Wait a moment for data to arrive
-			time.Sleep(1 * time.Second)
+			log.Printf("✅ WebSocket subscription successful for %s", market)
 
 			// Check if we now have WebSocket data
 			if orderBook, exists := marketDepths.Load(market); exists && orderBook != nil {
 				if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
-					log.Printf(" %s data available via WebSocket | Bids: %d | Asks: %d",
+					log.Printf("✅ %s data available via WebSocket | Bids: %d | Asks: %d",
 						market, len(orderBook.Bids), len(orderBook.Asks))
 					continue
 				}
@@ -2021,63 +2019,48 @@ func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, market
 		}
 
 		// No REST API fallback - if WebSocket fails, just log it
-		log.Printf(" ⚠️ %s has no WebSocket data", market)
-		// c.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
+		log.Printf("⚠️ %s has no WebSocket data", market)
 		failedCount++
 	}
 
-	log.Printf(" 📊 Critical markets WebSocket summary: %d failed out of %d total", failedCount, len(criticalMarkets))
+	log.Printf("📊 Critical markets WebSocket summary: %d failed out of %d total", failedCount, len(criticalMarkets))
 }
 
 // FetchCriticalMarketsViaWebSocket fetches order book data for critical markets via WebSocket only
 // This is used as a primary data source for quote currencies and other critical markets
 func (c *coinexClient) FetchCriticalMarketsViaWebSocket(markets []string, marketDepths *MarketDepths) {
-	log.Printf(" Subscribing to critical markets via WebSocket: %v", markets)
+	log.Printf("🔄 Subscribing to critical markets via WebSocket with full flow: %v", markets)
 
+	// Use the new full subscription flow that:
+	// 1. Subscribes with full=true for initial snapshots
+	// 2. Waits for data to arrive
+	// 3. Switches to incremental updates (full=false)
+	if err := c.httpClient.SubscribeWebSocketWithFullFlow(markets, marketDepths); err != nil {
+		log.Printf("❌ Failed to subscribe to critical markets with full flow: %v", err)
+		return
+	}
+
+	// Verify that we have data for all critical markets
 	successCount := 0
 	failedCount := 0
 
 	for _, market := range markets {
-		log.Printf(" 🔍 Subscribing to %s via WebSocket...", market)
-
-		// Subscribe via WebSocket
-		if err := c.httpClient.SubscribeWebSocketWithRetry([]string{market}, 2); err != nil {
-			log.Printf(" ❌ Failed to subscribe to %s via WebSocket: %v", market, err)
-			failedCount++
-			// Just log the failure, don't add to retry queue
-			// c.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
-			continue
-		}
-
-		log.Printf(" ✅ WebSocket subscription successful for %s", market)
-
-		// Wait a moment for data to arrive
-		time.Sleep(1 * time.Second)
-
-		// Check if we have WebSocket data
 		if orderBook, exists := marketDepths.Load(market); exists && orderBook != nil {
 			if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
-				log.Printf(" ✅ %s subscribed via WebSocket | Bids: %d | Asks: %d",
+				log.Printf("✅ %s has WebSocket data | Bids: %d | Asks: %d",
 					market, len(orderBook.Bids), len(orderBook.Asks))
 				successCount++
 			} else {
-				log.Printf(" ⚠️ %s has empty order book via WebSocket", market)
+				log.Printf("⚠️ %s has empty order book via WebSocket", market)
 				failedCount++
-				// Just log the failure, don't add to retry queue
-				// c.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
 			}
 		} else {
-			log.Printf(" ❌ %s has no WebSocket data", market)
+			log.Printf("❌ %s has no WebSocket data", market)
 			failedCount++
-			// Just log the failure, don't add to retry queue
-			// c.httpClient.AddFailedMarket(market) // COMMENTED OUT: No retry queue
 		}
-
-		// Small delay to avoid overwhelming the WebSocket connection
-		time.Sleep(100 * time.Millisecond)
 	}
 
-	log.Printf(" 📊 WebSocket subscription complete: %d success, %d failed out of %d total", successCount, failedCount, len(markets))
+	log.Printf("📊 Critical markets WebSocket summary: %d success, %d failed out of %d total", successCount, failedCount, len(markets))
 }
 
 // GetQuoteCurrencyMarkets returns all markets for the configured quote currencies

@@ -17,7 +17,7 @@
   "orderTimeoutSeconds": 30,
   "enableOrderSimulation": false,
   "orderBookDepthLimit": 5,
-  "logLevel": "debug",
+  "logLevel": "info",
   "tradingFees": {
     "USDT": 0.002,
     "USDC": 0.002
@@ -25,7 +25,7 @@
   "defaultTradingFee": 0.002,
   "webSocketTimeout": 30,
   "reconnectAttempts": 3,
-  "webSocketBufferSize": 1024,
+  "webSocketBufferSize": 50000,
   "orderTimeout": 30,
   "enablePaperTrading": false,
   "fokOrderSettings": {
@@ -38,8 +38,8 @@
     "fokPollingFrequencyHz": 10.0
   },
   "orderExecutionSettings": {
-    "maxOrdersPerSecond": 3.0,
-    "maxConcurrentArbitrages": 3,
+    "maxOrdersPerSecond": 15.0,
+    "maxConcurrentArbitrages": 0,
     "orderAmountType": "static",
     "staticOrderAmount": 3,
     "dynamicOrderPercentage": 0.25,

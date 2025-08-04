@@ -133,7 +133,7 @@ func DefaultConfig() *Config {
 		// WebSocket defaults
 		WebSocketTimeout:    30,
 		ReconnectAttempts:   5,
-		WebSocketBufferSize: 1024, // Reasonable buffer size for incremental updates
+		WebSocketBufferSize: 50000, // Much larger buffer size to prevent overflow
 
 		// Execution defaults
 		OrderTimeout:       30,
@@ -195,40 +195,42 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 
-	fmt.Printf(" Loaded configuration:\n")
-	fmt.Printf("    Profit Threshold: %.4f%%\n", config.ProfitThreshold*100)
-	fmt.Printf("    Quote Currencies: %v\n", config.QuoteCurrencies)
-	fmt.Printf("    Include BTC: %v\n", config.IncludeBTC)
-	fmt.Printf("   🔒 Asset Locking Enabled: %v\n", config.EnableAssetLocking)
-	fmt.Printf("   ⏱️  Order Execution Time: %dms\n", config.OrderExecutionTimeMs)
-	fmt.Printf("    Max Orders Per Asset: %d\n", config.MaxConcurrentOrdersPerAsset)
-	fmt.Printf("    Order Simulation: %v\n", config.EnableOrderSimulation)
-	fmt.Printf("    Order Book Depth Limit: %d\n", config.OrderBookDepthLimit)
-	fmt.Printf("    Rate Limit Per Second: %d\n", config.RateLimitPerSecond)
-	fmt.Printf("    Rate Limit Per Minute: %d\n", config.RateLimitPerMinute)
-	fmt.Printf("    Max Latency Ms: %d\n", config.MaxLatencyMs)
-	fmt.Printf("    Concurrent Scans: %d\n", config.ConcurrentScans)
-	fmt.Printf("    Log Level: %s\n", config.LogLevel)
-	fmt.Printf("    Default Trading Fee: %.4f%%\n", config.DefaultTradingFee*100)
-	fmt.Printf("    FOK Order Settings:\n")
-	fmt.Printf("       Polling Frequency: %.1fHz\n", config.FOKOrderSettings.PollingFrequencyHz)
-	fmt.Printf("       Order Timeout: %d seconds\n", config.FOKOrderSettings.OrderTimeoutSeconds)
-	fmt.Printf("       Max Retry Attempts: %d\n", config.FOKOrderSettings.MaxRetryAttempts)
-	fmt.Printf("       Enable Aggressive Re-evaluation: %v\n", config.FOKOrderSettings.EnableAggressiveReEvaluation)
-	fmt.Printf("       Cancel All on Single Failure: %v\n", config.FOKOrderSettings.CancelAllOnSingleFailure)
-	fmt.Printf("       FOK Timeout: %d seconds\n", config.FOKOrderSettings.FOKTimeoutSeconds)
-	fmt.Printf("       FOK Polling Frequency: %.1fHz\n", config.FOKOrderSettings.FOKPollingFrequencyHz)
-	fmt.Printf("    Order Execution Settings:\n")
-	fmt.Printf("       Max Orders Per Second: %.2f\n", config.OrderExecutionSettings.MaxOrdersPerSecond)
-	fmt.Printf("       Max Concurrent Arbitrage Cycles: %d\n", config.OrderExecutionSettings.MaxConcurrentArbitrages)
-	fmt.Printf("       Order Amount Type: %s\n", config.OrderExecutionSettings.OrderAmountType)
-	fmt.Printf("       Dynamic Order Percentage: %.2f%%\n", config.OrderExecutionSettings.DynamicOrderPercentage*100)
-	fmt.Printf("       Max Volume Fraction: %.2f%%\n", config.OrderExecutionSettings.MaxVolumeFraction*100)
-	fmt.Printf("       Max Daily Spend: %.2f\n", config.OrderExecutionSettings.MaxDailySpend)
-	fmt.Printf("       Account Balance: %.2f\n", config.OrderExecutionSettings.AccountBalance)
-	fmt.Printf("       Enable Spending Limits: %v\n", config.OrderExecutionSettings.EnableSpendingLimits)
-	fmt.Printf("       Min Order Amount: %.2f\n", config.OrderExecutionSettings.MinOrderAmount)
-	fmt.Printf("       Max Order Amount: %.2f\n", config.OrderExecutionSettings.MaxOrderAmount)
+	// Log configuration details
+	logger := GetLogger()
+	logger.Info("Loaded configuration:")
+	logger.Info("Profit Threshold: %.4f%%", config.ProfitThreshold*100)
+	logger.Info("Quote Currencies: %v", config.QuoteCurrencies)
+	logger.Info("Include BTC: %v", config.IncludeBTC)
+	logger.Info("🔒 Asset Locking Enabled: %v", config.EnableAssetLocking)
+	logger.Info("⏱️ Order Execution Time: %dms", config.OrderExecutionTimeMs)
+	logger.Info("Max Orders Per Asset: %d", config.MaxConcurrentOrdersPerAsset)
+	logger.Info("Order Simulation: %v", config.EnableOrderSimulation)
+	logger.Info("Order Book Depth Limit: %d", config.OrderBookDepthLimit)
+	logger.Info("Rate Limit Per Second: %d", config.RateLimitPerSecond)
+	logger.Info("Rate Limit Per Minute: %d", config.RateLimitPerMinute)
+	logger.Info("Max Latency Ms: %d", config.MaxLatencyMs)
+	logger.Info("Concurrent Scans: %d", config.ConcurrentScans)
+	logger.Info("Log Level: %s", config.LogLevel)
+	logger.Info("Default Trading Fee: %.4f%%", config.DefaultTradingFee*100)
+	logger.Info("FOK Order Settings:")
+	logger.Info("   Polling Frequency: %.1fHz", config.FOKOrderSettings.PollingFrequencyHz)
+	logger.Info("   Order Timeout: %d seconds", config.FOKOrderSettings.OrderTimeoutSeconds)
+	logger.Info("   Max Retry Attempts: %d", config.FOKOrderSettings.MaxRetryAttempts)
+	logger.Info("   Enable Aggressive Re-evaluation: %v", config.FOKOrderSettings.EnableAggressiveReEvaluation)
+	logger.Info("   Cancel All on Single Failure: %v", config.FOKOrderSettings.CancelAllOnSingleFailure)
+	logger.Info("   FOK Timeout: %d seconds", config.FOKOrderSettings.FOKTimeoutSeconds)
+	logger.Info("   FOK Polling Frequency: %.1fHz", config.FOKOrderSettings.FOKPollingFrequencyHz)
+	logger.Info("Order Execution Settings:")
+	logger.Info("   Max Orders Per Second: %.2f", config.OrderExecutionSettings.MaxOrdersPerSecond)
+	logger.Info("   Max Concurrent Arbitrage Cycles: %d", config.OrderExecutionSettings.MaxConcurrentArbitrages)
+	logger.Info("   Order Amount Type: %s", config.OrderExecutionSettings.OrderAmountType)
+	logger.Info("   Dynamic Order Percentage: %.2f%%", config.OrderExecutionSettings.DynamicOrderPercentage*100)
+	logger.Info("   Max Volume Fraction: %.2f%%", config.OrderExecutionSettings.MaxVolumeFraction*100)
+	logger.Info("   Max Daily Spend: %.2f", config.OrderExecutionSettings.MaxDailySpend)
+	logger.Info("   Account Balance: %.2f", config.OrderExecutionSettings.AccountBalance)
+	logger.Info("   Enable Spending Limits: %v", config.OrderExecutionSettings.EnableSpendingLimits)
+	logger.Info("   Min Order Amount: %.2f", config.OrderExecutionSettings.MinOrderAmount)
+	logger.Info("   Max Order Amount: %.2f", config.OrderExecutionSettings.MaxOrderAmount)
 
 	return config, nil
 }
@@ -251,12 +253,29 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("secretID appears to be invalid (too short) - required for real trading")
 		}
 
-		fmt.Printf("  REAL TRADING MODE VALIDATION:\n")
-		fmt.Printf("   🔑 API Key: %s...%s (length: %d)\n",
-			c.APIKey[:4], c.APIKey[len(c.APIKey)-4:], len(c.APIKey))
-		fmt.Printf("   🔐 Secret Key: %s...%s (length: %d)\n",
-			c.SecretID[:4], c.SecretID[len(c.SecretID)-4:], len(c.SecretID))
-		fmt.Printf("    API credentials appear valid for real trading\n")
+		// REAL TRADING MODE VALIDATION
+		logger := GetLogger()
+		logger.Info("REAL TRADING MODE VALIDATION:")
+
+		// Helper functions for min/max
+		min := func(a, b int) int {
+			if a < b {
+				return a
+			}
+			return b
+		}
+		max := func(a, b int) int {
+			if a > b {
+				return a
+			}
+			return b
+		}
+
+		logger.Info("🔑 API Key: %s...%s (length: %d)",
+			c.APIKey[:min(len(c.APIKey), 8)], c.APIKey[max(0, len(c.APIKey)-8):], len(c.APIKey))
+		logger.Info("🔐 Secret Key: %s...%s (length: %d)",
+			c.SecretID[:min(len(c.SecretID), 8)], c.SecretID[max(0, len(c.SecretID)-8):], len(c.SecretID))
+		logger.Info("API credentials appear valid for real trading")
 	}
 
 	if c.ProfitThreshold <= 0 {
@@ -289,8 +308,8 @@ func (c *Config) Validate() error {
 	if c.OrderExecutionSettings.MaxOrdersPerSecond <= 0 {
 		return fmt.Errorf("orderExecutionSettings.maxOrdersPerSecond must be positive")
 	}
-	if c.OrderExecutionSettings.MaxConcurrentArbitrages <= 0 {
-		return fmt.Errorf("orderExecutionSettings.maxConcurrentArbitrages must be positive")
+	if c.OrderExecutionSettings.MaxConcurrentArbitrages < 0 {
+		return fmt.Errorf("orderExecutionSettings.maxConcurrentArbitrages must be 0 (unbuffered) or positive (buffered)")
 	}
 	if c.OrderExecutionSettings.DynamicOrderPercentage <= 0 || c.OrderExecutionSettings.DynamicOrderPercentage > 1 {
 		return fmt.Errorf("orderExecutionSettings.dynamicOrderPercentage must be between 0 and 1")

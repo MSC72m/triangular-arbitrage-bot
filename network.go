@@ -571,24 +571,23 @@ func (c *HttpClient) readWebSocketMessages() {
 		// Handle different message types
 		switch messageType {
 		case websocket.TextMessage:
-			// Log only first few messages and periodic summaries
-			if messageCount <= 3 {
-				fmt.Printf("📨 WebSocket Text Message #%d: %s\n", messageCount, string(message))
-			} else if messageCount%1000 == 0 {
-				// Log every 1000th message
-				fmt.Printf("📨 WebSocket Text Message #%d received\n", messageCount)
+			// Minimal logging for text messages
+			if messageCount <= 2 {
+				fmt.Printf("📨 WebSocket Text Message #%d: %s\n", messageCount, string(message)[:Min(100, len(message))])
 			}
 
 			// Send to data feed channel (non-blocking)
 			select {
 			case c.wsDataFeed <- message:
 			default:
-				fmt.Printf("⚠️  WebSocket data feed channel full, dropping message #%d\n", messageCount)
+				if messageCount%5000 == 0 {
+					fmt.Printf("⚠️  WebSocket data feed channel full, dropping message #%d\n", messageCount)
+				}
 			}
 
 		case websocket.BinaryMessage:
 			// Handle compressed binary messages
-			if messageCount <= 3 {
+			if messageCount <= 2 {
 				fmt.Printf("📦 WebSocket Binary Message #%d: %d bytes\n", messageCount, len(message))
 			}
 
@@ -596,7 +595,9 @@ func (c *HttpClient) readWebSocketMessages() {
 			reader := bytes.NewReader(message)
 			gzipReader, err := gzip.NewReader(reader)
 			if err != nil {
-				fmt.Printf("❌ Failed to create gzip reader: %v\n", err)
+				if messageCount%1000 == 0 {
+					fmt.Printf("❌ Failed to create gzip reader: %v\n", err)
+				}
 				continue
 			}
 			defer gzipReader.Close()
@@ -604,45 +605,40 @@ func (c *HttpClient) readWebSocketMessages() {
 			// Read the decompressed data
 			decompressedData, err := io.ReadAll(gzipReader)
 			if err != nil {
-				fmt.Printf("❌ Failed to decompress data: %v\n", err)
+				if messageCount%1000 == 0 {
+					fmt.Printf("❌ Failed to decompress data: %v\n", err)
+				}
 				continue
-			}
-
-			if messageCount <= 3 {
-				fmt.Printf("📦 Decompressed data: %s\n", string(decompressedData))
 			}
 
 			// Send decompressed data to data feed channel (non-blocking)
 			select {
 			case c.wsDataFeed <- decompressedData:
 			default:
-				fmt.Printf("⚠️  WebSocket data feed channel full, dropping decompressed message #%d\n", messageCount)
+				if messageCount%5000 == 0 {
+					fmt.Printf("⚠️  WebSocket data feed channel full, dropping decompressed message #%d\n", messageCount)
+				}
 			}
 
 		case websocket.PingMessage:
-			fmt.Printf("🏓 Ping received\n")
-			// Don't send pong - let the server handle it
-			// This prevents potential connection issues
+			// Don't log ping messages - too frequent
+			break
 
 		case websocket.PongMessage:
-			fmt.Printf("🏓 Pong received\n")
+			// Don't log pong messages - too frequent
+			break
 
 		case websocket.CloseMessage:
 			fmt.Printf("🔌 Close message received\n")
 			return
 
 		default:
-			fmt.Printf("📨 Unknown message type %d\n", messageType)
-		}
-
-		// Also log any error messages or subscription responses
-		if messageCount <= 10 {
-			if messageType == websocket.TextMessage {
-				fmt.Printf("📨 WebSocket Message #%d (first 10): %s\n", messageCount, string(message))
-			} else if messageType == websocket.BinaryMessage {
-				fmt.Printf("📦 WebSocket Binary Message #%d (first 10): %d bytes\n", messageCount, len(message))
+			if messageCount%1000 == 0 {
+				fmt.Printf("📨 Unknown message type %d\n", messageType)
 			}
 		}
+
+		// No need to log every message - this was causing excessive logging
 	}
 }
 
@@ -1052,58 +1048,26 @@ func (c *HttpClient) WaitForMarketData(markets []string, marketDepths *MarketDep
 
 // SubscribeWebSocketWithFullFlow implements a simplified subscription flow:
 //
-// 1. Get initial market data via REST API for all markets
-// 2. Fill data stores with initial data
-// 3. Subscribe to WebSocket with is_full=false for incremental updates only
+// 1. Skip REST API calls since data is already loaded in parallel
+// 2. Subscribe to WebSocket with is_full=false for incremental updates only
 //
-// This approach avoids the complex full/incremental switching and ensures we have
+// This approach avoids redundant REST API calls and ensures we have
 // initial data before starting WebSocket subscriptions.
 func (c *HttpClient) SubscribeWebSocketWithFullFlow(markets []string, marketDepths *MarketDepths) error {
 	fmt.Printf("🔄 Starting simplified subscription flow for %d markets...\n", len(markets))
 
-	// Step 1: Get initial market data via REST API
-	fmt.Printf("📡 Step 1: Getting initial market data via REST API...\n")
-	successfulMarkets := []string{}
-	failedMarkets := []string{}
-
-	for i, market := range markets {
-		// Progress logging every 10 markets
-		if i%10 == 0 {
-			fmt.Printf("📡 Processing market %d/%d: %s\n", i+1, len(markets), market)
-		}
-
-		// Get initial order book via REST API
-		orderBook, err := c.GetOrderBookREST(market)
-		if err != nil {
-			fmt.Printf("❌ Failed to get initial data for %s: %v\n", market, err)
-			failedMarkets = append(failedMarkets, market)
-			continue
-		}
-
-		// Store the initial data in market depths
-		marketDepths.Store(market, orderBook)
-		successfulMarkets = append(successfulMarkets, market)
-
-		// Small delay to avoid overwhelming the REST API
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	fmt.Printf("✅ Step 1 complete: %d markets have initial data, %d failed\n", len(successfulMarkets), len(failedMarkets))
+	// Skip Step 1: REST API calls since data is already loaded in parallel
+	fmt.Printf("📡 Skipping REST API calls - data already loaded in parallel\n")
 
 	// Step 2: Subscribe to WebSocket with is_full=false for incremental updates only
-	if len(successfulMarkets) > 0 {
-		fmt.Printf("📡 Step 2: Subscribing to WebSocket with incremental updates (is_full=false)...\n")
-		if err := c.SubscribeWebSocket(successfulMarkets, false); err != nil {
-			return fmt.Errorf("failed to subscribe to WebSocket: %w", err)
-		}
-		fmt.Printf("✅ Step 2 complete: Subscribed to %d markets for incremental updates\n", len(successfulMarkets))
-	} else {
-		fmt.Printf("⚠️ No markets available for WebSocket subscription\n")
-		return fmt.Errorf("no markets available for WebSocket subscription")
+	fmt.Printf("📡 Step 2: Subscribing to WebSocket with incremental updates (is_full=false)...\n")
+	if err := c.SubscribeWebSocket(markets, false); err != nil {
+		return fmt.Errorf("failed to subscribe to WebSocket: %w", err)
 	}
+	fmt.Printf("✅ Step 2 complete: Subscribed to %d markets for incremental updates\n", len(markets))
 
-	fmt.Printf("✅ Simplified subscription flow completed for %d markets\n", len(successfulMarkets))
-	fmt.Printf("📋 SUMMARY: REST API initial data → WebSocket incremental updates\n")
+	fmt.Printf("✅ Simplified subscription flow completed for %d markets\n", len(markets))
+	fmt.Printf("📋 SUMMARY: WebSocket incremental updates only (REST data already loaded)\n")
 	return nil
 }
 
@@ -1708,23 +1672,10 @@ func (c *HttpClient) ProcessRetryQueue(marketDepths *MarketDepths) {
 	log.Printf("🔄 Retry queue processed: %d successful, %d failed", len(successful), len(failed))
 }
 
-// StartRetryQueueProcessor starts a background process to handle failed market retries
+// StartRetryQueueProcessor is deprecated - no longer needed with simplified architecture
 func (c *HttpClient) StartRetryQueueProcessor(marketDepths *MarketDepths) {
-	go func() {
-		ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-c.wsStopChan:
-				return
-			case <-ticker.C:
-				if c.IsWebSocketConnected() {
-					c.ProcessRetryQueue(marketDepths)
-				}
-			}
-		}
-	}()
+	// No longer needed - simplified architecture doesn't use background retry processing
+	log.Printf("📋 RETRY QUEUE PROCESSOR DEPRECATED | Using simplified architecture")
 }
 
 // StopWebSocketProcessing stops WebSocket data processing to prevent new market data updates
@@ -1775,18 +1726,12 @@ func (c *HttpClient) SetMarketDepths(marketDepths *MarketDepths) {
 	c.marketDepths = marketDepths
 }
 
-// SetInitialPhase is deprecated - we now use REST API for initial data
-func (c *HttpClient) SetInitialPhase(isInitial bool) {
-	// No longer needed - we use REST API for initial data
-	if isInitial {
-		fmt.Printf("📋 INITIAL PHASE DEPRECATED: Using REST API for initial data\n")
-	} else {
-		fmt.Printf("📋 INITIAL PHASE DEPRECATED: Using REST API for initial data\n")
-	}
+// DisableRateLimiting temporarily disables rate limiting for bulk operations
+func (c *HttpClient) DisableRateLimiting() {
+	c.rateLimiter.Disable()
 }
 
-// IsInitialPhase is deprecated - we now use REST API for initial data
-func (c *HttpClient) IsInitialPhase() bool {
-	// Always return false since we don't use this logic anymore
-	return false
+// EnableRateLimiting re-enables rate limiting after bulk operations
+func (c *HttpClient) EnableRateLimiting() {
+	c.rateLimiter.Enable()
 }

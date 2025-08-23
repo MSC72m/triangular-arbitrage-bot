@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"log"
 	"net/http"
 	"os"
@@ -46,7 +45,6 @@ func main() {
 	log.Printf("   Max Orders Per Second: %.2f (1 order every %.1fs)",
 		config.OrderExecutionSettings.MaxOrdersPerSecond,
 		1.0/config.OrderExecutionSettings.MaxOrdersPerSecond)
-	log.Printf("   Max Concurrent Arbitrage Cycles: %d", config.OrderExecutionSettings.MaxConcurrentArbitrages)
 	log.Printf("   Order Amount Type: %s", config.OrderExecutionSettings.OrderAmountType)
 
 	if config.OrderExecutionSettings.OrderAmountType == "static" {
@@ -95,30 +93,10 @@ func main() {
 	}
 	log.Printf("✅ Connection successful: %s", connectionInfo)
 
-	// Reset concurrent orders counter to ensure clean state
-	log.Println("🔄 Resetting concurrent orders counter to ensure clean state...")
-	coinexClient.resetConcurrentOrders()
-	coinexClient.syncConcurrentOrders()
-
 	// Get initial order execution stats
 	concurrent, totalSpent, avgOrderValue := coinexClient.GetOrderExecutionStats()
-	log.Printf("📊 Initial order stats - Active: %d/%d | Total spent: $%.2f | Avg order: $%.2f",
-		concurrent, config.OrderExecutionSettings.MaxConcurrentArbitrages, totalSpent, avgOrderValue)
-
-	// Debug: Check and sync concurrent orders state
-	log.Println("🔍 Checking concurrent orders state...")
-	concurrent, _, _ = coinexClient.GetOrderExecutionStats()
-	debugActiveTrackers := coinexClient.GetActiveTrackers()
-	log.Printf("🔍 CONCURRENT ORDERS DEBUG | Counter: %d | Active trackers: %d", concurrent, len(debugActiveTrackers))
-
-	if concurrent != len(debugActiveTrackers) {
-		log.Printf("⚠️ MISMATCH DETECTED | Syncing concurrent orders counter...")
-		coinexClient.syncConcurrentOrders()
-		concurrent, _, _ = coinexClient.GetOrderExecutionStats()
-		log.Printf("✅ SYNCED | Counter: %d | Active trackers: %d", concurrent, len(debugActiveTrackers))
-	} else {
-		log.Printf("✅ CONCURRENT ORDERS SYNCED | Counter: %d | Active trackers: %d", concurrent, len(debugActiveTrackers))
-	}
+	log.Printf("📊 Initial order stats - Active: %d | Total spent: $%.2f | Avg order: $%.2f",
+		concurrent, totalSpent, avgOrderValue)
 
 	// Initialize core components
 	marketDepths := NewMarketDepths()
@@ -128,42 +106,121 @@ func main() {
 	// Set market depths reference in HttpClient for resubscription
 	httpClient.SetMarketDepths(marketDepths)
 
-	// Connect to WebSocket using integrated HttpClient
-	log.Println("Connecting to WebSocket...")
-	if err := httpClient.ConnectWebSocket(); err != nil {
-		log.Fatalf("Failed to connect to WebSocket: %v", err)
-	}
-	log.Println("WebSocket connected successfully")
+	// STEP 1: Get REST API data FIRST (for all markets in parallel)
+	log.Println("🔄 STEP 1: Getting REST API data for ALL markets in parallel...")
 
-	// Start retry queue processor for failed WebSocket markets
-	httpClient.StartRetryQueueProcessor(marketDepths)
-	log.Println("Retry queue processor started")
-
-	// Test WebSocket connection with a single subscription
-	log.Println("Testing WebSocket connection...")
-	if err := httpClient.TestWebSocketConnection(); err != nil {
-		log.Printf("WebSocket test failed: %v", err)
-		log.Println("Continuing anyway...")
-	}
-
-	// Wait for WebSocket connection to be fully stable
-	log.Println("Waiting for WebSocket connection to stabilize...")
-	time.Sleep(5 * time.Second)
-
-	// Get markets suitable for triangular arbitrage
-	log.Println("Discovering arbitrage markets...")
+	// Get arbitrage markets from REST API
+	log.Println("🔄 Getting arbitrage markets from REST API...")
 	arbitrageMarkets, completeAssets, err := coinexClient.GetArbitrageMarkets()
 	if err != nil {
 		log.Fatalf("Failed to get arbitrage markets: %v", err)
 	}
+	log.Printf("✅ REST API: Found %d markets for arbitrage (%d complete assets)", len(arbitrageMarkets), len(completeAssets))
 
-	if len(arbitrageMarkets) == 0 {
-		log.Fatal("No suitable markets found for triangular arbitrage")
+	// Get initial order book snapshots for critical markets (USDC/USDT pairs) in parallel
+	log.Println("🔄 Getting initial order book snapshots for critical markets in parallel...")
+	criticalMarkets := config.CriticalMarkets
+	criticalResults := make(chan struct {
+		market    string
+		orderBook *OrderBook
+		err       error
+	}, len(criticalMarkets))
+
+	for _, market := range criticalMarkets {
+		go func(m string) {
+			orderBook, err := httpClient.GetOrderBookREST(m)
+			criticalResults <- struct {
+				market    string
+				orderBook *OrderBook
+				err       error
+			}{m, orderBook, err}
+		}(market)
 	}
 
-	log.Printf("Found %d markets for arbitrage (%d complete assets)", len(arbitrageMarkets), len(completeAssets))
+	// Collect critical market results
+	for i := 0; i < len(criticalMarkets); i++ {
+		result := <-criticalResults
+		if result.err != nil {
+			log.Printf("⚠️ Failed to get snapshot for %s: %v", result.market, result.err)
+		} else {
+			marketDepths.Store(result.market, result.orderBook)
+			log.Printf("✅ Stored snapshot for %s: %d bids, %d asks", result.market, len(result.orderBook.Bids), len(result.orderBook.Asks))
+		}
+	}
 
-	// Log all discovered markets for debugging
+	// Get initial order book snapshots for ALL arbitrage markets in parallel
+	log.Printf("🔄 Getting initial order book snapshots for ALL %d arbitrage markets in parallel...", len(arbitrageMarkets))
+
+	// Temporarily disable rate limiting for initial data loading
+	log.Printf("🔓 Temporarily disabling rate limiting for initial data loading...")
+	httpClient.DisableRateLimiting()
+	defer httpClient.EnableRateLimiting()
+
+	// Create worker pool for parallel processing
+	numWorkers := 20 // Increased back to 20 since we disabled rate limiting
+	marketChan := make(chan string, len(arbitrageMarkets))
+	results := make(chan struct {
+		market    string
+		orderBook *OrderBook
+		err       error
+	}, len(arbitrageMarkets))
+
+	// Start workers
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for market := range marketChan {
+				log.Printf("🔗 Worker %d: Fetching %s", workerID, market)
+				orderBook, err := httpClient.GetOrderBookREST(market)
+				results <- struct {
+					market    string
+					orderBook *OrderBook
+					err       error
+				}{market, orderBook, err}
+			}
+		}(i)
+	}
+
+	// Send all markets to workers
+	for _, market := range arbitrageMarkets {
+		marketChan <- market
+	}
+	close(marketChan)
+
+	// Wait for all workers to complete
+	log.Printf("⏳ Waiting for all workers to complete...")
+	wg.Wait()
+	close(results)
+
+	// Collect results
+	successfulSnapshots := 0
+	failedSnapshots := 0
+	for result := range results {
+		if result.err != nil {
+			log.Printf("⚠️ Failed to get snapshot for %s: %v", result.market, result.err)
+			failedSnapshots++
+		} else {
+			marketDepths.Store(result.market, result.orderBook)
+			successfulSnapshots++
+
+			// Log first few markets with order book details
+			if successfulSnapshots <= 10 {
+				log.Printf("✅ Stored snapshot for %s: %d bids, %d asks", result.market, len(result.orderBook.Bids), len(result.orderBook.Asks))
+			}
+		}
+
+		// Progress logging every 25 markets
+		if (successfulSnapshots+failedSnapshots)%25 == 0 {
+			log.Printf("📊 Progress: %d successful, %d failed", successfulSnapshots, failedSnapshots)
+		}
+	}
+
+	log.Printf("✅ REST API completed: %d/%d markets successfully loaded (%d failed)", successfulSnapshots, len(arbitrageMarkets), failedSnapshots)
+	log.Printf("🔒 Re-enabling rate limiting for normal operations...")
+
+	// Log discovered markets for debugging
 	log.Printf("DISCOVERED MARKETS:")
 	for i, market := range arbitrageMarkets {
 		if i < 20 { // Show first 20 markets
@@ -177,15 +234,26 @@ func main() {
 	// Log complete assets
 	log.Printf("COMPLETE ASSETS: %v", completeAssets)
 
-	// Subscribe to all markets IMMEDIATELY after discovering them
-	log.Printf("📡 Subscribing to %d markets immediately after discovery with full flow...", len(arbitrageMarkets))
-	if err := httpClient.SubscribeWebSocketWithFullFlow(arbitrageMarkets, marketDepths); err != nil {
-		log.Printf("❌ Immediate subscription failed: %v", err)
-		log.Fatal("Cannot proceed without market subscriptions")
+	// STEP 2: Connect to WebSocket AFTER REST API is complete
+	log.Println("🔗 STEP 2: Connecting to WebSocket...")
+	if err := httpClient.ConnectWebSocket(); err != nil {
+		log.Fatalf("Failed to connect to WebSocket: %v", err)
 	}
-	log.Printf("✅ Immediate subscription completed for %d markets", len(arbitrageMarkets))
+	log.Println("✅ WebSocket connected successfully")
 
-	// Start market data processor BEFORE subscriptions
+	// Test WebSocket connection
+	log.Println("🔍 Testing WebSocket connection...")
+	if err := httpClient.TestWebSocketConnection(); err != nil {
+		log.Printf("WebSocket test failed: %v", err)
+		log.Println("Continuing anyway...")
+	}
+
+	// Wait for WebSocket connection to be fully stable
+	log.Println("⏳ Waiting for WebSocket connection to stabilize...")
+	time.Sleep(3 * time.Second)
+
+	// STEP 3: Start market data processor for WebSocket messages
+	log.Println("📡 STEP 3: Starting market data processor...")
 	messageCounter := uint64(0)
 	go func() {
 		log.Println("Starting market data processor...")
@@ -217,113 +285,32 @@ func main() {
 		log.Printf("Market data processor exited - data feed channel closed")
 	}()
 
-	// Wait for initial market data and verify it's flowing with proper synchronization
-	log.Println("Waiting for initial market data...")
+	// STEP 4: Subscribe to all markets via WebSocket (since we already have all REST data)
+	log.Println("📡 STEP 4: Subscribing to all markets via WebSocket...")
+	allMarkets := make([]string, 0, len(arbitrageMarkets)+len(criticalMarkets))
+	allMarkets = append(allMarkets, arbitrageMarkets...)
+	allMarkets = append(allMarkets, criticalMarkets...)
 
-	var wg sync.WaitGroup
-	marketDataReady := make(chan bool, 1)
-
-	// Start goroutine to monitor market data availability
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-
-		timeout := time.After(30 * time.Second) // 30 second timeout
-
-		for {
-			select {
-			case <-timeout:
-				log.Printf("Timeout waiting for initial market data")
-				marketDataReady <- false
-				return
-			case <-ticker.C:
-				initialMarkets := marketDepths.GetAvailableMarkets()
-				log.Printf("MARKET DATA CHECK: %d markets available", len(initialMarkets))
-
-				// Check if we have the critical USDCUSDT pair and at least 2 other markets
-				// For critical markets, we assume they exist - only check other markets
-				nonCriticalMarkets := 0
-				for _, market := range initialMarkets {
-					if !coinexClient.criticalMarketPriceManager.AssumeCriticalMarketExists(market) {
-						nonCriticalMarkets++
-					}
-				}
-
-				if nonCriticalMarkets >= 2 { // Reduced from 3 to 2, critical markets assumed to exist
-					log.Printf("Initial market data ready with %d non-critical markets (critical markets assumed to exist)", nonCriticalMarkets)
-					log.Printf("Market data flowing: %v", initialMarkets[:Min(10, len(initialMarkets))])
-					marketDataReady <- true
-					return
-				} else {
-					log.Printf("Have %d non-critical markets but need at least 2", nonCriticalMarkets)
-				}
-			}
-		}
-	}()
-
-	// Wait for market data to be ready
-	wg.Wait()
-	ready := <-marketDataReady
-	if !ready {
-		log.Printf("WARNING: Proceeding without sufficient market data...")
-		retryMarkets := marketDepths.GetAvailableMarkets()
-		log.Printf("   Available markets: %d", len(retryMarkets))
-		if len(retryMarkets) > 0 {
-			log.Printf("   Available: %v", retryMarkets[:Min(5, len(retryMarkets))])
-		}
+	log.Printf("Subscribing to %d markets via WebSocket for real-time updates", len(allMarkets))
+	if err := httpClient.SubscribeWebSocketWithFullFlow(allMarkets, marketDepths); err != nil {
+		log.Printf("❌ WebSocket subscription failed: %v", err)
+		log.Fatal("Cannot proceed without WebSocket subscriptions")
 	}
+	log.Printf("✅ WebSocket subscription completed for %d markets", len(allMarkets))
 
-	// Wait for initial WebSocket data to arrive before checking market data
-	log.Printf("Waiting 300ms for initial WebSocket data to arrive...")
-	time.Sleep(300 * time.Millisecond)
+	log.Printf("Final active markets count: %d", len(allMarkets))
+	arbitrageEngine.UpdateTriangularPaths(allMarkets, completeAssets)
 
-	// Update triangular paths in the arbitrage engine
-	arbitrageEngine.UpdateTriangularPaths(arbitrageMarkets, completeAssets)
+	// Wait for initial market data to arrive
+	log.Println("⏳ Waiting for initial market data...")
+	time.Sleep(3 * time.Second) // Wait for data to arrive
 
-	// Enhanced WebSocket data validation and fallback
-	log.Printf("Validating WebSocket data health...")
-
-	// Wait a bit more for WebSocket data to stabilize
-	time.Sleep(5 * time.Second)
-
-	// Validate actual data delivery vs subscriptions
-	activeWsMarkets, deadWsMarkets := httpClient.ValidateWebSocketDataHealth(arbitrageMarkets)
-
-	log.Printf("WEBSOCKET DATA HEALTH:")
-	log.Printf("   Subscribed markets: %d", len(arbitrageMarkets))
-	log.Printf("   Delivering data: %d (%.1f%%)", len(activeWsMarkets), float64(len(activeWsMarkets))/float64(len(arbitrageMarkets))*100)
-	log.Printf("   Dead subscriptions: %d", len(deadWsMarkets))
-
-	if len(deadWsMarkets) > 0 {
-		log.Printf("   Dead markets (first 10): %v", deadWsMarkets[:Min(10, len(deadWsMarkets))])
+	// Check available markets
+	availableMarkets := marketDepths.GetAvailableMarkets()
+	log.Printf("Available markets: %d", len(availableMarkets))
+	if len(availableMarkets) > 0 {
+		log.Printf("Sample markets: %v", availableMarkets[:Min(5, len(availableMarkets))])
 	}
-
-	// Define critical markets that MUST have WebSocket data
-	criticalMarkets := config.CriticalMarkets
-
-	// Subscribe to critical markets via WebSocket
-	log.Printf("CRITICAL MARKETS: %v (subscribing via WebSocket)", criticalMarkets)
-	log.Printf("   All critical markets must have WebSocket data - no REST fallback")
-
-	// Subscribe to critical markets via WebSocket
-	coinexClient.FetchCriticalMarketsViaWebSocket(criticalMarkets, marketDepths)
-
-	// Combine all markets for final arbitrage markets
-	allActiveMarkets := make([]string, 0, len(arbitrageMarkets)+len(criticalMarkets))
-	allActiveMarkets = append(allActiveMarkets, arbitrageMarkets...)
-
-	// Add critical markets to active list (subscribed via WebSocket)
-	for _, critical := range criticalMarkets {
-		allActiveMarkets = append(allActiveMarkets, critical)
-		log.Printf("Added critical market to active list: %s (subscribed via WebSocket)", critical)
-	}
-
-	log.Printf("Final active markets count: %d (WebSocket only: %d)",
-		len(allActiveMarkets), len(allActiveMarkets))
-
-	arbitrageEngine.UpdateTriangularPaths(allActiveMarkets, completeAssets)
 
 	// Start arbitrage engine
 	log.Println("Starting arbitrage engine...")
@@ -333,20 +320,7 @@ func main() {
 	metricsStopChan := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
-		priceTicker := time.NewTicker(2 * time.Minute)          // Log prices less frequently
-		debugTicker := time.NewTicker(15 * time.Second)         // Debug market data status frequently
-		criticalDataTicker := time.NewTicker(10 * time.Second)  // Fetch critical data every 10 seconds
-		dataValidationTicker := time.NewTicker(1 * time.Minute) // Validate data accuracy every minute
-		wsHealthTicker := time.NewTicker(30 * time.Second)      // Monitor WebSocket health
 		defer ticker.Stop()
-		defer priceTicker.Stop()
-		defer debugTicker.Stop()
-		defer criticalDataTicker.Stop()
-		defer dataValidationTicker.Stop()
-		defer wsHealthTicker.Stop()
-
-		lastMessageCount := int64(0)
-		lastHealthCheck := time.Now()
 
 		for {
 			select {
@@ -355,66 +329,6 @@ func main() {
 				return
 			case <-ticker.C:
 				logBasicMetrics(metrics, marketDepths)
-			case <-priceTicker.C:
-				logMarketPrices(marketDepths)
-			case <-debugTicker.C:
-				logMarketDataStatus(marketDepths, arbitrageMarkets)
-
-				// Log WebSocket connection status
-				if httpClient.IsWebSocketConnected() {
-					log.Printf("WebSocket Status: Connected")
-				} else {
-					log.Printf("WebSocket Status: Disconnected")
-				}
-			case <-criticalDataTicker.C:
-				// Monitor critical markets via WebSocket
-				log.Printf("Monitoring critical markets via WebSocket: %v", config.CriticalMarkets)
-				// Check if critical markets have WebSocket data
-				for _, critical := range config.CriticalMarkets {
-					if orderBook, exists := marketDepths.Load(critical); exists && orderBook != nil {
-						if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
-							log.Printf("✅ Critical market %s has WebSocket data | Bids: %d | Asks: %d",
-								critical, len(orderBook.Bids), len(orderBook.Asks))
-						} else {
-							log.Printf("⚠️ Critical market %s has empty order book", critical)
-							// Add to retry queue
-							// httpClient.AddFailedMarket(critical) // COMMENTED OUT: No retry queue
-						}
-					} else {
-						log.Printf("❌ Critical market %s has no WebSocket data", critical)
-						// Add to retry queue
-						// httpClient.AddFailedMarket(critical) // COMMENTED OUT: No retry queue
-					}
-				}
-			case <-dataValidationTicker.C:
-				// Validate WebSocket data accuracy against REST API
-				httpClient.ValidateWebSocketDataAccuracy(arbitrageMarkets)
-			case <-wsHealthTicker.C:
-				// Monitor WebSocket data flow
-				currentMessageCount := metrics.GetSnapshot().MessagesProcessed
-				if currentMessageCount == lastMessageCount && time.Since(lastHealthCheck) > 2*time.Minute {
-					log.Printf(" WARNING: No WebSocket messages received in last 2 minutes!")
-					log.Printf("   Last message count: %d | Current: %d", lastMessageCount, currentMessageCount)
-					log.Printf("   WebSocket connected: %v", httpClient.IsWebSocketConnected())
-				}
-				lastMessageCount = currentMessageCount
-				lastHealthCheck = time.Now()
-
-				// Periodic concurrent orders health check
-				concurrent, _, _ := coinexClient.GetOrderExecutionStats()
-				activeTrackers := coinexClient.GetActiveTrackers()
-				if concurrent != len(activeTrackers) {
-					log.Printf("⚠️ CONCURRENT ORDERS MISMATCH | Counter: %d | Active trackers: %d | Auto-syncing...",
-						concurrent, len(activeTrackers))
-					coinexClient.syncConcurrentOrders()
-				}
-
-				// Check if counter is stuck at maximum limit
-				if concurrent >= config.OrderExecutionSettings.MaxConcurrentArbitrages && len(activeTrackers) == 0 {
-					log.Printf("🚨 CONCURRENT ORDERS STUCK | Counter: %d/%d | Active trackers: 0 | Resetting counter...",
-						concurrent, config.OrderExecutionSettings.MaxConcurrentArbitrages)
-					coinexClient.resetConcurrentOrders()
-				}
 			}
 		}
 	}()
@@ -430,173 +344,23 @@ func main() {
 	<-quit
 	log.Println("🛑 Shutdown signal received, starting graceful shutdown...")
 
-	// Graceful shutdown with proper timeout
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Step 1: Stop arbitrage engine FIRST to prevent new opportunities from being queued
+	// Step 1: Stop arbitrage engine
 	log.Println("🛑 Step 1: Stopping arbitrage engine...")
 	arbitrageEngine.Stop()
 
-	// Step 2: Stop WebSocket data processing to prevent new market data updates
-	log.Println("🛑 Step 2: Stopping WebSocket data processing...")
-	httpClient.StopWebSocketProcessing()
-
-	// Step 2.5: Stop metrics logging to prevent continued output
-	log.Println("🛑 Step 2.5: Stopping metrics logging...")
+	// Step 2: Stop metrics logging
+	log.Println("🛑 Step 2: Stopping metrics logging...")
 	close(metricsStopChan)
 
-	// Step 3: Wait for active FOK orders to complete their FULL 3-leg cycles
-	log.Println("🛑 Step 3: Waiting for ALL active FOK orders to complete...")
-	activeTrackers := coinexClient.GetActiveTrackers()
-
-	// Check for any open orders on the exchange that might not be tracked
-	exchangeOrders, err := coinexClient.GetOpenOrders()
-	if err != nil {
-		log.Printf("⚠️ Cannot check exchange orders: %v", err)
-		exchangeOrders = []map[string]interface{}{} // Empty slice to avoid nil
-	}
-
-	totalActiveOrders := len(activeTrackers) + len(exchangeOrders)
-
-	if totalActiveOrders > 0 {
-		log.Printf("🔄 %d tracked orders + %d exchange orders = %d total active orders - waiting for completion...",
-			len(activeTrackers), len(exchangeOrders), totalActiveOrders)
-
-		// Wait up to 15 seconds for orders to complete
-		orderWaitCtx, orderCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer orderCancel()
-
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-orderWaitCtx.Done():
-				log.Printf("⏰ Timeout waiting for orders - forcing cancellation")
-				// Cancel all remaining orders
-				coinexClient.CancelAllActiveOrders()
-				break
-			case <-ticker.C:
-				remainingTrackers := coinexClient.GetActiveTrackers()
-				remainingExchangeOrders, _ := coinexClient.GetOpenOrders()
-				totalRemaining := len(remainingTrackers) + len(remainingExchangeOrders)
-
-				if totalRemaining == 0 {
-					log.Println("✅ All orders completed successfully")
-					break
-				}
-				log.Printf("⏳ Still waiting for %d tracked + %d exchange = %d total orders...",
-					len(remainingTrackers), len(remainingExchangeOrders), totalRemaining)
-			}
-		}
-	} else {
-		log.Println("✅ No active orders to wait for")
-	}
-
-	// Step 3.5: Reset concurrent orders if needed
-	log.Println("🛑 Step 3.5: Checking and resetting concurrent orders state...")
-	resetConcurrentOrdersIfNeeded(coinexClient)
-
-	// Step 4: Final check for any remaining orders and force cancellation
-	finalActiveTrackers := coinexClient.GetActiveTrackers()
-	finalExchangeOrders, _ := coinexClient.GetOpenOrders()
-	totalFinalOrders := len(finalActiveTrackers) + len(finalExchangeOrders)
-
-	if totalFinalOrders > 0 {
-		log.Printf("⚠️ %d tracked + %d exchange = %d total orders still active after engine stop - forcing cancellation",
-			len(finalActiveTrackers), len(finalExchangeOrders), totalFinalOrders)
-
-		// Force cancel all remaining tracked orders
-		coinexClient.CancelAllActiveOrders()
-
-		// Cancel all exchange orders by market
-		marketsToCancel := make(map[string]bool)
-		for _, order := range finalExchangeOrders {
-			if market, ok := order["market"].(string); ok {
-				marketsToCancel[market] = true
-			}
-		}
-
-		// Cancel all orders for each market
-		for market := range marketsToCancel {
-			if err := coinexClient.CancelAllOrders(market); err != nil {
-				log.Printf("❌ Failed to cancel all orders for market %s: %v", market, err)
-			} else {
-				log.Printf("✅ Cancelled all orders for market %s", market)
-			}
-		}
-
-		// Wait up to 5 seconds for cancellation to complete
-		remainingWaitCtx, remainingCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer remainingCancel()
-
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-remainingWaitCtx.Done():
-				finalRemainingTrackers := coinexClient.GetActiveTrackers()
-				finalRemainingExchange, _ := coinexClient.GetOpenOrders()
-				totalRemaining := len(finalRemainingTrackers) + len(finalRemainingExchange)
-				log.Printf("⏰ Timeout waiting for %d remaining orders - forcing shutdown", totalRemaining)
-				goto ClosingProgram
-			case <-ticker.C:
-				remainingTrackers := coinexClient.GetActiveTrackers()
-				remainingExchange, _ := coinexClient.GetOpenOrders()
-				totalRemaining := len(remainingTrackers) + len(remainingExchange)
-
-				if totalRemaining == 0 {
-					log.Println("✅ All remaining orders cancelled")
-					break
-				}
-				log.Printf("⏳ Still waiting for %d tracked + %d exchange = %d total orders to cancel...",
-					len(remainingTrackers), len(remainingExchange), totalRemaining)
-			}
-		}
-	ClosingProgram:
-	}
-
-	// Step 5: Close WebSocket connection
-	log.Println("🛑 Step 4: Closing WebSocket connection...")
+	// Step 3: Close WebSocket connection
+	log.Println("🛑 Step 3: Closing WebSocket connection...")
 	if err := httpClient.CloseWebSocket(); err != nil {
 		log.Printf("❌ Error closing WebSocket: %v", err)
 	}
 
-	// Step 6: Final metrics log
+	// Step 4: Final metrics log
 	log.Println("📊 Final metrics:")
 	logSimpleMetrics(metrics, marketDepths)
 
-	// Step 7: Wait for shutdown or timeout
-	done := make(chan struct{})
-	go func() {
-		// Simulate cleanup completion
-		time.Sleep(1 * time.Second)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		log.Println("✅ Graceful shutdown completed")
-	case <-shutdownCtx.Done():
-		log.Println("⏰ Shutdown timeout exceeded")
-	}
-
 	log.Println("🛑 Triangular Arbitrage Bot stopped")
-}
-
-// resetConcurrentOrdersIfNeeded resets the concurrent orders counter if there's a mismatch
-func resetConcurrentOrdersIfNeeded(coinexClient *coinexClient) {
-	concurrent, _, _ := coinexClient.GetOrderExecutionStats()
-	activeTrackers := coinexClient.GetActiveTrackers()
-
-	if concurrent != len(activeTrackers) {
-		log.Printf("⚠️ CONCURRENT ORDERS MISMATCH | Counter: %d | Active trackers: %d | Resetting...",
-			concurrent, len(activeTrackers))
-		coinexClient.resetConcurrentOrders()
-		coinexClient.syncConcurrentOrders()
-		concurrent, _, _ = coinexClient.GetOrderExecutionStats()
-		log.Printf("✅ CONCURRENT ORDERS RESET | Counter: %d | Active trackers: %d", concurrent, len(activeTrackers))
-	}
 }

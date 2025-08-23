@@ -246,6 +246,7 @@ type RateLimiter struct {
 	maxTokens  int
 	refillRate int
 	lastRefill time.Time
+	disabled   bool
 }
 
 // NewRateLimiter creates a new rate limiter
@@ -255,13 +256,33 @@ func NewRateLimiter(maxTokens, refillRate int) *RateLimiter {
 		maxTokens:  maxTokens,
 		refillRate: refillRate,
 		lastRefill: time.Now(),
+		disabled:   false,
 	}
+}
+
+// Disable temporarily disables rate limiting
+func (rl *RateLimiter) Disable() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.disabled = true
+}
+
+// Enable re-enables rate limiting
+func (rl *RateLimiter) Enable() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.disabled = false
 }
 
 // Allow checks if an operation is allowed under the rate limit
 func (rl *RateLimiter) Allow() bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+
+	// If rate limiting is disabled, always allow
+	if rl.disabled {
+		return true
+	}
 
 	now := time.Now()
 	elapsed := now.Sub(rl.lastRefill)

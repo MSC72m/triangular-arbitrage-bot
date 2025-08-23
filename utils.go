@@ -196,26 +196,23 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 	// CoinEx API format: {"method": "depth.update", "data": {...}}
 	data, ok := wsResponse["data"].(map[string]interface{})
 	if !ok {
-		return fmt.Errorf("invalid depth.update response - missing data field: %+v", wsResponse)
+		return fmt.Errorf("invalid depth.update response - missing data field")
 	}
 
 	// Extract market name
 	marketName, ok := data["market"].(string)
 	if !ok {
-		return fmt.Errorf("invalid market name in depth update: %+v", data)
+		return fmt.Errorf("invalid market name in depth update")
 	}
 
 	// Extract depth data
 	depthData, ok := data["depth"].(map[string]interface{})
 	if !ok {
-		return fmt.Errorf("invalid depth data in depth update: %+v", data)
+		return fmt.Errorf("invalid depth data in depth update")
 	}
 
 	// Check if this is a full snapshot or incremental update
 	isFull, _ := data["is_full"].(bool)
-
-	// Process all updates (both full and incremental) since we have initial data from REST API
-	log.Printf("📝 Processing order book update for market: %s (isFull: %v)", marketName, isFull)
 
 	// Extract latest price - try multiple locations
 	var latestPrice float64 = 0
@@ -250,23 +247,9 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 			Latest: latestPrice,
 			Market: marketName,
 		}
-		// Log only occasionally to avoid spam
-		wsDataCounterMutex.RLock()
-		counter := wsDataReceivedCounter
-		wsDataCounterMutex.RUnlock()
-		if counter%1000 == 0 {
-			log.Printf("🆕 Created new order book for market: %s", marketName)
-		}
 	} else {
 		// Use existing order book and update latest price
 		orderBook.Latest = latestPrice
-		// Log only occasionally to avoid spam
-		wsDataCounterMutex.RLock()
-		counter := wsDataReceivedCounter
-		wsDataCounterMutex.RUnlock()
-		if counter%5000 == 0 {
-			log.Printf("📝 Updating existing order book for market: %s (isFull: %v)", marketName, isFull)
-		}
 	}
 
 	// Parse bids (CoinEx "bids" are buy orders)
@@ -280,23 +263,11 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 						if amountStr, ok := bidArray[1].(string); ok {
 							// Validate price and amount
 							if priceStr == "" || amountStr == "" {
-								wsDataCounterMutex.RLock()
-								counter := wsDataReceivedCounter
-								wsDataCounterMutex.RUnlock()
-								if counter%10000 == 0 { // Log only occasionally
-									log.Printf("⚠️ INVALID BID DATA | Market: %s | Price: %q | Amount: %q | Skipping", marketName, priceStr, amountStr)
-								}
 								continue
 							}
 
 							// Validate price is a valid number
 							if _, err := strconv.ParseFloat(priceStr, 64); err != nil {
-								wsDataCounterMutex.RLock()
-								counter := wsDataReceivedCounter
-								wsDataCounterMutex.RUnlock()
-								if counter%10000 == 0 { // Log only occasionally
-									log.Printf("⚠️ INVALID BID PRICE | Market: %s | Price: %q | Error: %v | Skipping", marketName, priceStr, err)
-								}
 								continue
 							}
 
@@ -317,23 +288,11 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 						if amountStr, ok := bidArray[1].(string); ok {
 							// Validate price and amount
 							if priceStr == "" || amountStr == "" {
-								wsDataCounterMutex.RLock()
-								counter := wsDataReceivedCounter
-								wsDataCounterMutex.RUnlock()
-								if counter%10000 == 0 { // Log only occasionally
-									log.Printf("⚠️ INVALID BID DATA | Market: %s | Price: %q | Amount: %q | Skipping", marketName, priceStr, amountStr)
-								}
 								continue
 							}
 
 							// Validate price is a valid number
 							if _, err := strconv.ParseFloat(priceStr, 64); err != nil {
-								wsDataCounterMutex.RLock()
-								counter := wsDataReceivedCounter
-								wsDataCounterMutex.RUnlock()
-								if counter%10000 == 0 { // Log only occasionally
-									log.Printf("⚠️ INVALID BID PRICE | Market: %s | Price: %q | Error: %v | Skipping", marketName, priceStr, err)
-								}
 								continue
 							}
 
@@ -344,13 +303,6 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 									if amountStr == "0" {
 										// Remove this bid level
 										orderBook.Bids = append(orderBook.Bids[:i], orderBook.Bids[i+1:]...)
-										// Log only occasionally to avoid spam
-										wsDataCounterMutex.RLock()
-										counter := wsDataReceivedCounter
-										wsDataCounterMutex.RUnlock()
-										if counter%500 == 0 {
-											log.Printf("🗑️ BID LEVEL REMOVED | Market: %s | Price: %s | Reason: Zero quantity", marketName, priceStr)
-										}
 									} else {
 										// Update amount
 										orderBook.Bids[i].Amount = amountStr
@@ -381,23 +333,11 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 						if amountStr, ok := askArray[1].(string); ok {
 							// Validate price and amount
 							if priceStr == "" || amountStr == "" {
-								wsDataCounterMutex.RLock()
-								counter := wsDataReceivedCounter
-								wsDataCounterMutex.RUnlock()
-								if counter%10000 == 0 { // Log only occasionally
-									log.Printf("⚠️ INVALID ASK DATA | Market: %s | Price: %q | Amount: %q | Skipping", marketName, priceStr, amountStr)
-								}
 								continue
 							}
 
 							// Validate price is a valid number
 							if _, err := strconv.ParseFloat(priceStr, 64); err != nil {
-								wsDataCounterMutex.RLock()
-								counter := wsDataReceivedCounter
-								wsDataCounterMutex.RUnlock()
-								if counter%10000 == 0 { // Log only occasionally
-									log.Printf("⚠️ INVALID ASK PRICE | Market: %s | Price: %q | Error: %v | Skipping", marketName, priceStr, err)
-								}
 								continue
 							}
 
@@ -418,23 +358,11 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 						if amountStr, ok := askArray[1].(string); ok {
 							// Validate price and amount
 							if priceStr == "" || amountStr == "" {
-								wsDataCounterMutex.RLock()
-								counter := wsDataReceivedCounter
-								wsDataCounterMutex.RUnlock()
-								if counter%10000 == 0 { // Log only occasionally
-									log.Printf("⚠️ INVALID ASK DATA | Market: %s | Price: %q | Amount: %q | Skipping", marketName, priceStr, amountStr)
-								}
 								continue
 							}
 
 							// Validate price is a valid number
 							if _, err := strconv.ParseFloat(priceStr, 64); err != nil {
-								wsDataCounterMutex.RLock()
-								counter := wsDataReceivedCounter
-								wsDataCounterMutex.RUnlock()
-								if counter%10000 == 0 { // Log only occasionally
-									log.Printf("⚠️ INVALID ASK PRICE | Market: %s | Price: %q | Error: %v | Skipping", marketName, priceStr, err)
-								}
 								continue
 							}
 
@@ -445,13 +373,6 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 									if amountStr == "0" {
 										// Remove this ask level
 										orderBook.Asks = append(orderBook.Asks[:i], orderBook.Asks[i+1:]...)
-										// Log only occasionally to avoid spam
-										wsDataCounterMutex.RLock()
-										counter := wsDataReceivedCounter
-										wsDataCounterMutex.RUnlock()
-										if counter%500 == 0 {
-											log.Printf("🗑️ ASK LEVEL REMOVED | Market: %s | Price: %s | Reason: Zero quantity", marketName, priceStr)
-										}
 									} else {
 										// Update amount
 										orderBook.Asks[i].Amount = amountStr
@@ -495,39 +416,26 @@ func handleDepthUpdate(wsResponse map[string]interface{}, marketDepths *MarketDe
 		httpClient.marketDataMu.Unlock()
 	}
 
-	// Check if we should request a periodic snapshot for this market
+	// Check if we should request a periodic snapshot for this market (much less frequent)
 	if shouldRequestSnapshot(marketName) {
-		log.Printf("📸 PERIODIC SNAPSHOT REQUESTED | Market: %s | Update count: %d | Requesting full snapshot for order book integrity",
+		log.Printf("📸 PERIODIC SNAPSHOT REQUESTED | Market: %s | Update count: %d",
 			marketName, updateCountsByMarket[marketName])
-		// Note: In a real implementation, you would send a WebSocket message to request a snapshot
-		// For now, we just log the request
 	}
 
-	// Validate data freshness
-	if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
-		// Log data freshness for first few updates
-		wsDataCounterMutex.Lock()
-		wsDataReceivedCounter++
-		wsDataCounterMutex.Unlock()
-		wsDataCounterMutex.RLock()
-		counter := wsDataReceivedCounter
-		wsDataCounterMutex.RUnlock()
-		if counter <= 10 {
+	// Minimal logging - only log first few updates or errors
+	wsDataCounterMutex.Lock()
+	wsDataReceivedCounter++
+	counter := wsDataReceivedCounter
+	wsDataCounterMutex.Unlock()
+
+	// Only log first 3 updates and every 10000th update
+	if counter <= 3 || counter%10000 == 0 {
+		if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
 			bidPrice := orderBook.Bids[0].Price
 			askPrice := orderBook.Asks[0].Price
-			log.Printf("📊 WebSocket Data Received | Market: %s | Bids: %d | Asks: %d | Best Bid: %s | Best Ask: %s | Latest: %.8f | Full: %v",
-				marketName, len(orderBook.Bids), len(orderBook.Asks), bidPrice, askPrice, orderBook.Latest, isFull)
+			log.Printf("📊 WS Update #%d | %s | Bid: %s | Ask: %s | Full: %v",
+				counter, marketName, bidPrice, askPrice, isFull)
 		}
-		// Log every 100th update to track continuous data flow
-		if counter%100 == 0 {
-			bidPrice := orderBook.Bids[0].Price
-			askPrice := orderBook.Asks[0].Price
-			log.Printf("📊 WebSocket Update #%d | Market: %s | Bid: %s | Ask: %s | Latest: %.8f | Time: %s | Full: %v",
-				counter, marketName, bidPrice, askPrice, orderBook.Latest, time.Now().Format("15:04:05"), isFull)
-		}
-	} else {
-		log.Printf(" WebSocket Data Received | Market: %s | Empty order book (Bids: %d, Asks: %d) | Latest: %.8f | Full: %v",
-			marketName, len(orderBook.Bids), len(orderBook.Asks), orderBook.Latest, isFull)
 	}
 
 	return nil

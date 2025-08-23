@@ -278,10 +278,12 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity ArbitrageOpportunity
 	// Execute legs sequentially with proper synchronization
 	results := make([]*OrderResult, 0, 3)
 
-	// Leg 1: Buy Asset with USDT
-	log.Printf("📤 LEG 1: Buying %s with %.6f USDT", opportunity.Path.Asset1, initialUSDT)
+	// Leg 1: Buy Asset with USDT (LIMIT ORDER with calculated price)
+	// Calculate the asset amount to buy: USDT amount / price
+	assetAmountToBuy := initialUSDT / opportunity.Price1
+	log.Printf("📤 LEG 1: Buying %.6f %s with %.6f USDT at limit price %.8f", assetAmountToBuy, opportunity.Path.Asset1, initialUSDT, opportunity.Price1)
 
-	result1 := ae.placeAndWaitForOrder(opportunity.Path.Market1, "buy", initialUSDT, 0, "Leg 1")
+	result1 := ae.placeAndWaitForOrder(opportunity.Path.Market1, "buy", assetAmountToBuy, opportunity.Price1, "Leg 1")
 	if result1 == nil || result1.Status != OrderStatusFilled {
 		log.Printf("❌ LEG 1 FAILED | Status: %v | Error: %s", result1.Status, result1.ErrorMessage)
 		return // No recovery needed if leg 1 fails
@@ -289,16 +291,18 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity ArbitrageOpportunity
 	results = append(results, result1)
 	log.Printf("✅ LEG 1 COMPLETED | Received %.6f %s", result1.FilledAmount, opportunity.Path.Asset1)
 
-	// Leg 2: Sell Asset for USDC
+	// Leg 2: Sell Asset for USDC (LIMIT ORDER with calculated price)
 	actualAssetReceived := result1.FilledAmount
 	if actualAssetReceived <= 0 {
 		log.Printf("🚫 INSUFFICIENT ASSET | Cannot continue")
 		return
 	}
 
-	log.Printf("📤 LEG 2: Selling %.6f %s for USDC", actualAssetReceived, opportunity.Path.Asset1)
+	log.Printf("📤 LEG 2: Selling %.6f %s for USDC at limit price %.8f", actualAssetReceived, opportunity.Path.Asset1, opportunity.Price2)
+	log.Printf("🔍 LEG 2 DEBUG: result1.FilledAmount=%.6f, result1.FilledValue=%.6f, result1.AvgPrice=%.8f",
+		result1.FilledAmount, result1.FilledValue, result1.AvgPrice)
 
-	result2 := ae.placeAndWaitForOrder(opportunity.Path.Market2, "sell", actualAssetReceived, 0, "Leg 2")
+	result2 := ae.placeAndWaitForOrder(opportunity.Path.Market2, "sell", actualAssetReceived, opportunity.Price2, "Leg 2")
 	if result2 == nil || result2.Status != OrderStatusFilled {
 		log.Printf("❌ LEG 2 FAILED | Status: %v | Error: %s", result2.Status, result2.ErrorMessage)
 		// Attempt to reverse the trade by selling the asset back to USDT
@@ -309,6 +313,7 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity ArbitrageOpportunity
 	log.Printf("✅ LEG 2 COMPLETED | Received %.6f USDC", result2.FilledValue)
 
 	// Leg 3: Sell USDC for USDT (MARKET ORDER - no price specified)
+	// Use the actual USDC amount received from the 2nd leg
 	actualUSDCReceived := result2.FilledValue
 	if actualUSDCReceived <= 0 {
 		log.Printf("🚫 INSUFFICIENT USDC | Cannot continue")
@@ -316,23 +321,29 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity ArbitrageOpportunity
 	}
 
 	log.Printf("📤 LEG 3: Selling %.6f USDC for USDT (MARKET ORDER)", actualUSDCReceived)
+	log.Printf("🔍 LEG 3 DEBUG: result2.FilledAmount=%.6f, result2.FilledValue=%.6f, result2.AvgPrice=%.8f",
+		result2.FilledAmount, result2.FilledValue, result2.AvgPrice)
 
 	var result3 *OrderResult
-	for i := 0; i < 3; i++ {
-		log.Printf("🔍 LEG 3 DEBUG: Market=%s, Type=sell, Amount=%.6f, Price=0 (market order), Attempt %d",
-			opportunity.Path.Market3, actualUSDCReceived, i+1)
+	for i := 0; i < ae.config.FOKOrderSettings.MaxRetryAttempts; i++ {
+		log.Printf("🔍 LEG 3 DEBUG: Market=%s, Type=sell, Amount=%.6f, Price=0 (market order), Attempt %d/%d",
+			opportunity.Path.Market3, actualUSDCReceived, i+1, ae.config.FOKOrderSettings.MaxRetryAttempts)
 
 		result3 = ae.placeAndWaitForOrder(opportunity.Path.Market3, "sell", actualUSDCReceived, 0, fmt.Sprintf("Leg 3 (Attempt %d)", i+1))
 		if result3 != nil && result3.Status == OrderStatusFilled {
 			break // Success
 		}
-		time.Sleep(1 * time.Second) // Wait before retrying
+		// Wait before retrying using configurable retry delay
+		retryDelay := time.Duration(1000/ae.config.FOKOrderSettings.FOKPollingFrequencyHz) * time.Millisecond
+		time.Sleep(retryDelay)
 	}
 
 	if result3 == nil || result3.Status != OrderStatusFilled {
 		log.Printf("❌ LEG 3 FAILED | Status: %v | Error: %s", result3.Status, result3.ErrorMessage)
 		// Attempt to reverse the trade by selling the USDC back to USDT
-		time.Sleep(1 * time.Second) // Wait for balance to update
+		// Wait for balance to update using configurable delay
+		balanceUpdateDelay := time.Duration(1000/ae.config.FOKOrderSettings.FOKPollingFrequencyHz) * time.Millisecond
+		time.Sleep(balanceUpdateDelay)
 		ae.placeReversalOrder(opportunity.Path.Market3, "sell", actualUSDCReceived, "Leg 3 Reversal")
 		return
 	}
@@ -347,6 +358,12 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity ArbitrageOpportunity
 
 	log.Printf("🎉 ARBITRAGE COMPLETE | Initial: $%.2f | Final: $%.2f | Net: $%.2f (%.2f%%)",
 		initialUSDT, actualUSDTReceived, netProfit, profitPercentage)
+	log.Printf("🔍 PROFIT DEBUG: result3.FilledAmount=%.6f, result3.FilledValue=%.6f, result3.AvgPrice=%.8f",
+		result3.FilledAmount, result3.FilledValue, result3.AvgPrice)
+	log.Printf("🔍 ARBITRAGE SUMMARY: Leg1=%s(%.6f), Leg2=%s(%.6f), Leg3=%s(%.6f)",
+		opportunity.Path.Market1, result1.FilledAmount,
+		opportunity.Path.Market2, result2.FilledAmount,
+		opportunity.Path.Market3, result3.FilledAmount)
 
 	// Update metrics
 	ae.metrics.IncrementTrades()
@@ -392,8 +409,8 @@ func (ae *ArbitrageEngine) placeAndWaitForOrder(market, orderType string, amount
 		log.Printf("📥 ORDER RESULT | %s | Market: %s | Status: %s | Filled: %.6f | Avg Price: %.8f | Error: %s",
 			legName, market, result.Status, result.FilledAmount, result.AvgPrice, result.ErrorMessage)
 		return result
-	case <-time.After(10 * time.Second): // Increased timeout to 10 seconds for market orders
-		log.Printf("⏰ ORDER TIMEOUT | %s | Market: %s | OrderID: %s", legName, market, tracker.OrderID)
+	case <-time.After(time.Duration(ae.config.FOKOrderSettings.FOKTimeoutSeconds) * time.Second):
+		log.Printf("⏰ ORDER TIMEOUT | %s | Market: %s | OrderID: %s | Timeout: %ds", legName, market, tracker.OrderID, ae.config.FOKOrderSettings.FOKTimeoutSeconds)
 		return &OrderResult{
 			OrderID:       tracker.OrderID,
 			Market:        market,
@@ -406,7 +423,7 @@ func (ae *ArbitrageEngine) placeAndWaitForOrder(market, orderType string, amount
 			Fee:           0,
 			FeeCurrency:   "",
 			ExecutionTime: time.Since(tracker.CreatedAt).Milliseconds(),
-			ErrorMessage:  "Order timeout after 10s",
+			ErrorMessage:  fmt.Sprintf("Order timeout after %ds", ae.config.FOKOrderSettings.FOKTimeoutSeconds),
 			Timestamp:     time.Now(),
 		}
 	case <-ae.ctx.Done():

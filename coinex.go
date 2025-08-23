@@ -171,6 +171,10 @@ func (c *coinexClient) PlaceOrder() string {
 func (c *coinexClient) PlaceFOKOrder(market, orderType string, amount, price float64, orderResultChan chan<- *OrderResult) *FOKOrderTracker {
 	log.Printf("🎯 PLACE FOK ORDER START | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
 		market, orderType, amount, price)
+	log.Printf("⚙️ FOK CONFIG | Timeout: %ds | Polling: %.1f Hz | Max Retries: %d",
+		c.config.FOKOrderSettings.FOKTimeoutSeconds,
+		c.config.FOKOrderSettings.FOKPollingFrequencyHz,
+		c.config.FOKOrderSettings.MaxRetryAttempts)
 
 	// Check rate limit before placing order
 	if !c.checkRateLimit() {
@@ -251,18 +255,20 @@ func (c *coinexClient) calculateOrderAmount(requestedAmount, price float64, orde
 	var orderValue float64
 
 	if orderType == "buy" { // This is for Leg 1
-		orderValue = requestedAmount
-		if price > 0 {
-			orderAmount = orderValue / price
-		} else {
-			orderAmount = orderValue
-		}
-	} else { // This is for Leg 2 and 3
+		// For buy orders, requestedAmount is the asset amount to buy
 		orderAmount = requestedAmount
 		if price > 0 {
-			orderValue = orderAmount * price
+			orderValue = orderAmount * price // Calculate USDT value
 		} else {
-			orderValue = orderAmount // This is an estimation
+			orderValue = orderAmount // This is an estimation for market orders
+		}
+	} else { // This is for Leg 2 and 3
+		// For sell orders, requestedAmount is the asset amount to sell
+		orderAmount = requestedAmount
+		if price > 0 {
+			orderValue = orderAmount * price // Calculate quote currency value
+		} else {
+			orderValue = orderAmount // This is an estimation for market orders
 		}
 	}
 
@@ -275,11 +281,7 @@ func (c *coinexClient) calculateOrderAmount(requestedAmount, price float64, orde
 		if price > 0 {
 			orderAmount = orderValue / price
 		} else {
-			if orderType == "buy" {
-				orderAmount = orderValue
-			} else {
-				orderAmount = requestedAmount
-			}
+			orderAmount = requestedAmount // Keep original amount for market orders
 		}
 	}
 
@@ -1053,19 +1055,26 @@ func (c *coinexClient) filterCompleteAssetsByActiveMarkets(completeAssets []stri
 	return filteredAssets
 }
 
-// manageRealFOKOrderLifecycle implements FOK behavior using market orders for better fill rates
+// manageRealFOKOrderLifecycle implements FOK behavior using limit or market orders based on price
 func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, orderResultChan chan<- *OrderResult) {
 	log.Printf("🎯 REAL FOK ORDER | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
 		tracker.Market, tracker.Type, tracker.Amount, tracker.Price)
 
-	// Place the order - use market order by default for better fill rates
+	// Place the order - use limit order if price is specified, market order if price is 0
 	var actualOrderID string
 	var err error
 
-	// For FOK orders, prefer market orders for immediate execution
-	log.Printf("📤 PLACING MARKET ORDER | Market: %s | Type: %s | Amount: %.6f",
-		tracker.Market, tracker.Type, tracker.Amount)
-	actualOrderID, err = c.placeRealMarketOrder(tracker)
+	if tracker.Price > 0 {
+		// Use limit order when price is specified
+		log.Printf("📤 PLACING LIMIT ORDER | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
+			tracker.Market, tracker.Type, tracker.Amount, tracker.Price)
+		actualOrderID, err = c.placeRealLimitOrder(tracker)
+	} else {
+		// Use market order when price is 0 (no price specified)
+		log.Printf("📤 PLACING MARKET ORDER | Market: %s | Type: %s | Amount: %.6f",
+			tracker.Market, tracker.Type, tracker.Amount)
+		actualOrderID, err = c.placeRealMarketOrder(tracker)
+	}
 
 	if err != nil {
 		log.Printf("❌ ORDER PLACEMENT FAILED | Market: %s | Error: %v", tracker.Market, err)
@@ -1088,14 +1097,14 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 		return
 	}
 
-	log.Printf("✅ ORDER PLACED | ID: %s | Market: %s", actualOrderID, tracker.Market)
+	log.Printf("✅ ORDER PLACED | ID: %s | Market: %s | Starting FOK polling...", actualOrderID, tracker.Market)
 
 	// Update tracker with real order ID
 	tracker.mu.Lock()
 	tracker.OrderID = actualOrderID
 	tracker.mu.Unlock()
 
-	// Poll until filled or timeout with short timeout for FOK
+	// Poll until filled or timeout with configurable timeout for FOK
 	isFilled, err := c.pollRealOrderStatus(tracker)
 	if err != nil {
 		log.Printf("❌ POLLING FAILED | ID: %s | Error: %v", actualOrderID, err)
@@ -1128,6 +1137,7 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 	// Handle the result
 	if isFilled {
 		// Order was filled - get fill data
+		log.Printf("✅ ORDER FILLED - Getting fill data | ID: %s", actualOrderID)
 		filledAmount, filledValue, avgPrice, fee := c.getOrderFillData(tracker)
 
 		result := &OrderResult{
@@ -1152,7 +1162,7 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 		orderResultChan <- result
 	} else {
 		// Order was not filled - cancel it
-		log.Printf("❌ ORDER NOT FILLED | ID: %s | Cancelling", actualOrderID)
+		log.Printf("❌ ORDER NOT FILLED - Cancelling | ID: %s", actualOrderID)
 
 		cancelErr := c.cancelRealOrder(tracker)
 		if cancelErr != nil {
@@ -1196,9 +1206,10 @@ func (c *coinexClient) placeRealMarketOrder(tracker *FOKOrderTracker) (string, e
 		"type":        "market",     // Market order type
 		"amount":      fmt.Sprintf("%.8f", tracker.Amount),
 		// For market orders, we don't specify price - it executes at current market price
-		"client_id": fmt.Sprintf("FOK_%s_%d", tracker.Market, timestamp),
-		"is_hide":   false,
-		"stp_mode":  "both",
+		"time_in_force": "FOK", // Fill-or-Kill order type
+		"client_id":     fmt.Sprintf("FOK_%s_%d", tracker.Market, timestamp),
+		"is_hide":       false,
+		"stp_mode":      "both",
 	}
 
 	// Convert to JSON string
@@ -1304,15 +1315,16 @@ func (c *coinexClient) placeRealLimitOrder(tracker *FOKOrderTracker) (string, er
 
 	// Prepare JSON body for v2 API - Use limit order type with specified price
 	orderData := map[string]interface{}{
-		"market":      tracker.Market,
-		"market_type": "SPOT",
-		"side":        tracker.Type,
-		"type":        "limit", // Limit orders with specified price
-		"amount":      fmt.Sprintf("%.8f", tracker.Amount),
-		"price":       fmt.Sprintf("%.8f", tracker.Price), // Include price for limit orders
-		"client_id":   fmt.Sprintf("FOK_%s_%d", tracker.Market, timestamp),
-		"is_hide":     false,
-		"stp_mode":    "both",
+		"market":        tracker.Market,
+		"market_type":   "SPOT",
+		"side":          tracker.Type,
+		"type":          "limit", // Limit orders with specified price
+		"amount":        fmt.Sprintf("%.8f", tracker.Amount),
+		"price":         fmt.Sprintf("%.8f", tracker.Price), // Include price for limit orders
+		"time_in_force": "FOK",                              // Fill-or-Kill order type
+		"client_id":     fmt.Sprintf("FOK_%s_%d", tracker.Market, timestamp),
+		"is_hide":       false,
+		"stp_mode":      "both",
 	}
 
 	// Convert to JSON string
@@ -1388,17 +1400,19 @@ func (c *coinexClient) placeRealLimitOrder(tracker *FOKOrderTracker) (string, er
 
 // pollRealOrderStatus polls the real order status from CoinEx API until timeout
 func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, error) {
-	// For FOK orders, use a very short timeout since they should fill immediately or be rejected
-	timeoutDuration := time.Duration(1) * time.Second // Very short timeout for FOK orders
-	// Use very fast polling for FOK orders
-	pollingInterval := 50 * time.Millisecond // Faster polling
+	// Use FOK configuration settings from config
+	fokSettings := c.config.FOKOrderSettings
+	timeoutDuration := time.Duration(fokSettings.FOKTimeoutSeconds) * time.Second
+	pollingInterval := time.Duration(1000/fokSettings.FOKPollingFrequencyHz) * time.Millisecond
 
 	pollCount := 0
 	timeout := time.After(timeoutDuration)
 
-	log.Printf("⏱️ FOK POLLING CONFIG | Timeout: %dms | Polling: every %dms",
+	log.Printf("⏱️ FOK POLLING CONFIG | Timeout: %dms | Polling: every %dms | Config: %d seconds, %.1f Hz",
 		int(timeoutDuration.Milliseconds()),
-		int(pollingInterval.Milliseconds()))
+		int(pollingInterval.Milliseconds()),
+		fokSettings.FOKTimeoutSeconds,
+		fokSettings.FOKPollingFrequencyHz)
 
 	// Loop until timeout or filled
 	for {
@@ -1468,8 +1482,9 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 				req.Header.Set(key, value)
 			}
 
-			// Send request with shorter timeout for faster polling
-			client := &http.Client{Timeout: 2 * time.Second}
+			// Send request with configurable timeout for polling
+			httpTimeout := time.Duration(1000/c.config.FOKOrderSettings.FOKPollingFrequencyHz) * time.Millisecond
+			client := &http.Client{Timeout: httpTimeout}
 			resp, err := client.Do(req)
 			if err != nil {
 				if pollCount <= 2 {
@@ -1523,14 +1538,13 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 					return true, nil // Order is filled
 				}
 
-				// Check for partial fills - consider as success for FOK orders
+				// For FOK orders, don't check for partial fills on pending orders
+				// FOK orders should either fill completely or be rejected
 				if statusStr == "pending" || statusStr == "open" {
-					if filledAmount, exists := data["deal_amount"].(string); exists {
-						if filled, err := strconv.ParseFloat(filledAmount, 64); err == nil && filled > 0 {
-							log.Printf("✅ FOK ORDER PARTIALLY FILLED | ID: %s | Filled: %.6f | Status: %s | Attempt: %d",
-								tracker.OrderID, filled, statusStr, pollCount)
-							return true, nil // Consider partial fills as success for FOK orders
-						}
+					// For FOK orders, pending status means the order is still waiting to be filled
+					// We should continue polling until timeout or filled
+					if pollCount <= 2 {
+						log.Printf("⏳ FOK ORDER PENDING | ID: %s | Status: %s | Attempt: %d", tracker.OrderID, statusStr, pollCount)
 					}
 				}
 
@@ -1538,11 +1552,6 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 				if statusStr == "cancelled" || statusStr == "failed" || statusStr == "rejected" {
 					log.Printf("❌ FOK ORDER FAILED | ID: %s | Status: %s | Attempt: %d", tracker.OrderID, statusStr, pollCount)
 					return false, fmt.Errorf("order failed with status: %s", statusStr)
-				}
-
-				// For pending/open orders, continue polling (FOK timeout will handle cancellation)
-				if pollCount <= 2 {
-					log.Printf("⏳ FOK ORDER PENDING | ID: %s | Status: %s | Attempt: %d", tracker.OrderID, statusStr, pollCount)
 				}
 			}
 
@@ -2031,11 +2040,16 @@ func (c *coinexClient) getOrderFillData(tracker *FOKOrderTracker) (float64, floa
 		return 0, 0, 0, 0
 	}
 
+	log.Printf("🔍 FILL DATA RESPONSE | OrderID: %s | Full data: %+v", tracker.OrderID, data)
+
 	// Extract fill data
-	filledAmount := parseFloat(data["filled_amount"])
-	filledValue := parseFloat(data["filled_value"])
-	avgPrice := parseFloat(data["avg_price"])
+	filledAmount := parseFloat(data["deal_amount"])
+	filledValue := parseFloat(data["deal_value"])
+	avgPrice := parseFloat(data["deal_price"])
 	fee := parseFloat(data["quote_fee"])
+
+	log.Printf("🔍 FILL DATA DEBUG | OrderID: %s | deal_amount: %v -> %.6f | deal_value: %v -> %.6f | deal_price: %v -> %.8f | quote_fee: %v -> %.6f",
+		tracker.OrderID, data["deal_amount"], filledAmount, data["deal_value"], filledValue, data["deal_price"], avgPrice, data["quote_fee"], fee)
 
 	return filledAmount, filledValue, avgPrice, fee
 }
@@ -2072,4 +2086,3 @@ func (c *coinexClient) UpdateSpending(orderValue float64) {
 	// For now, we will just log the update
 	log.Printf("Update spending: value=%.2f", orderValue)
 }
-

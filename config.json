@@ -1,7 +1,7 @@
 {
   "apiBaseURL": "https://api.coinex.com/v1",
   "apiBaseURLV2": "https://api.coinex.com/v2/",
-  "profitThreshold": 0.001,
+  "profitThreshold": 0.0001,
   "simulationMode": false,
   "wsSubscriptionsBatchSize": 50,
   "maxLatencyMs": 200,
@@ -27,13 +27,13 @@
   "orderTimeout": 30,
   "enablePaperTrading": false,
   "fokOrderSettings": {
-    "pollingFrequencyHz": 5.0,
-    "orderTimeoutSeconds": 2,
+    "pollingFrequencyHz": 2.0,
+    "orderTimeoutSeconds": 8,
     "maxRetryAttempts": 0,
     "enableAggressiveReEvaluation": false,
     "cancelAllOnSingleFailure": true,
-    "fokTimeoutSeconds": 2,
-    "fokPollingFrequencyHz": 10.0
+    "fokTimeoutSeconds": 8,
+    "fokPollingFrequencyHz": 2.0
   },
   "orderExecutionSettings": {
     "maxOrdersPerSecond": 15.0,

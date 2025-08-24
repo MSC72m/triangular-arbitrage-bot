@@ -195,7 +195,7 @@ func (c *coinexClient) PlaceFOKOrder(market, orderType string, amount, price flo
 	}
 
 	// Calculate order amount
-	orderAmount, _, err := c.calculateOrderAmount(amount, price, orderType)
+	orderAmount, orderValue, err := c.calculateOrderAmount(amount, price, orderType)
 	if err != nil {
 		log.Printf("🚫 ORDER REJECTED | %v | Market: %s", err, market)
 		return nil
@@ -1482,13 +1482,35 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 				req.Header.Set(key, value)
 			}
 
-			// Send request with configurable timeout for polling
+			// Send request with reasonable timeout for polling (minimum 2 seconds)
 			httpTimeout := time.Duration(1000/c.config.FOKOrderSettings.FOKPollingFrequencyHz) * time.Millisecond
-			client := &http.Client{Timeout: httpTimeout}
+			if httpTimeout < 2*time.Second {
+				httpTimeout = 2 * time.Second
+			}
+			if pollCount <= 2 {
+				log.Printf("🔍 FOK POLLING | ID: %s | HTTP Timeout: %v | URL: %s", tracker.OrderID, httpTimeout, requestURL)
+			}
+			client := &http.Client{
+				Timeout: httpTimeout,
+				Transport: &http.Transport{
+					MaxIdleConns:        10,
+					MaxIdleConnsPerHost: 10,
+					IdleConnTimeout:     30 * time.Second,
+					DisableCompression:  true,
+				},
+			}
 			resp, err := client.Do(req)
 			if err != nil {
 				if pollCount <= 2 {
-					log.Printf("❌ HTTP REQUEST FAILED | Error: %v", err)
+					log.Printf("❌ HTTP REQUEST FAILED | Error: %v | Timeout: %v", err, httpTimeout)
+				}
+				// For network errors, continue polling instead of failing immediately
+				if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline") {
+					if pollCount <= 2 {
+						log.Printf("⏳ NETWORK TIMEOUT | ID: %s | Attempt: %d | Continuing...", tracker.OrderID, pollCount)
+					}
+					time.Sleep(pollingInterval)
+					continue
 				}
 				return false, fmt.Errorf("HTTP request failed: %w", err)
 			}

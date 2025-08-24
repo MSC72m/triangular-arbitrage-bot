@@ -284,11 +284,8 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity ArbitrageOpportunity
 	log.Printf("📤 LEG 1: Buying %.6f %s with %.6f USDT at limit price %.8f", assetAmountToBuy, opportunity.Path.Asset1, initialUSDT, opportunity.Price1)
 	log.Printf("🔍 LEG 1 DEBUG: initialUSDT=%.6f, Price1=%.8f, assetAmountToBuy=%.8f", initialUSDT, opportunity.Price1, assetAmountToBuy)
 
-	// Get order placement price (use ask price for buy orders to ensure fill)
-	orderPrice1 := ae.getOrderPlacementPrice(opportunity.Path.Market1, "buy")
-	log.Printf("🔍 LEG 1 ORDER PRICE: Opportunity price=%.8f, Order placement price=%.8f", opportunity.Price1, orderPrice1)
-
-	result1 := ae.placeAndWaitForOrder(opportunity.Path.Market1, "buy", assetAmountToBuy, orderPrice1, "Leg 1")
+	// Use the same price from opportunity calculation for order placement
+	result1 := ae.placeAndWaitForOrder(opportunity.Path.Market1, "buy", assetAmountToBuy, opportunity.Price1, "Leg 1")
 	if result1 == nil || result1.Status != OrderStatusFilled {
 		log.Printf("❌ LEG 1 FAILED | Status: %v | Error: %s", result1.Status, result1.ErrorMessage)
 		return // No recovery needed if leg 1 fails
@@ -307,11 +304,8 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity ArbitrageOpportunity
 	log.Printf("🔍 LEG 2 DEBUG: result1.FilledAmount=%.6f, result1.FilledValue=%.6f, result1.AvgPrice=%.8f",
 		result1.FilledAmount, result1.FilledValue, result1.AvgPrice)
 
-	// Get order placement price (use bid price for sell orders to ensure fill)
-	orderPrice2 := ae.getOrderPlacementPrice(opportunity.Path.Market2, "sell")
-	log.Printf("🔍 LEG 2 ORDER PRICE: Opportunity price=%.8f, Order placement price=%.8f", opportunity.Price2, orderPrice2)
-
-	result2 := ae.placeAndWaitForOrder(opportunity.Path.Market2, "sell", actualAssetReceived, orderPrice2, "Leg 2")
+	// Use the same price from opportunity calculation for order placement
+	result2 := ae.placeAndWaitForOrder(opportunity.Path.Market2, "sell", actualAssetReceived, opportunity.Price2, "Leg 2")
 	if result2 == nil || result2.Status != OrderStatusFilled {
 		log.Printf("❌ LEG 2 FAILED | Status: %v | Error: %s", result2.Status, result2.ErrorMessage)
 		// Attempt to reverse the trade by selling the asset back to USDT
@@ -651,8 +645,7 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 	if netProfit > ae.config.ProfitThreshold {
 		log.Printf("💰 PROFITABLE OPPORTUNITY | Path: %s→%s→%s | Profit: %.6f%% | Volume: $%.2f",
 			path.Market1, path.Market2, path.Market3, netProfit*100, volume)
-		log.Printf("   Prices: %s → %s → %s",
-			market1Data.Bids[0].Price, market2Data.Asks[0].Price, market3Data.Asks[0].Price)
+		log.Printf("   Calculated Prices: %.8f → %.8f → %.8f", price1, price2, price3)
 
 		// Show order book details in clear format: Price @ Volume (full precision)
 		if market1Data != nil && len(market1Data.Bids) > 0 && len(market1Data.Asks) > 0 {
@@ -845,36 +838,6 @@ func (ae *ArbitrageEngine) getTradingFee(market string) float64 {
 		return fee
 	}
 	return ae.config.DefaultTradingFee
-}
-
-// getOrderPlacementPrice gets the correct price for order placement (opposite of opportunity detection)
-func (ae *ArbitrageEngine) getOrderPlacementPrice(market, orderType string) float64 {
-	// Get current market data
-	snapshot := ae.marketDepths.GetSnapshot()
-	marketData, exists := snapshot[market]
-	if !exists || marketData == nil || len(marketData.Bids) == 0 || len(marketData.Asks) == 0 {
-		return 0
-	}
-
-	var price float64
-	var err error
-
-	switch orderType {
-	case "buy":
-		// For buy orders, use ask price (what sellers are asking) to ensure fill
-		price, err = strconv.ParseFloat(marketData.Asks[0].Price, 64)
-	case "sell":
-		// For sell orders, use bid price (what buyers are willing to pay) to ensure fill
-		price, err = strconv.ParseFloat(marketData.Bids[0].Price, 64)
-	default:
-		return 0
-	}
-
-	if err != nil {
-		return 0
-	}
-
-	return price
 }
 
 // calculateMaxVolumeFromOrderBook calculates the maximum volume available

@@ -182,20 +182,8 @@ func (c *coinexClient) PlaceFOKOrder(market, orderType string, amount, price flo
 		return nil
 	}
 
-	// Check balance before placing order
-	orderValue := price * amount
-	if price == 0 {
-		// For market orders, use a conservative estimate for balance check
-		orderValue = amount * 1.0
-	}
-
-	if !c.CanPlaceOrder(orderValue) {
-		log.Printf("🚫 INSUFFICIENT BALANCE | Cannot place order of value $%.2f", orderValue)
-		return nil
-	}
-
 	// Calculate order amount
-	orderAmount, orderValue, err := c.calculateOrderAmount(amount, price, orderType)
+	orderAmount, _, err := c.calculateOrderAmount(amount, price, orderType)
 	if err != nil {
 		log.Printf("🚫 ORDER REJECTED | %v | Market: %s", err, market)
 		return nil

@@ -1360,19 +1360,35 @@ func getMapKeys(m map[string]interface{}) []string {
 func (c *HttpClient) getQueryString(urlStr string, params map[string]string) string {
 	var sb strings.Builder
 	sb.WriteString(urlStr)
-	if len(params) == 0 {
+
+	// Filter out non-query parameters
+	queryParams := make(map[string]string)
+	for k, v := range params {
+		if k != "url" && k != "method" && k != "body" && k != "query" {
+			queryParams[k] = v
+		}
+	}
+
+	if len(queryParams) == 0 {
 		return sb.String()
 	}
-	sb.WriteString("?")
-	keys := make([]string, 0, len(params))
-	for k := range params {
+
+	// Check if URL already has query parameters
+	if strings.Contains(urlStr, "?") {
+		sb.WriteString("&")
+	} else {
+		sb.WriteString("?")
+	}
+
+	keys := make([]string, 0, len(queryParams))
+	for k := range queryParams {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for i, k := range keys {
 		sb.WriteString(k)
 		sb.WriteString("=")
-		sb.WriteString(url.QueryEscape(params[k]))
+		sb.WriteString(url.QueryEscape(queryParams[k]))
 		if i < len(keys)-1 {
 			sb.WriteString("&")
 		}

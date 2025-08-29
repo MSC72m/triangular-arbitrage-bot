@@ -27,16 +27,16 @@
   "orderTimeout": 30,
   "enablePaperTrading": false,
   "fokOrderSettings": {
-    "pollingFrequencyHz": 2.0,
-    "orderTimeoutSeconds": 8,
+    "pollingFrequencyHz": 1.0,
+    "orderTimeoutSeconds": 5,
     "maxRetryAttempts": 0,
     "enableAggressiveReEvaluation": false,
     "cancelAllOnSingleFailure": true,
-    "fokTimeoutSeconds": 8,
-    "fokPollingFrequencyHz": 2.0
+    "fokTimeoutSeconds": 5,
+    "fokPollingFrequencyHz": 1.0
   },
   "orderExecutionSettings": {
-    "priceModifier": 0.0001,
+    "priceModifier": 0.004,
     "maxOrdersPerSecond": 15.0,
     "orderAmountType": "static",
     "staticOrderAmount": 10,

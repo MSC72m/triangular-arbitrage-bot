@@ -721,14 +721,15 @@ func (ae *ArbitrageEngine) validateMarketData(path TriangularPath, snapshot map[
 	return market1Data, market2Data, market3Data, true
 }
 
-// RoundPriceNumbers rounds price1 and price2 according to their direction ("buy" rounds up, "sell" rounds down)
-// The directions must be provided for each price.
+// getIntendedPrice calculates the execution price for order placement
+// We use conservative pricing to ensure orders execute while maintaining profitability
 func (ae *ArbitrageEngine) getIntendedPrice(price float64, dir string) float64 {
-	// ae.config.ProfitThreshold
 	switch dir {
 	case "buy":
+		// For buy orders: use bid price + small premium to ensure execution
 		return price * (1 + ae.config.OrderExecutionSettings.PriceModifier)
 	case "sell":
+		// For sell orders: use ask price - small discount to ensure execution
 		return price * (1 - ae.config.OrderExecutionSettings.PriceModifier)
 	default:
 		return price
@@ -744,32 +745,32 @@ func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, mar
 		}
 
 		var price float64
-		var err error
 
 		switch direction {
 		case "buy":
-			// When buying, we use the bid price (buyer's price)
+			// When buying, we use the BID price (highest bid) - this is the price we can buy at
 			if len(marketData.Bids) == 0 {
 				return 0, fmt.Errorf("no bid orders available for %s", market)
 			}
 
-			price, err = strconv.ParseFloat(marketData.Bids[0].Price, 64)
-			price = ae.getIntendedPrice(price, "buy")
+			bidPrice, err := strconv.ParseFloat(marketData.Bids[0].Price, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid bid price format for %s: %v", market, err)
+			}
+			price = ae.getIntendedPrice(bidPrice, "buy")
 		case "sell":
-			// When selling, we use the ask price (seller's price)
+			// When selling, we use the ASK price (lowest ask) - this is the price we can sell at
 			if len(marketData.Asks) == 0 {
 				return 0, fmt.Errorf("no ask orders available for %s", market)
 			}
-			price, err = strconv.ParseFloat(marketData.Asks[0].Price, 64)
-			price = ae.getIntendedPrice(price, "sell")
+			askPrice, err := strconv.ParseFloat(marketData.Asks[0].Price, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid ask price format for %s: %v", market, err)
+			}
+			price = ae.getIntendedPrice(askPrice, "sell")
 		default:
 			return 0, fmt.Errorf("invalid direction: %s", direction)
 		}
-
-		if err != nil {
-			return 0, fmt.Errorf("invalid price format for %s: %v", market, err)
-		}
-
 		return price, nil
 	}
 

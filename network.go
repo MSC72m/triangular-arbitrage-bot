@@ -1449,6 +1449,20 @@ func (c *HttpClient) performRequest(params map[string]string, method string) (ma
 	return body, nil
 }
 
+// DoWithRateLimit executes an HTTP request with rate limiting
+func (c *HttpClient) DoWithRateLimit(req *http.Request) (*http.Response, error) {
+	// Apply rate limiting
+	if !c.rateLimiter.Allow() {
+		return nil, fmt.Errorf("rate limit exceeded")
+	}
+
+	// Set internal headers
+	c.setInternalHeader(req)
+
+	// Execute the request using the underlying http.Client
+	return c.client.Do(req)
+}
+
 // TestWebSocketConnection tests the WebSocket connection with a single subscription
 func (c *HttpClient) TestWebSocketConnection() error {
 	fmt.Printf("🧪 Testing WebSocket connection...\n")

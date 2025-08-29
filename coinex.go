@@ -106,23 +106,17 @@ func (c *coinexClient) GetApiKey() string {
 // generateRESTSignature creates HMAC-SHA256 signature for CoinEx API v2 REST endpoints
 func (c *coinexClient) generateRESTSignature(method, requestPath, queryString, body string, timestamp int64) string {
 	// Create the string to sign for v2 REST API
-	// Format: method + request_path + body + timestamp
+	// Format: method + request_path + query_string + body + timestamp
 	// According to CoinEx docs: https://docs.coinex.com/api/v2/authorization
 
-	// Build the full request path including query string if present
-	fullRequestPath := requestPath
-	if queryString != "" {
-		fullRequestPath = requestPath + "?" + queryString
-	}
-
-	// Create the string to sign: method + request_path + body + timestamp
+	// Create the string to sign: method + request_path + query_string + body + timestamp
 	var stringToSign string
 	if body != "" {
 		// For POST/PUT requests with body, include the body as a string literal
-		stringToSign = method + fullRequestPath + body + strconv.FormatInt(timestamp, 10)
+		stringToSign = method + requestPath + queryString + body + strconv.FormatInt(timestamp, 10)
 	} else {
 		// For GET/DELETE requests without body
-		stringToSign = method + fullRequestPath + strconv.FormatInt(timestamp, 10)
+		stringToSign = method + requestPath + queryString + strconv.FormatInt(timestamp, 10)
 	}
 
 	// Create HMAC-SHA256 signature
@@ -133,7 +127,6 @@ func (c *coinexClient) generateRESTSignature(method, requestPath, queryString, b
 	// Debug logging
 	log.Printf("🔐 REST SIGNATURE DEBUG | Method: %s | Path: %s | Query: %s | Body: %s | Timestamp: %d",
 		method, requestPath, queryString, body, timestamp)
-	log.Printf("🔐 REST SIGNATURE DEBUG | Full request path: %s", fullRequestPath)
 	log.Printf("🔐 REST SIGNATURE DEBUG | String to sign: %s", stringToSign)
 	log.Printf("🔐 REST SIGNATURE DEBUG | Signature: %s", signature)
 
@@ -1324,9 +1317,9 @@ func (c *coinexClient) placeRealLimitOrder(tracker *FOKOrderTracker) (string, er
 	body := string(bodyBytes)
 
 	log.Printf("📋 ORDER DATA | Market: %s | Body: %s", tracker.Market, body)
-	
+
 	// Debug: Log exact order details for analysis
-	log.Printf("🔍 ORDER ANALYSIS | Market: %s | Type: %s | Amount: %.8f | Price: %.8f | Value: $%.2f | Precision Check: Amount=%.8f, Price=%.8f", 
+	log.Printf("🔍 ORDER ANALYSIS | Market: %s | Type: %s | Amount: %.8f | Price: %.8f | Value: $%.2f | Precision Check: Amount=%.8f, Price=%.8f",
 		tracker.Market, tracker.Type, tracker.Amount, tracker.Price, tracker.Amount*tracker.Price, tracker.Amount, tracker.Price)
 
 	// Generate v2 signature
@@ -1474,27 +1467,24 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 				req.Header.Set(key, value)
 			}
 
-			// Send request with reasonable timeout for polling (minimum 2 seconds)
-			httpTimeout := time.Duration(1000/c.config.FOKOrderSettings.FOKPollingFrequencyHz) * time.Millisecond
-			if httpTimeout < 2*time.Second {
-				httpTimeout = 2 * time.Second
-			}
+			// Use the main HttpClient which has rate limiting built in
 			if pollCount <= 2 {
-				log.Printf("🔍 FOK POLLING | ID: %s | HTTP Timeout: %v | URL: %s", tracker.OrderID, httpTimeout, requestURL)
+				log.Printf("🔍 FOK POLLING | ID: %s | Using rate-limited HttpClient | URL: %s", tracker.OrderID, requestURL)
 			}
-			client := &http.Client{
-				Timeout: httpTimeout,
-				Transport: &http.Transport{
-					MaxIdleConns:        10,
-					MaxIdleConnsPerHost: 10,
-					IdleConnTimeout:     30 * time.Second,
-					DisableCompression:  true,
-				},
-			}
-			resp, err := client.Do(req)
+
+			// Use the main HttpClient with rate limiting instead of creating a new one
+			resp, err := c.httpClient.DoWithRateLimit(req)
 			if err != nil {
 				if pollCount <= 2 {
-					log.Printf("❌ HTTP REQUEST FAILED | Error: %v | Timeout: %v", err, httpTimeout)
+					log.Printf("❌ HTTP REQUEST FAILED | Error: %v", err)
+				}
+				// For rate limit errors, wait and retry
+				if strings.Contains(err.Error(), "rate limit exceeded") {
+					if pollCount <= 2 {
+						log.Printf("⏳ RATE LIMIT | ID: %s | Attempt: %d | Waiting before retry...", tracker.OrderID, pollCount)
+					}
+					time.Sleep(time.Second) // Wait 1 second for rate limit
+					continue
 				}
 				// For network errors, continue polling instead of failing immediately
 				if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline") {

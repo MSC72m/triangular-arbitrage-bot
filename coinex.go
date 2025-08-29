@@ -1324,6 +1324,10 @@ func (c *coinexClient) placeRealLimitOrder(tracker *FOKOrderTracker) (string, er
 	body := string(bodyBytes)
 
 	log.Printf("📋 ORDER DATA | Market: %s | Body: %s", tracker.Market, body)
+	
+	// Debug: Log exact order details for analysis
+	log.Printf("🔍 ORDER ANALYSIS | Market: %s | Type: %s | Amount: %.8f | Price: %.8f | Value: $%.2f | Precision Check: Amount=%.8f, Price=%.8f", 
+		tracker.Market, tracker.Type, tracker.Amount, tracker.Price, tracker.Amount*tracker.Price, tracker.Amount, tracker.Price)
 
 	// Generate v2 signature
 	signature := c.generateRESTSignature(method, requestPath, "", body, timestamp)

@@ -1,7 +1,7 @@
 {
   "apiBaseURL": "https://api.coinex.com/v1",
   "apiBaseURLV2": "https://api.coinex.com/v2/",
-  "profitThreshold": 0.0001,
+  "profitThreshold": 0.006,
   "simulationMode": false,
   "wsSubscriptionsBatchSize": 50,
   "maxLatencyMs": 200,
@@ -36,6 +36,7 @@
     "fokPollingFrequencyHz": 2.0
   },
   "orderExecutionSettings": {
+    "priceModifier": 0.0001,
     "maxOrdersPerSecond": 15.0,
     "orderAmountType": "static",
     "staticOrderAmount": 10,

@@ -721,6 +721,20 @@ func (ae *ArbitrageEngine) validateMarketData(path TriangularPath, snapshot map[
 	return market1Data, market2Data, market3Data, true
 }
 
+// RoundPriceNumbers rounds price1 and price2 according to their direction ("buy" rounds up, "sell" rounds down)
+// The directions must be provided for each price.
+func (ae *ArbitrageEngine) getIntendedPrice(price float64, dir string) float64 {
+	// ae.config.ProfitThreshold
+	switch dir {
+	case "buy":
+		return price * (1 + ae.config.OrderExecutionSettings.PriceModifier)
+	case "sell":
+		return price * (1 - ae.config.OrderExecutionSettings.PriceModifier)
+	default:
+		return price
+	}
+}
+
 // calculatePrices calculates the prices for each market
 func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, market2Data, market3Data *OrderBook, detectionStart time.Time, cycleCount int) (float64, float64, float64, error) {
 	// Helper function to get order book price
@@ -738,13 +752,16 @@ func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, mar
 			if len(marketData.Bids) == 0 {
 				return 0, fmt.Errorf("no bid orders available for %s", market)
 			}
+
 			price, err = strconv.ParseFloat(marketData.Bids[0].Price, 64)
+			price = ae.getIntendedPrice(price, "buy")
 		case "sell":
 			// When selling, we use the ask price (seller's price)
 			if len(marketData.Asks) == 0 {
 				return 0, fmt.Errorf("no ask orders available for %s", market)
 			}
 			price, err = strconv.ParseFloat(marketData.Asks[0].Price, 64)
+			price = ae.getIntendedPrice(price, "sell")
 		default:
 			return 0, fmt.Errorf("invalid direction: %s", direction)
 		}
@@ -794,20 +811,32 @@ func (ae *ArbitrageEngine) calculateProfit(path TriangularPath, price1, price2, 
 	fee3 := ae.getTradingFee(path.Market3)
 
 	// Calculate the triangular arbitrage path:
-	// Step 1: Buy Asset1 with USDT
+	// Step 1: Buy Asset1 with USDT (spend USDT to get Asset1)
 	asset1Amount := initialUSDT / price1 * (1.0 - fee1)
 
-	// Step 2: Sell Asset1 for USDC
+	// Step 2: Sell Asset1 for USDC (get USDC)
 	usdcAmount := asset1Amount * price2 * (1.0 - fee2)
 
-	// Step 3: Sell USDC for USDT
+	// Step 3: Sell USDC for USDT (get back USDT)
 	finalUSDT := usdcAmount * price3 * (1.0 - fee3)
 
 	// Calculate profit
+	// The profit is the difference between the final USDT and the initial USDT
 	netProfit := finalUSDT - initialUSDT
-	profitPercentage := netProfit / initialUSDT
 
-	return finalUSDT / initialUSDT, profitPercentage
+	// The profit percentage is the net profit divided by the initial USDT
+	profitPercentage := 0.0
+	if initialUSDT > 0 {
+		profitPercentage = netProfit / initialUSDT
+	}
+
+	// The roundTripRate is the ratio of final to initial USDT
+	roundTripRate := 0.0
+	if initialUSDT > 0 {
+		roundTripRate = finalUSDT / initialUSDT
+	}
+
+	return roundTripRate, profitPercentage
 }
 
 // calculateVolume calculates the volume based on configuration

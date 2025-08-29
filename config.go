@@ -30,6 +30,7 @@ type OrderExecutionSettings struct {
 	EnableSpendingLimits    bool    `json:"enableSpendingLimits"`    // Enable spending protection
 	MinOrderAmount          float64 `json:"minOrderAmount"`          // Minimum order amount (USD)
 	MaxOrderAmount          float64 `json:"maxOrderAmount"`          // Maximum order amount (USD)
+	PriceModifier           float64 `json:"priceModifier"`           // Price modifier (0.0-1.0)
 }
 
 type Config struct {
@@ -153,6 +154,7 @@ func DefaultConfig() *Config {
 
 		// Order Execution Settings
 		OrderExecutionSettings: OrderExecutionSettings{
+			PriceModifier:           0.01,
 			MaxOrdersPerSecond:      0.5, // 1 order every 2 seconds
 			MaxConcurrentArbitrages: 3,   // 3 concurrent arbitrage cycles max (each cycle = 3 orders)
 			OrderAmountType:         "static",

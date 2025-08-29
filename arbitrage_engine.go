@@ -380,8 +380,12 @@ func (ae *ArbitrageEngine) placeReversalOrder(market, orderType string, amount f
 
 	// Place a market order to reverse the trade
 	result := ae.placeAndWaitForOrder(market, orderType, amount, 0, legName)
-	if result == nil || result.Status != OrderStatusFilled {
-		log.Printf("❌ REVERSAL FAILED | %s | Market: %s | Status: %v | Error: %s",
+	if result == nil {
+		log.Printf("❌ REVERSAL FAILED | %s | Market: %s | Order placement failed", legName, market)
+		return
+	}
+	if result.Status != OrderStatusFilled {
+		log.Printf("❌ REVERSAL FAILED | %s | Market: %s | Status: %s | Error: %s",
 			legName, market, result.Status, result.ErrorMessage)
 	} else {
 		log.Printf("✅ REVERSAL COMPLETED | %s | Market: %s | Filled: %.6f",

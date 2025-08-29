@@ -2078,25 +2078,40 @@ func (c *coinexClient) getOrderFillData(tracker *FOKOrderTracker) (float64, floa
 
 	log.Printf("🔍 FILL DATA RESPONSE | OrderID: %s | Full data: %+v", tracker.OrderID, data)
 
-	// Extract fill data
-	filledAmount := parseFloat(data["deal_amount"])
-	filledValue := parseFloat(data["deal_value"])
-	avgPrice := parseFloat(data["deal_price"])
+	// Extract fill data from CoinEx API response
+	// CoinEx uses different field names than some other exchanges
+	filledAmount := parseFloat(data["filled_amount"])
+	filledValue := parseFloat(data["filled_value"])
+	avgPrice := parseFloat(data["last_fill_price"])
 	fee := parseFloat(data["quote_fee"])
 
-	log.Printf("🔍 FILL DATA DEBUG | OrderID: %s | deal_amount: %v -> %.6f | deal_value: %v -> %.6f | deal_price: %v -> %.8f | quote_fee: %v -> %.6f",
-		tracker.OrderID, data["deal_amount"], filledAmount, data["deal_value"], filledValue, data["deal_price"], avgPrice, data["quote_fee"], fee)
+	log.Printf("🔍 FILL DATA DEBUG | OrderID: %s | filled_amount: %v -> %.6f | filled_value: %v -> %.6f | last_fill_price: %v -> %.8f | quote_fee: %v -> %.6f",
+		tracker.OrderID, data["filled_amount"], filledAmount, data["filled_value"], filledValue, data["last_fill_price"], avgPrice, data["quote_fee"], fee)
+
+	// Additional debug for raw response values
+	log.Printf("🔍 RAW RESPONSE VALUES | filled_amount: %T=%v | filled_value: %T=%v | last_fill_price: %T=%v | quote_fee: %T=%v",
+		data["filled_amount"], data["filled_amount"], data["filled_value"], data["filled_value"], data["last_fill_price"], data["last_fill_price"], data["quote_fee"], data["quote_fee"])
 
 	return filledAmount, filledValue, avgPrice, fee
 }
 
 func parseFloat(i interface{}) float64 {
-	v, ok := i.(string)
-	if !ok {
+	if i == nil {
 		return 0
 	}
-	f, _ := strconv.ParseFloat(v, 64)
-	return f
+
+	// Handle string values
+	if v, ok := i.(string); ok {
+		f, _ := strconv.ParseFloat(v, 64)
+		return f
+	}
+
+	// Handle numeric values (CoinEx API returns numbers as float64)
+	if v, ok := i.(float64); ok {
+		return v
+	}
+
+	return 0
 }
 
 // CanPlaceOrder checks if we can place a new order based on spending limits

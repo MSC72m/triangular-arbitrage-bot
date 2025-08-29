@@ -106,17 +106,19 @@ func (c *coinexClient) GetApiKey() string {
 // generateRESTSignature creates HMAC-SHA256 signature for CoinEx API v2 REST endpoints
 func (c *coinexClient) generateRESTSignature(method, requestPath, queryString, body string, timestamp int64) string {
 	// Create the string to sign for v2 REST API
-	// Format: method + request_path + query_string + body + timestamp
+	// Format: method + request_path + body + timestamp
 	// According to CoinEx docs: https://docs.coinex.com/api/v2/authorization
+	// For GET requests: request_path should include query parameters
+	// For POST requests: request_path is just the path, body is separate
 
-	// Create the string to sign: method + request_path + query_string + body + timestamp
+	// Create the string to sign: method + request_path + body + timestamp
 	var stringToSign string
 	if body != "" {
 		// For POST/PUT requests with body, include the body as a string literal
-		stringToSign = method + requestPath + queryString + body + strconv.FormatInt(timestamp, 10)
+		stringToSign = method + requestPath + body + strconv.FormatInt(timestamp, 10)
 	} else {
 		// For GET/DELETE requests without body
-		stringToSign = method + requestPath + queryString + strconv.FormatInt(timestamp, 10)
+		stringToSign = method + requestPath + strconv.FormatInt(timestamp, 10)
 	}
 
 	// Create HMAC-SHA256 signature
@@ -129,6 +131,7 @@ func (c *coinexClient) generateRESTSignature(method, requestPath, queryString, b
 		method, requestPath, queryString, body, timestamp)
 	log.Printf("🔐 REST SIGNATURE DEBUG | String to sign: %s", stringToSign)
 	log.Printf("🔐 REST SIGNATURE DEBUG | Signature: %s", signature)
+	log.Printf("🔐 REST SIGNATURE DEBUG | Secret key length: %d", len(c.secretID))
 
 	return signature
 }
@@ -158,6 +161,31 @@ func (c *coinexClient) generateWebSocketSignature(timestamp int64) string {
 
 func (c *coinexClient) PlaceOrder() string {
 	return ""
+}
+
+// TestSignatureGeneration tests the signature generation for debugging
+func (c *coinexClient) TestSignatureGeneration() {
+	log.Printf("🧪 TESTING SIGNATURE GENERATION")
+
+	// Test GET request signature (like order status polling)
+	timestamp := int64(1700490703564) // Use the example timestamp from docs
+	method := "GET"
+	requestPath := "/v2/spot/order-status?market=BTCUSDT&order_id=12345"
+
+	signature := c.generateRESTSignature(method, requestPath, "", "", timestamp)
+	log.Printf("🧪 GET SIGNATURE TEST | Expected format: GET + path + timestamp")
+	log.Printf("🧪 GET SIGNATURE TEST | String to sign: %s%s%d", method, requestPath, timestamp)
+	log.Printf("🧪 GET SIGNATURE TEST | Generated signature: %s", signature)
+
+	// Test POST request signature (like order placement)
+	postMethod := "POST"
+	postPath := "/v2/spot/order"
+	postBody := `{"market":"BTCUSDT","type":"buy","amount":"0.001","price":"10000"}`
+
+	postSignature := c.generateRESTSignature(postMethod, postPath, "", postBody, timestamp)
+	log.Printf("🧪 POST SIGNATURE TEST | Expected format: POST + path + body + timestamp")
+	log.Printf("🧪 POST SIGNATURE TEST | String to sign: %s%s%s%d", postMethod, postPath, postBody, timestamp)
+	log.Printf("🧪 POST SIGNATURE TEST | Generated signature: %s", postSignature)
 }
 
 // PlaceFOKOrder places a Fill-or-Kill order with automatic simulation/real API switching and spending controls
@@ -1440,8 +1468,9 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 			queryString := strings.Join(queryParts, "&")
 
 			// For GET requests: method + request_path + timestamp (no body)
-			// Pass query string separately to signature generation
-			signature := c.generateRESTSignature(method, requestPath, queryString, "", timestamp)
+			// For GET requests, the request_path should include the query string
+			requestPathWithQuery := requestPath + "?" + queryString
+			signature := c.generateRESTSignature(method, requestPathWithQuery, "", "", timestamp)
 
 			// Set authentication headers
 			authHeaders := map[string]string{
@@ -1851,8 +1880,9 @@ func (c *coinexClient) GetOpenOrders() ([]map[string]interface{}, error) {
 	}
 	queryString := strings.Join(queryParts, "&")
 
-	// Generate v2 signature with query string
-	signature := c.generateRESTSignature(method, requestPath, queryString, "", timestamp)
+	// Generate v2 signature with query string included in request path
+	requestPathWithQuery := requestPath + "?" + queryString
+	signature := c.generateRESTSignature(method, requestPathWithQuery, "", "", timestamp)
 
 	// Set v2 authentication headers
 	authHeaders := map[string]string{
@@ -2004,8 +2034,9 @@ func (c *coinexClient) getOrderFillData(tracker *FOKOrderTracker) (float64, floa
 	}
 	queryString := strings.Join(queryParts, "&")
 
-	// Generate signature
-	signature := c.generateRESTSignature(method, requestPath, queryString, "", timestamp)
+	// Generate signature with query string included in request path
+	requestPathWithQuery := requestPath + "?" + queryString
+	signature := c.generateRESTSignature(method, requestPathWithQuery, "", "", timestamp)
 
 	// Set authentication headers
 	authHeaders := map[string]string{

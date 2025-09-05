@@ -27,18 +27,18 @@
   "orderTimeout": 30,
   "enablePaperTrading": false,
   "fokOrderSettings": {
-    "pollingFrequencyHz": 0.3,
+    "pollingFrequencyHz": 3.0,
     "orderTimeoutSeconds": 3,
-    "maxRetryAttempts": 0,
+    "maxRetryAttempts": 3,
     "enableAggressiveReEvaluation": false,
     "cancelAllOnSingleFailure": true,
     "fokTimeoutSeconds": 3,
-    "fokPollingFrequencyHz": 0.3
+    "fokPollingFrequencyHz": 3.0
   },
   "arbitragePriceModifers": {
     "basePriceModifer": 0.0002,
-    "buyPriceModifer": 0.007,
-    "sellPriceModifer": 0.009
+    "buyPriceModifer": 0.008,
+    "sellPriceModifer": 0.015
   },
   "orderExecutionSettings": {
     "maxOrdersPerSecond": 15.0,

@@ -67,6 +67,12 @@ type ArbitrageOpportunity struct {
 	Price1 float64 `json:"price1"`
 	Price2 float64 `json:"price2"`
 	Price3 float64 `json:"price3"`
+
+	// Execution tracking
+	ExecutionStartTime time.Time `json:"executionStartTime"`
+	Leg1ExecutionTime  time.Time `json:"leg1ExecutionTime"`
+	Leg2ExecutionTime  time.Time `json:"leg2ExecutionTime"`
+	Leg3ExecutionTime  time.Time `json:"leg3ExecutionTime"`
 }
 
 // TradeOrder represents an individual trade order

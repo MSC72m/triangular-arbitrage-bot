@@ -182,6 +182,12 @@ func (ae *ArbitrageEngine) processArbitrageCycle(cycleCount int) {
 		cycleCount, opportunity.Path.Market1, opportunity.Path.Market2, opportunity.Path.Market3,
 		opportunity.NetProfit*100, opportunity.Volume)
 
+	// Log initial prices and order book data
+	log.Printf("📊 INITIAL OPPORTUNITY PRICES | Leg1: %.8f | Leg2: %.8f | Leg3: %.8f",
+		opportunity.Price1, opportunity.Price2, opportunity.Price3)
+
+	// Set execution start time
+	opportunity.ExecutionStartTime = time.Now()
 	ae.lastExecution = time.Now()
 
 	// FULLY SYNCHRONOUS EXECUTION - Wait for complete triangular trade
@@ -281,13 +287,17 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity ArbitrageOpportunity
 	// Leg 1: Buy Asset with USDT (LIMIT ORDER with calculated price)
 	// Calculate the asset amount to buy: USDT amount / price
 	assetAmountToBuy := initialUSDT / opportunity.Price1
+	opportunity.Leg1ExecutionTime = time.Now()
+
 	log.Printf("📤 LEG 1: Buying %.6f %s with %.6f USDT at limit price %.8f", assetAmountToBuy, opportunity.Path.Asset1, initialUSDT, opportunity.Price1)
 	log.Printf("🔍 LEG 1 DEBUG: initialUSDT=%.6f, Price1=%.8f, assetAmountToBuy=%.8f", initialUSDT, opportunity.Price1, assetAmountToBuy)
+	log.Printf("⏱️ LEG 1 TIMING: Detection to execution delay: %v", time.Since(opportunity.Timestamp))
 
 	// Use the same price from opportunity calculation for order placement
 	result1 := ae.placeAndWaitForOrder(opportunity.Path.Market1, "buy", assetAmountToBuy, opportunity.Price1, "Leg 1")
 	if result1 == nil || result1.Status != OrderStatusFilled {
 		log.Printf("❌ LEG 1 FAILED | Status: %v | Error: %s", result1.Status, result1.ErrorMessage)
+		ae.logCurrentOrderBookData(opportunity.Path.Market1, "Leg 1 Failure")
 		return // No recovery needed if leg 1 fails
 	}
 	results = append(results, result1)
@@ -300,14 +310,18 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity ArbitrageOpportunity
 		return
 	}
 
+	opportunity.Leg2ExecutionTime = time.Now()
 	log.Printf("📤 LEG 2: Selling %.6f %s for USDC at limit price %.8f", actualAssetReceived, opportunity.Path.Asset1, opportunity.Price2)
 	log.Printf("🔍 LEG 2 DEBUG: result1.FilledAmount=%.6f, result1.FilledValue=%.6f, result1.AvgPrice=%.8f",
 		result1.FilledAmount, result1.FilledValue, result1.AvgPrice)
+	log.Printf("⏱️ LEG 2 TIMING: Leg1 completion to Leg2 start: %v", time.Since(opportunity.Leg1ExecutionTime))
 
 	// Use the same price from opportunity calculation for order placement
 	result2 := ae.placeAndWaitForOrder(opportunity.Path.Market2, "sell", actualAssetReceived, opportunity.Price2, "Leg 2")
 	if result2 == nil || result2.Status != OrderStatusFilled {
 		log.Printf("❌ LEG 2 FAILED | Status: %v | Error: %s", result2.Status, result2.ErrorMessage)
+		log.Printf("📊 LEG 2 FAILURE ANALYSIS | Initial Price: %.8f | Current Order Book:", opportunity.Price2)
+		ae.logCurrentOrderBookData(opportunity.Path.Market2, "Leg 2 Failure")
 		// Attempt to reverse the trade by selling the asset back to USDT
 		ae.placeReversalOrder(opportunity.Path.Market1, "sell", actualAssetReceived, "Leg 2 Reversal")
 		return
@@ -323,9 +337,11 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity ArbitrageOpportunity
 		return
 	}
 
+	opportunity.Leg3ExecutionTime = time.Now()
 	log.Printf("📤 LEG 3: Selling %.6f USDC for USDT (MARKET ORDER)", actualUSDCReceived)
 	log.Printf("🔍 LEG 3 DEBUG: result2.FilledAmount=%.6f, result2.FilledValue=%.6f, result2.AvgPrice=%.8f",
 		result2.FilledAmount, result2.FilledValue, result2.AvgPrice)
+	log.Printf("⏱️ LEG 3 TIMING: Leg2 completion to Leg3 start: %v", time.Since(opportunity.Leg2ExecutionTime))
 
 	var result3 *OrderResult
 	for i := 0; i < ae.config.FOKOrderSettings.MaxRetryAttempts; i++ {
@@ -343,6 +359,8 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity ArbitrageOpportunity
 
 	if result3 == nil || result3.Status != OrderStatusFilled {
 		log.Printf("❌ LEG 3 FAILED | Status: %v | Error: %s", result3.Status, result3.ErrorMessage)
+		log.Printf("📊 LEG 3 FAILURE ANALYSIS | Initial Price: %.8f | Current Order Book:", opportunity.Price3)
+		ae.logCurrentOrderBookData(opportunity.Path.Market3, "Leg 3 Failure")
 		// Attempt to reverse the trade by selling the USDC back to USDT
 		// Wait for balance to update using configurable delay
 		balanceUpdateDelay := time.Duration(1000/ae.config.FOKOrderSettings.FOKPollingFrequencyHz) * time.Millisecond
@@ -1080,4 +1098,42 @@ func (ae *ArbitrageEngine) markOpportunityAsExecuted(opportunity ArbitrageOpport
 	ae.executedMutex.Lock()
 	ae.executedOpportunities[key] = time.Now()
 	ae.executedMutex.Unlock()
+}
+
+// logCurrentOrderBookData logs the current order book data for analysis
+func (ae *ArbitrageEngine) logCurrentOrderBookData(market, context string) {
+	// Get current market data
+	currentData, exists := ae.marketDepths.Load(market)
+	if !exists {
+		log.Printf("📊 %s | Market: %s | No current order book data available", context, market)
+		return
+	}
+
+	log.Printf("📊 %s | Market: %s | Current Order Book:", context, market)
+
+	// Log bids (top 5)
+	if len(currentData.Bids) > 0 {
+		log.Printf("   BIDS (top 5):")
+		for i, bid := range currentData.Bids {
+			if i >= 5 {
+				break
+			}
+			log.Printf("     Level %d: %s @ %s", i+1, bid.Price, bid.Amount)
+		}
+	} else {
+		log.Printf("   BIDS: No data available")
+	}
+
+	// Log asks (top 5)
+	if len(currentData.Asks) > 0 {
+		log.Printf("   ASKS (top 5):")
+		for i, ask := range currentData.Asks {
+			if i >= 5 {
+				break
+			}
+			log.Printf("     Level %d: %s @ %s", i+1, ask.Price, ask.Amount)
+		}
+	} else {
+		log.Printf("   ASKS: No data available")
+	}
 }

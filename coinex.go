@@ -103,7 +103,6 @@ func (c *coinexClient) GetApiKey() string {
 
 // generateRESTSignature creates HMAC-SHA256 signature for CoinEx API v2 REST endpoints
 func (c *coinexClient) generateRESTSignature(method, requestPath, queryString, body string, timestamp int64) string {
-	log.Printf("🔐 SIGNATURE FUNCTION CALLED | Method: %s | Path: %s | Query: %s | Body: %s | Timestamp: %d", method, requestPath, queryString, body, timestamp)
 	// Create the string to sign for v2 REST API
 	// Format: method + request_path + body + timestamp
 	// According to CoinEx docs: https://docs.coinex.com/api/v2/authorization
@@ -124,23 +123,6 @@ func (c *coinexClient) generateRESTSignature(method, requestPath, queryString, b
 	h := hmac.New(sha256.New, []byte(c.secretID))
 	h.Write([]byte(stringToSign))
 	signature := hex.EncodeToString(h.Sum(nil))
-
-	// Debug logging
-	log.Printf("🔐 REST SIGNATURE DEBUG | Method: %s | Path: %s | Query: %s | Body: %s | Timestamp: %d",
-		method, requestPath, queryString, body, timestamp)
-	log.Printf("🔐 REST SIGNATURE DEBUG | Full request path: %s", fullPath)
-	log.Printf("🔐 REST SIGNATURE DEBUG | String to sign: %s", stringToSign)
-	log.Printf("🔐 REST SIGNATURE DEBUG | Signature: %s", signature)
-	log.Printf("🔐 REST SIGNATURE DEBUG | Secret key length: %d", len(c.secretID))
-
-	// Helper function for min
-	min := func(a, b int) int {
-		if a < b {
-			return a
-		}
-		return b
-	}
-	log.Printf("🔐 REST SIGNATURE DEBUG | Secret key (first 8 chars): %s", c.secretID[:min(8, len(c.secretID))])
 
 	return signature
 }
@@ -1459,16 +1441,10 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 		default:
 			// Poll the order status
 			pollCount++
-			if pollCount <= 2 || pollCount%5 == 0 { // Reduced logging
-				log.Printf("🔍 POLLING ORDER | ID: %s | Attempt: %d", tracker.OrderID, pollCount)
-			}
 
 			// Single poll attempt
 			// Use current timestamp (add debug to check if timestamp is reasonable)
 			timestamp := time.Now().UnixMilli()
-			if pollCount <= 2 {
-				log.Printf("🔍 TIMESTAMP DEBUG | Generated timestamp: %d | Current time: %s", timestamp, time.Now().String())
-			}
 			method := "GET"
 			requestPath := "/v2/spot/order-status"
 
@@ -1481,16 +1457,6 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 			// Use encapsulated helper for key extraction and placement
 			queryString := c.buildSortedQueryString(queryParams)
 
-			// Debug logging for first few attempts
-			if pollCount <= 2 {
-				for key, value := range queryParams {
-					log.Printf("🔍 QUERY DEBUG | Key: %s | Value: %s", key, value)
-				}
-			}
-			if pollCount <= 2 {
-				log.Printf("🔍 QUERY STRING DEBUG | Final query string: %s", queryString)
-			}
-
 			// For GET requests: method + request_path + timestamp (no body)
 			// Pass query string separately to signature generation
 			signature := c.generateRESTSignature(method, requestPath, queryString, "", timestamp)
@@ -1500,13 +1466,6 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 				"X-COINEX-KEY":       c.apiKey,
 				"X-COINEX-SIGN":      signature,
 				"X-COINEX-TIMESTAMP": strconv.FormatInt(timestamp, 10),
-			}
-
-			// Debug logging for headers
-			if pollCount <= 2 {
-				log.Printf("🔐 AUTH HEADERS DEBUG | X-COINEX-KEY: %s", c.apiKey)
-				log.Printf("🔐 AUTH HEADERS DEBUG | X-COINEX-SIGN: %s", signature)
-				log.Printf("🔐 AUTH HEADERS DEBUG | X-COINEX-TIMESTAMP: %s", strconv.FormatInt(timestamp, 10))
 			}
 
 			// Merge auth headers with existing headers (same as POST requests)
@@ -1523,8 +1482,6 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 				log.Printf("🔍 FOK POLLING | ID: %s | Using performRequest | URL: %s", tracker.OrderID, requestParams["url"])
 			}
 
-			// Use performRequest instead of manual request creation (same as POST requests)
-			log.Printf("🔍 REQUEST DEBUG | About to call performRequest with params: %+v", requestParams)
 			response, err := c.httpClient.performRequest(requestParams, "GET")
 			if err != nil {
 				if pollCount <= 2 {

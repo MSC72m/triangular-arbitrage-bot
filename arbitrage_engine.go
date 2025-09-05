@@ -725,78 +725,150 @@ func (ae *ArbitrageEngine) validateMarketData(path TriangularPath, snapshot map[
 	return market1Data, market2Data, market3Data, true
 }
 
-// getIntendedPrice calculates the execution price for order placement
-// We use conservative pricing to ensure orders execute while maintaining profitability
-func (ae *ArbitrageEngine) getIntendedPrice(price float64, dir string) float64 {
-	switch dir {
+// getIntendedPriceGeneric calculates the execution price for order placement using generics
+// For faster execution:
+//   - For buy orders: we want to buy at a slightly higher price (closer to the ask), so we add a small premium.
+//   - For sell orders: we want to sell at a slightly lower price (closer to the bid), so we subtract a small discount.
+func getIntendedPriceGeneric[T any](
+	src T,
+	getDepthData func(T, string) []Depth,
+	getMarket func(T) string,
+	direction string,
+	buyModifier, sellModifier float64,
+) (float64, error) {
+	var d *Depth
+	switch direction {
 	case "buy":
-		// For buy orders: use bid price + small premium to ensure execution
-		return price * (1 + ae.config.OrderExecutionSettings.PriceModifier)
+		asks := getDepthData(src, "buy")
+		if len(asks) == 0 {
+			return 0, fmt.Errorf("no asks for %s", getMarket(src))
+		}
+		d = &asks[0]
+		p, err := strconv.ParseFloat(d.Price, 64)
+		if err != nil {
+			return 0, err
+		}
+		return p * (1 + buyModifier), nil
 	case "sell":
-		// For sell orders: use ask price - small discount to ensure execution
-		return price * (1 - ae.config.OrderExecutionSettings.PriceModifier)
+		bids := getDepthData(src, "sell")
+		if len(bids) == 0 {
+			return 0, fmt.Errorf("no bids for %s", getMarket(src))
+		}
+		d = &bids[0]
+		p, err := strconv.ParseFloat(d.Price, 64)
+		if err != nil {
+			return 0, err
+		}
+		return p * (1 - sellModifier), nil
 	default:
-		return price
+		return 0, fmt.Errorf("unknown direction %q", direction)
 	}
 }
 
-// calculatePrices calculates the prices for each market
-func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, market2Data, market3Data *OrderBook, detectionStart time.Time, cycleCount int) (float64, float64, float64, error) {
-	// Helper function to get order book price
-	getOrderBookPrice := func(market string, marketData *OrderBook, direction string, cycleCount int) (float64, error) {
-		if marketData == nil || len(marketData.Bids) == 0 || len(marketData.Asks) == 0 {
-			return 0, fmt.Errorf("no order book data available for %s", market)
+func (ae *ArbitrageEngine) getExecuteableData(market1Data, market2Data, market3Data *OrderBook, path TriangularPath) (float64, float64, float64, error) {
+	// Helper function to get the appropriate price list (bids or asks) based on direction
+	// with volume checking to ensure sufficient liquidity
+	getDepthData := func(marketData *OrderBook, direction string) []Depth {
+		if marketData == nil {
+			return nil
 		}
 
-		var price float64
-
+		var priceList []Depth
 		switch direction {
 		case "buy":
-			// When buying, we use the BID price (highest bid) - this is the price we can buy at
-			if len(marketData.Bids) == 0 {
-				return 0, fmt.Errorf("no bid orders available for %s", market)
-			}
-
-			bidPrice, err := strconv.ParseFloat(marketData.Bids[0].Price, 64)
-			if err != nil {
-				return 0, fmt.Errorf("invalid bid price format for %s: %v", market, err)
-			}
-			price = ae.getIntendedPrice(bidPrice, "buy")
+			priceList = marketData.Asks
 		case "sell":
-			// When selling, we use the ASK price (lowest ask) - this is the price we can sell at
-			if len(marketData.Asks) == 0 {
-				return 0, fmt.Errorf("no ask orders available for %s", market)
-			}
-			askPrice, err := strconv.ParseFloat(marketData.Asks[0].Price, 64)
-			if err != nil {
-				return 0, fmt.Errorf("invalid ask price format for %s: %v", market, err)
-			}
-			price = ae.getIntendedPrice(askPrice, "sell")
+			priceList = marketData.Bids
 		default:
-			return 0, fmt.Errorf("invalid direction: %s", direction)
+			return nil
 		}
-		return price, nil
+
+		// Check for sufficient volume at each price level
+		for idx, depth := range priceList {
+			amount, err := strconv.ParseFloat(depth.Amount, 64)
+			if err != nil {
+				continue
+			}
+			price, err := strconv.ParseFloat(depth.Price, 64)
+			if err != nil {
+				continue
+			}
+			// Convert the amount to USDT amount because static amount is in usdt
+			usdtAmount := amount * price
+
+			// If this level doesn't have enough volume, skip to the next level
+			// Later one we need to encapsulate this calculation bellow for price compression because we might need to use dynamic volume calculation
+			if usdtAmount < ae.config.OrderExecutionSettings.StaticOrderAmount {
+				fmt.Printf("Price Level with enough volume was: %d and the Price was: %.6f\n", idx, amount)
+				// Return remaining levels with sufficient volume
+				if idx+1 < len(priceList) {
+					return priceList[idx+1:]
+				}
+				return nil
+			}
+		}
+
+		return priceList
 	}
 
-	// Get prices for all markets
-	price1, err := getOrderBookPrice(path.Market1, market1Data, path.Direction1, cycleCount)
+	// Helper function to get market name
+	getMarket := func(marketData *OrderBook) string {
+		if marketData == nil {
+			return "unknown"
+		}
+		return marketData.Market
+	}
+
+	// Calculate prices using the generic function
+	price1, err := getIntendedPriceGeneric(
+		market1Data,
+		getDepthData,
+		getMarket,
+		path.Direction1,
+		ae.config.ArbitragePriceModifers.BuyPriceModifer,
+		ae.config.ArbitragePriceModifers.SellPriceModifer,
+	)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, fmt.Errorf("market1 price calculation failed: %v", err)
 	}
 
-	price2, err := getOrderBookPrice(path.Market2, market2Data, path.Direction2, cycleCount)
+	price2, err := getIntendedPriceGeneric(
+		market2Data,
+		getDepthData,
+		getMarket,
+		path.Direction2,
+		ae.config.ArbitragePriceModifers.BuyPriceModifer,
+		ae.config.ArbitragePriceModifers.SellPriceModifer,
+	)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, fmt.Errorf("market2 price calculation failed: %v", err)
 	}
 
-	price3, err := getOrderBookPrice(path.Market3, market3Data, path.Direction3, cycleCount)
+	price3, err := getIntendedPriceGeneric(
+		market3Data,
+		getDepthData,
+		getMarket,
+		path.Direction3,
+		ae.config.ArbitragePriceModifers.BuyPriceModifer,
+		ae.config.ArbitragePriceModifers.SellPriceModifer,
+	)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("market3 price calculation failed: %v", err)
+	}
+
+	return price1, price2, price3, nil
+}
+
+func (ae *ArbitrageEngine) calculatePrices(path TriangularPath, market1Data, market2Data, market3Data *OrderBook, detectionStart time.Time, cycleCount int) (float64, float64, float64, error) {
+	// Get prices for all markets using the generic function
+	price1, price2, price3, err := ae.getExecuteableData(market1Data, market2Data, market3Data, path)
 	if err != nil {
 		return 0, 0, 0, err
 	}
 
 	// Validate prices
 	if price1 <= 0 || price2 <= 0 || price3 <= 0 {
-		return 0, 0, 0, fmt.Errorf("invalid prices")
+		return 0, 0, 0, fmt.Errorf("invalid prices: %.8f, %.8f, %.8f", price1, price2, price3)
 	}
 
 	return price1, price2, price3, nil
@@ -981,11 +1053,7 @@ func (ae *ArbitrageEngine) isOpportunityAlreadyExecuted(opportunity ArbitrageOpp
 
 	// Check if it was executed within the last 30 seconds
 	cooldownPeriod := 30 * time.Second
-	if time.Since(lastExecuted) < cooldownPeriod {
-		return true
-	}
-
-	return false
+	return time.Since(lastExecuted) < cooldownPeriod
 }
 
 // markOpportunityAsExecuted marks an opportunity as executed

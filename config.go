@@ -30,7 +30,12 @@ type OrderExecutionSettings struct {
 	EnableSpendingLimits    bool    `json:"enableSpendingLimits"`    // Enable spending protection
 	MinOrderAmount          float64 `json:"minOrderAmount"`          // Minimum order amount (USD)
 	MaxOrderAmount          float64 `json:"maxOrderAmount"`          // Maximum order amount (USD)
-	PriceModifier           float64 `json:"priceModifier"`           // Price modifier (0.0-1.0)
+}
+
+type PriceModifers struct {
+	BasePriceModifer float64 `json:"basePriceModifer"`
+	BuyPriceModifer float64 `json:"buyPriceModifer"`
+	SellPriceModifer float64 `json:"sellPriceModifer"`
 }
 
 type Config struct {
@@ -45,6 +50,8 @@ type Config struct {
 	QuoteCurrencies []string `json:"quoteCurrencies"` // Base currencies for triangular arbitrage
 	CriticalMarkets []string `json:"criticalMarkets"` // Critical markets for triangular arbitrage
 	IncludeBTC      bool     `json:"includeBTC"`      // Include BTC pairs in arbitrage
+
+	ArbitragePriceModifers PriceModifers `json:"arbitragePriceModifers"`
 
 	// Order Execution & Asset Locking Configuration
 	EnableAssetLocking          bool `json:"enableAssetLocking"`          // Enable asset locking during order execution
@@ -154,7 +161,6 @@ func DefaultConfig() *Config {
 
 		// Order Execution Settings
 		OrderExecutionSettings: OrderExecutionSettings{
-			PriceModifier:           0.01,
 			MaxOrdersPerSecond:      0.5, // 1 order every 2 seconds
 			MaxConcurrentArbitrages: 3,   // 3 concurrent arbitrage cycles max (each cycle = 3 orders)
 			OrderAmountType:         "static",

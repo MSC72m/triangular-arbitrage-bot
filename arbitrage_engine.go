@@ -650,6 +650,7 @@ func (ae *ArbitrageEngine) calculateOpportunity(path TriangularPath, snapshot ma
 		log.Printf("💰 PROFITABLE OPPORTUNITY | Path: %s→%s→%s | Profit: %.6f%% | Volume: $%.2f",
 			path.Market1, path.Market2, path.Market3, netProfit*100, volume)
 		log.Printf("   Calculated Prices: %.8f → %.8f → %.8f", price1, price2, price3)
+		log.Printf("   ✅ VOLUME CHECK PASSED: All markets have sufficient liquidity for StaticOrderAmount: %.6f USDT", ae.config.OrderExecutionSettings.StaticOrderAmount)
 
 		// Show order book details in clear format: Price @ Volume (full precision)
 		if market1Data != nil && len(market1Data.Bids) > 0 && len(market1Data.Asks) > 0 {
@@ -768,9 +769,9 @@ func getIntendedPriceGeneric[T any](
 func (ae *ArbitrageEngine) getExecuteableData(market1Data, market2Data, market3Data *OrderBook, path TriangularPath) (float64, float64, float64, error) {
 	// Helper function to get the appropriate price list (bids or asks) based on direction
 	// with volume checking to ensure sufficient liquidity
-	getDepthData := func(marketData *OrderBook, direction string) []Depth {
+	getDepthData := func(marketData *OrderBook, direction string) ([]Depth, int, error) {
 		if marketData == nil {
-			return nil
+			return nil, -1, fmt.Errorf("no market data provided to get depth data")
 		}
 
 		var priceList []Depth
@@ -780,7 +781,11 @@ func (ae *ArbitrageEngine) getExecuteableData(market1Data, market2Data, market3D
 		case "sell":
 			priceList = marketData.Bids
 		default:
-			return nil
+			return nil, -1, fmt.Errorf("invalid market direction: %s", direction)
+		}
+
+		if len(priceList) == 0 {
+			return nil, -1, fmt.Errorf("no %s data available for market %s", direction, marketData.Market)
 		}
 
 		// Check for sufficient volume at each price level
@@ -796,19 +801,20 @@ func (ae *ArbitrageEngine) getExecuteableData(market1Data, market2Data, market3D
 			// Convert the amount to USDT amount because static amount is in usdt
 			usdtAmount := amount * price
 
-			// If this level doesn't have enough volume, skip to the next level
+			// If this level has enough volume, return remaining levels
 			// Later one we need to encapsulate this calculation bellow for price compression because we might need to use dynamic volume calculation
-			if usdtAmount < ae.config.OrderExecutionSettings.StaticOrderAmount {
-				fmt.Printf("Price Level with enough volume was: %d and the Price was: %.6f\n", idx, amount)
+			if usdtAmount >= ae.config.OrderExecutionSettings.StaticOrderAmount {
 				// Return remaining levels with sufficient volume
 				if idx+1 < len(priceList) {
-					return priceList[idx+1:]
+					return priceList[idx+1:], idx, nil
 				}
-				return nil
+				return priceList, idx, nil
 			}
 		}
 
-		return priceList
+		// No levels found with sufficient volume
+		return nil, -1, fmt.Errorf("no market level found with enough volume for StaticOrderAmount %.6f USDT, Market: %s, Direction: %s",
+			ae.config.OrderExecutionSettings.StaticOrderAmount, marketData.Market, direction)
 	}
 
 	// Helper function to get market name
@@ -819,10 +825,19 @@ func (ae *ArbitrageEngine) getExecuteableData(market1Data, market2Data, market3D
 		return marketData.Market
 	}
 
+	// Wrapper function to adapt getDepthData signature for the generic function
+	getDepthDataWrapper := func(marketData *OrderBook, direction string) []Depth {
+		depthList, _, err := getDepthData(marketData, direction)
+		if err != nil {
+			return nil
+		}
+		return depthList
+	}
+
 	// Calculate prices using the generic function
 	price1, err := getIntendedPriceGeneric(
 		market1Data,
-		getDepthData,
+		getDepthDataWrapper,
 		getMarket,
 		path.Direction1,
 		ae.config.ArbitragePriceModifers.BuyPriceModifer,
@@ -834,7 +849,7 @@ func (ae *ArbitrageEngine) getExecuteableData(market1Data, market2Data, market3D
 
 	price2, err := getIntendedPriceGeneric(
 		market2Data,
-		getDepthData,
+		getDepthDataWrapper,
 		getMarket,
 		path.Direction2,
 		ae.config.ArbitragePriceModifers.BuyPriceModifer,
@@ -846,7 +861,7 @@ func (ae *ArbitrageEngine) getExecuteableData(market1Data, market2Data, market3D
 
 	price3, err := getIntendedPriceGeneric(
 		market3Data,
-		getDepthData,
+		getDepthDataWrapper,
 		getMarket,
 		path.Direction3,
 		ae.config.ArbitragePriceModifers.BuyPriceModifer,

@@ -740,22 +740,22 @@ func getIntendedPriceGeneric[T any](
 	var d *Depth
 	switch direction {
 	case "buy":
-		asks := getDepthData(src, "buy")
-		if len(asks) == 0 {
+		bids := getDepthData(src, "buy")
+		if len(bids) == 0 {
 			return 0, fmt.Errorf("no asks for %s", getMarket(src))
 		}
-		d = &asks[0]
+		d = &bids[0]
 		p, err := strconv.ParseFloat(d.Price, 64)
 		if err != nil {
 			return 0, err
 		}
 		return p * (1 + buyModifier), nil
 	case "sell":
-		bids := getDepthData(src, "sell")
-		if len(bids) == 0 {
+		ask := getDepthData(src, "sell")
+		if len(ask) == 0 {
 			return 0, fmt.Errorf("no bids for %s", getMarket(src))
 		}
-		d = &bids[0]
+		d = &ask[0]
 		p, err := strconv.ParseFloat(d.Price, 64)
 		if err != nil {
 			return 0, err
@@ -777,9 +777,9 @@ func (ae *ArbitrageEngine) getExecuteableData(market1Data, market2Data, market3D
 		var priceList []Depth
 		switch direction {
 		case "buy":
-			priceList = marketData.Asks
-		case "sell":
 			priceList = marketData.Bids
+		case "sell":
+			priceList = marketData.Asks
 		default:
 			return nil, -1, fmt.Errorf("invalid market direction: %s", direction)
 		}

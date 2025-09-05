@@ -37,8 +37,8 @@
   },
   "arbitragePriceModifers": {
     "basePriceModifer": 0.0002,
-    "buyPriceModifer": 0.006,
-    "sellPriceModifer": 0.004
+    "buyPriceModifer": 0.007,
+    "sellPriceModifer": 0.009
   },
   "orderExecutionSettings": {
     "maxOrdersPerSecond": 15.0,

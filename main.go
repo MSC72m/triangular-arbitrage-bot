@@ -60,22 +60,13 @@ func main() {
 	log.Printf("   Min Order Amount: $%.2f", config.OrderExecutionSettings.MinOrderAmount)
 	log.Printf("   Max Order Amount: $%.2f", config.OrderExecutionSettings.MaxOrderAmount)
 
-	// Initialize HTTP client with WebSocket support and optimized settings
+	// Initialize HTTP client with WebSocket support
 	httpClient := newHttpClient(config)
 	httpClient.setheaders(map[string]string{
 		"Content-Type": "application/json",
 		"User-Agent":   "TriangularArbitrageBot/2.0",
-		"Connection":   "keep-alive",           // Enable connection reuse
-		"Keep-Alive":   "timeout=30, max=1000", // Keep connections alive
 	}).setClient(&http.Client{
-		Timeout: 10 * time.Second, // Reduced timeout for faster failure detection
-		Transport: &http.Transport{
-			MaxIdleConns:        100,              // Increase connection pool
-			MaxIdleConnsPerHost: 50,               // More connections per host
-			IdleConnTimeout:     90 * time.Second, // Keep connections alive longer
-			DisableKeepAlives:   false,            // Enable keep-alive
-			DisableCompression:  false,            // Enable compression
-		},
+		Timeout: 30 * time.Second,
 	})
 
 	// Initialize exchange client

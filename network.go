@@ -152,34 +152,6 @@ func (c *HttpClient) mergeHeaders(newHeaders map[string]string) *HttpClient {
 	return c
 }
 
-// createWebSocketHeaders creates WebSocket-compatible headers by filtering out HTTP-specific headers
-func (c *HttpClient) createWebSocketHeaders() http.Header {
-	wsHeaders := make(http.Header)
-
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	// Headers that are NOT compatible with WebSocket connections
-	httpOnlyHeaders := map[string]bool{
-		"Connection":      true, // WebSocket needs "Upgrade", not "keep-alive"
-		"Keep-Alive":      true, // Not needed for WebSocket
-		"Accept":          true, // WebSocket has its own accept mechanism
-		"Accept-Encoding": true, // WebSocket handles compression differently
-	}
-
-	// Copy only WebSocket-compatible headers
-	for k, v := range c.headers {
-		if !httpOnlyHeaders[k] {
-			wsHeaders.Set(k, v)
-		}
-	}
-
-	// Add WebSocket-specific headers
-	wsHeaders.Set("User-Agent", "triangular-arbitrage-bot/2.0")
-
-	return wsHeaders
-}
-
 // WebSocket Methods
 
 func (c *HttpClient) SetWebSocketUrl(host string) *HttpClient {
@@ -199,8 +171,9 @@ func (c *HttpClient) ConnectWebSocket() error {
 
 	fmt.Printf("🔗 Connecting to WebSocket: %s\n", c.wsUrl)
 
-	// Create WebSocket-specific headers (exclude HTTP-specific headers)
-	wsHeaders := c.createWebSocketHeaders()
+	// Use minimal headers for WebSocket connection
+	wsHeaders := make(http.Header)
+	wsHeaders.Set("User-Agent", "triangular-arbitrage-bot/2.0")
 
 	fmt.Printf("🔗 WebSocket headers: %+v\n", wsHeaders)
 
@@ -442,8 +415,9 @@ func (c *HttpClient) ReconnectWebSocket() error {
 
 	fmt.Printf("🔄 Attempting WebSocket reconnection to %s\n", c.wsUrl)
 
-	// Create WebSocket-specific headers (exclude HTTP-specific headers)
-	wsHeaders := c.createWebSocketHeaders()
+	// Use minimal headers for WebSocket connection
+	wsHeaders := make(http.Header)
+	wsHeaders.Set("User-Agent", "triangular-arbitrage-bot/2.0")
 
 	dialer := &websocket.Dialer{
 		HandshakeTimeout: 45 * time.Second,

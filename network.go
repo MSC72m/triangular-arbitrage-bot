@@ -171,13 +171,8 @@ func (c *HttpClient) ConnectWebSocket() error {
 
 	fmt.Printf("🔗 Connecting to WebSocket: %s\n", c.wsUrl)
 
-	// Use existing headers for WebSocket connection
+	// Use minimal headers for WebSocket connection
 	wsHeaders := make(http.Header)
-	for k, v := range c.headers {
-		wsHeaders.Set(k, v)
-	}
-
-	// Add WebSocket specific headers
 	wsHeaders.Set("User-Agent", "triangular-arbitrage-bot/2.0")
 
 	fmt.Printf("🔗 WebSocket headers: %+v\n", wsHeaders)
@@ -420,15 +415,8 @@ func (c *HttpClient) ReconnectWebSocket() error {
 
 	fmt.Printf("🔄 Attempting WebSocket reconnection to %s\n", c.wsUrl)
 
-	// Use existing headers for WebSocket connection
+	// Use minimal headers for WebSocket connection
 	wsHeaders := make(http.Header)
-	c.mu.RLock()
-	for k, v := range c.headers {
-		wsHeaders.Set(k, v)
-	}
-	c.mu.RUnlock()
-
-	// Add WebSocket specific headers
 	wsHeaders.Set("User-Agent", "triangular-arbitrage-bot/2.0")
 
 	dialer := &websocket.Dialer{

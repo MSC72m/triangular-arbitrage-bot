@@ -1116,6 +1116,35 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 	tracker.OrderID = actualOrderID
 	tracker.mu.Unlock()
 
+	// Immediate status check before starting polling loop
+	log.Printf("🔍 IMMEDIATE STATUS CHECK | ID: %s | Market: %s", actualOrderID, tracker.Market)
+	if c.checkOrderStatusImmediately(tracker) {
+		log.Printf("✅ ORDER FILLED IMMEDIATELY | ID: %s | No polling needed", actualOrderID)
+		// Order filled immediately, get fill data and return success
+		filledAmount, filledValue, avgPrice, fee := c.getOrderFillData(tracker)
+		result := &OrderResult{
+			OrderID:       actualOrderID,
+			Market:        tracker.Market,
+			Type:          tracker.Type,
+			Amount:        tracker.Amount,
+			Price:         tracker.Price,
+			Status:        OrderStatusFilled,
+			FilledAmount:  filledAmount,
+			FilledValue:   filledValue,
+			AvgPrice:      avgPrice,
+			Fee:           fee,
+			FeeCurrency:   "USDT",
+			ExecutionTime: time.Since(tracker.CreatedAt).Milliseconds(),
+			ErrorMessage:  "",
+			Timestamp:     time.Now(),
+		}
+		orderResultChan <- result
+		return
+	}
+
+	// If not filled immediately, start aggressive polling with minimal delay
+	log.Printf("⏳ ORDER NOT FILLED IMMEDIATELY | ID: %s | Starting aggressive polling", actualOrderID)
+
 	// Poll until filled or timeout with configurable timeout for FOK
 	isFilled, err := c.pollRealOrderStatus(tracker)
 	if err != nil {
@@ -1318,7 +1347,7 @@ func (c *coinexClient) placeRealMarketOrder(tracker *FOKOrderTracker) (string, e
 // placeRealLimitOrder places a real limit order via CoinEx API v2
 func (c *coinexClient) placeRealLimitOrder(tracker *FOKOrderTracker) (string, error) {
 	log.Printf("📤 PLACING LIMIT ORDER | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
-		tracker.Market, tracker.Type, tracker.Amount, tracker.Price, tracker.Price)
+		tracker.Market, tracker.Type, tracker.Amount, tracker.Price)
 
 	// Use v2 API for spot trading
 	timestamp := time.Now().UnixMilli()
@@ -1442,6 +1471,17 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 			// Poll the order status
 			pollCount++
 
+			// For first few polls, check immediately without sleep
+			if pollCount <= 5 {
+				// Immediate check for first 5 attempts (very aggressive)
+			} else if pollCount <= 10 {
+				// Very short delay for next 5 attempts
+				time.Sleep(10 * time.Millisecond)
+			} else {
+				// Normal delay for subsequent polls
+				time.Sleep(pollingInterval)
+			}
+
 			// Single poll attempt
 			// Use current timestamp (add debug to check if timestamp is reasonable)
 			timestamp := time.Now().UnixMilli()
@@ -1549,8 +1589,8 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 				}
 			}
 
-			// Order is not filled yet, wait before next poll
-			time.Sleep(pollingInterval)
+			// Order is not filled yet, continue to next poll
+			// (sleep is handled conditionally above)
 		}
 	}
 }
@@ -1974,6 +2014,66 @@ func getMapKeysBool(m map[string]bool) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// checkOrderStatusImmediately checks order status immediately after placement
+func (c *coinexClient) checkOrderStatusImmediately(tracker *FOKOrderTracker) bool {
+	// Quick status check without full polling logic
+	timestamp := time.Now().UnixMilli()
+	method := "GET"
+	requestPath := "/v2/spot/order-status"
+
+	// Build query string for order status API
+	queryParams := map[string]string{
+		"market":   tracker.Market,
+		"order_id": tracker.OrderID,
+	}
+
+	queryString := c.buildSortedQueryString(queryParams)
+	signature := c.generateRESTSignature(method, requestPath, queryString, "", timestamp)
+
+	// Set authentication headers
+	authHeaders := map[string]string{
+		"X-COINEX-KEY":       c.apiKey,
+		"X-COINEX-SIGN":      signature,
+		"X-COINEX-TIMESTAMP": strconv.FormatInt(timestamp, 10),
+	}
+
+	c.httpClient.mergeHeaders(authHeaders)
+
+	requestParams := map[string]string{
+		"url":    "https://api.coinex.com" + requestPath + "?" + queryString,
+		"method": method,
+	}
+
+	response, err := c.httpClient.performRequest(requestParams, "GET")
+	if err != nil {
+		log.Printf("❌ IMMEDIATE STATUS CHECK FAILED | ID: %s | Error: %v", tracker.OrderID, err)
+		return false
+	}
+
+	// Check response
+	if code, ok := response["code"].(float64); !ok || code != 0 {
+		log.Printf("⚠️ IMMEDIATE STATUS CHECK API ERROR | ID: %s | Code: %.0f", tracker.OrderID, code)
+		return false
+	}
+
+	// Extract order data
+	data, ok := response["data"].(map[string]interface{})
+	if !ok {
+		log.Printf("⚠️ IMMEDIATE STATUS CHECK FORMAT ERROR | ID: %s", tracker.OrderID)
+		return false
+	}
+
+	// Check status
+	if statusStr, ok := data["status"].(string); ok {
+		if statusStr == "done" || statusStr == "filled" || statusStr == "closed" || statusStr == "completed" {
+			log.Printf("✅ IMMEDIATE FILL DETECTED | ID: %s | Status: %s", tracker.OrderID, statusStr)
+			return true
+		}
+	}
+
+	return false
 }
 
 // getOrderFillData retrieves actual fill data from the order status API

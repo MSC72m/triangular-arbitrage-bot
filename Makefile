@@ -8,7 +8,7 @@ GO_FILES=$(shell find . -name "*.go" -not -path "./.git/*")
 
 # Go build flags
 LDFLAGS=-ldflags="-s -w"
-BUILD_FLAGS=-trimpath
+BUILD_FLAGS=-trimpath -buildvcs=false
 
 # Default target
 .PHONY: all

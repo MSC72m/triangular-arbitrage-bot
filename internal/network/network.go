@@ -19,6 +19,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"triangular-arbitrage-bot/internal/config"
+	"triangular-arbitrage-bot/internal/network"
+	"triangular-arbitrage-bot/pkg/models"
 )
 
 const (
@@ -33,7 +37,7 @@ type HttpClient struct {
 	client  *http.Client
 	headers map[string]string
 	mu      sync.RWMutex
-	config  *Config
+	config  *config.Config
 
 	// WebSocket fields
 	wsConn          *websocket.Conn
@@ -43,11 +47,11 @@ type HttpClient struct {
 	wsConnected     bool
 
 	// Market data cache with proper synchronization
-	marketData   map[string]*OrderBook
+	marketData   map[string]*models.OrderBook
 	marketDataMu sync.RWMutex
 
 	// Rate limiting
-	rateLimiter *RateLimiter
+	rateLimiter *network.RateLimiter
 
 	// WebSocket connection management
 	wsReconnectChan chan bool
@@ -72,20 +76,20 @@ type HttpClient struct {
 	wsProcessingStopped bool
 
 	// Market depths reference for resubscription
-	marketDepths *MarketDepths
+	marketDepths *models.MarketDepths
 
 	// Flag to track initial phase (full updates only) - DEPRECATED
 	// We now use REST API for initial data and WebSocket with is_full=false for incremental updates
 }
 
-func newHttpClient(config *Config) *HttpClient {
+func newHttpClient(config *config.Config) *HttpClient {
 	return &HttpClient{
 		config:              config,
 		headers:             make(map[string]string),
 		wsSubscriptions:     make(map[string]bool),
 		wsDataFeed:          make(chan []byte, config.WebSocketBufferSize), // Reasonable buffer for incremental updates
-		marketData:          make(map[string]*OrderBook),
-		rateLimiter:         NewRateLimiter(config.RateLimitPerSecond, config.RateLimitPerSecond),
+		marketData:          make(map[string]*models.OrderBook),
+		rateLimiter:         network.NewRateLimiter(config.RateLimitPerSecond, config.RateLimitPerSecond),
 		wsUrl:               "wss://socket.coinex.com/v2/spot", // Original CoinEx spot WebSocket URL
 		wsReconnectChan:     make(chan bool, 1),
 		wsStopChan:          make(chan bool, 1),
@@ -561,7 +565,7 @@ func (c *HttpClient) readWebSocketMessages() {
 		case websocket.TextMessage:
 			// Minimal logging for text messages
 			if messageCount <= 2 {
-				fmt.Printf("📨 WebSocket Text Message #%d: %s\n", messageCount, string(message)[:Min(100, len(message))])
+				fmt.Printf("📨 WebSocket Text Message #%d: %s\n", messageCount, string(message)[:utils.Min(100, len(message))])
 			}
 
 			// Send to data feed channel (non-blocking)
@@ -833,7 +837,7 @@ func (c *HttpClient) SubscribeWebSocket(markets []string, isFull bool) error {
 
 	fmt.Printf("📡 Subscribing to %d markets in batches of %d (isFull: %v)...\n", totalMarkets, c.config.wsSubscriptionsBatchSize, isFull)
 
-	for i := 0; i < totalMarkets; i += c.config.wsSubscriptionsBatchSize {
+	for i := 0; i < totalMarkets; i += c.config.{
 		end := i + c.config.wsSubscriptionsBatchSize
 		if end > totalMarkets {
 			end = totalMarkets
@@ -1333,17 +1337,6 @@ func (c *HttpClient) GetMarketTicker(market string) (float64, error) {
 
 	return price, nil
 }
-
-// Helper function to get map keys for debugging
-func getMapKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
-// HTTP Methods (existing functionality)
 
 func (c *HttpClient) getQueryString(urlStr string, params map[string]string) string {
 	var sb strings.Builder

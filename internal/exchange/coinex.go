@@ -13,6 +13,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"triangular-arbitrage-bot/internal/config"
+	"triangular-arbitrage-bot/pkg/models"
 )
 
 // OrderStatus represents the status of an order
@@ -66,7 +69,7 @@ type FOKOrderTracker struct {
 	cancelOnce sync.Once
 }
 
-type coinexClient struct {
+type CoinexClient struct {
 	httpClient                 *HttpClient
 	apiKey                     string
 	secretID                   string
@@ -80,9 +83,9 @@ type coinexClient struct {
 	mu            sync.RWMutex
 }
 
-func NewCoinexClient(httpClient *HttpClient, config *Config) *coinexClient {
+func NewCoinexClient(httpClient *HttpClient, config *Config) *CoinexClient {
 	fmt.Printf("Loading CoinEx client with quote currencies from config: %v\n", config.QuoteCurrencies)
-	client := &coinexClient{
+	client := &CoinexClient{
 		httpClient:     httpClient,
 		apiKey:         config.APIKey,   // Use API key as API key
 		secretID:       config.SecretID, // Use secret ID as secret ID
@@ -97,12 +100,12 @@ func NewCoinexClient(httpClient *HttpClient, config *Config) *coinexClient {
 	return client
 }
 
-func (c *coinexClient) GetApiKey() string {
+func (c *CoinexClient) GetApiKey() string {
 	return c.apiKey
 }
 
 // generateRESTSignature creates HMAC-SHA256 signature for CoinEx API v2 REST endpoints
-func (c *coinexClient) generateRESTSignature(method, requestPath, queryString, body string, timestamp int64) string {
+func (c *CoinexClient) generateRESTSignature(method, requestPath, queryString, body string, timestamp int64) string {
 	// Create the string to sign for v2 REST API
 	// Format: method + request_path + body + timestamp
 	// According to CoinEx docs: https://docs.coinex.com/api/v2/authorization
@@ -128,7 +131,7 @@ func (c *coinexClient) generateRESTSignature(method, requestPath, queryString, b
 }
 
 // generateWebSocketSignature creates HMAC-SHA256 signature for CoinEx WebSocket authentication
-func (c *coinexClient) generateWebSocketSignature(timestamp int64) string {
+func (c *CoinexClient) generateWebSocketSignature(timestamp int64) string {
 	// Create the string to sign for WebSocket authentication
 	// Format: timestamp (just the timestamp!)
 	// According to CoinEx docs: https://docs.coinex.com/api/v2/authorization
@@ -150,12 +153,12 @@ func (c *coinexClient) generateWebSocketSignature(timestamp int64) string {
 	return signature
 }
 
-func (c *coinexClient) PlaceOrder() string {
+func (c *CoinexClient) PlaceOrder() string {
 	return ""
 }
 
 // TestSignatureGeneration tests the signature generation for debugging
-func (c *coinexClient) TestSignatureGeneration() {
+func (c *CoinexClient) TestSignatureGeneration() {
 	log.Printf("🧪 TESTING SIGNATURE GENERATION")
 
 	// Test GET request signature (like order status polling)
@@ -192,7 +195,7 @@ func (c *coinexClient) TestSignatureGeneration() {
 }
 
 // PlaceFOKOrder places a Fill-or-Kill order with automatic simulation/real API switching and spending controls
-func (c *coinexClient) PlaceFOKOrder(market, orderType string, amount, price float64, orderResultChan chan<- *OrderResult) *FOKOrderTracker {
+func (c *CoinexClient) PlaceFOKOrder(market, orderType string, amount, price float64, orderResultChan chan<- *OrderResult) *FOKOrderTracker {
 	log.Printf("🎯 PLACE FOK ORDER START | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
 		market, orderType, amount, price)
 	log.Printf("⚙️ FOK CONFIG | Timeout: %ds | Polling: %.1f Hz | Max Retries: %d",
@@ -243,7 +246,7 @@ func (c *coinexClient) PlaceFOKOrder(market, orderType string, amount, price flo
 }
 
 // checkRateLimit checks if we can place another order based on rate limiting
-func (c *coinexClient) checkRateLimit() bool {
+func (c *CoinexClient) checkRateLimit() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -259,7 +262,7 @@ func (c *coinexClient) checkRateLimit() bool {
 }
 
 // calculateOrderAmount calculates the appropriate order amount based on configuration
-func (c *coinexClient) calculateOrderAmount(requestedAmount, price float64, orderType string) (float64, float64, error) {
+func (c *CoinexClient) calculateOrderAmount(requestedAmount, price float64, orderType string) (float64, float64, error) {
 
 	settings := c.config.OrderExecutionSettings
 
@@ -301,7 +304,7 @@ func (c *coinexClient) calculateOrderAmount(requestedAmount, price float64, orde
 }
 
 // manageOrderLifecycle manages the complete lifecycle of a FOK order
-func (c *coinexClient) manageOrderLifecycle(tracker *FOKOrderTracker, orderResultChan chan<- *OrderResult) {
+func (c *CoinexClient) manageOrderLifecycle(tracker *FOKOrderTracker, orderResultChan chan<- *OrderResult) {
 	log.Printf("🎬 ORDER LIFECYCLE STARTED | ID: %s | Market: %s | Simulation Mode: %t",
 		tracker.OrderID, tracker.Market, c.config.SimulationMode)
 
@@ -324,7 +327,7 @@ func (c *coinexClient) manageOrderLifecycle(tracker *FOKOrderTracker, orderResul
 }
 
 // manageSimulationOrderLifecycle handles simulation orders
-func (c *coinexClient) manageSimulationOrderLifecycle(tracker *FOKOrderTracker, orderResultChan chan<- *OrderResult) {
+func (c *CoinexClient) manageSimulationOrderLifecycle(tracker *FOKOrderTracker, orderResultChan chan<- *OrderResult) {
 	// Execute order simulation synchronously (no goroutine)
 	c.simulateOrderExecution(tracker)
 
@@ -405,7 +408,7 @@ func (c *coinexClient) manageSimulationOrderLifecycle(tracker *FOKOrderTracker, 
 }
 
 // pollOrderStatus polls the order status (simulation - in real implementation would call CoinEx API)
-func (c *coinexClient) pollOrderStatus(tracker *FOKOrderTracker) {
+func (c *CoinexClient) pollOrderStatus(tracker *FOKOrderTracker) {
 	tracker.mu.Lock()
 	tracker.LastChecked = time.Now()
 	tracker.mu.Unlock()
@@ -417,7 +420,7 @@ func (c *coinexClient) pollOrderStatus(tracker *FOKOrderTracker) {
 }
 
 // cancelOrder cancels an order (simulation - in real implementation would call CoinEx API)
-func (c *coinexClient) cancelOrder(tracker *FOKOrderTracker) {
+func (c *CoinexClient) cancelOrder(tracker *FOKOrderTracker) {
 	log.Printf("🛑 CANCELLING ORDER | ID: %s", tracker.OrderID)
 
 	tracker.mu.Lock()
@@ -431,7 +434,7 @@ func (c *coinexClient) cancelOrder(tracker *FOKOrderTracker) {
 }
 
 // simulateOrderExecution simulates order execution (in real implementation, this would be actual order placement)
-func (c *coinexClient) simulateOrderExecution(tracker *FOKOrderTracker) {
+func (c *CoinexClient) simulateOrderExecution(tracker *FOKOrderTracker) {
 	startTime := time.Now()
 
 	// Simulate order execution time based on configuration
@@ -550,7 +553,7 @@ func (c *coinexClient) simulateOrderExecution(tracker *FOKOrderTracker) {
 }
 
 // buildOrderResult builds a final order result from tracker state
-func (c *coinexClient) buildOrderResult(tracker *FOKOrderTracker) *OrderResult {
+func (c *CoinexClient) buildOrderResult(tracker *FOKOrderTracker) *OrderResult {
 	tracker.mu.RLock()
 	defer tracker.mu.RUnlock()
 
@@ -571,7 +574,7 @@ func (c *coinexClient) buildOrderResult(tracker *FOKOrderTracker) *OrderResult {
 }
 
 // getTradingFee returns the trading fee for a market
-func (c *coinexClient) getTradingFee(market string) float64 {
+func (c *CoinexClient) getTradingFee(market string) float64 {
 	if fee, exists := c.config.TradingFees[market]; exists {
 		return fee
 	}
@@ -579,7 +582,7 @@ func (c *coinexClient) getTradingFee(market string) float64 {
 }
 
 // CancelAllActiveOrders cancels all active orders (real API or simulation)
-func (c *coinexClient) CancelAllActiveOrders() {
+func (c *CoinexClient) CancelAllActiveOrders() {
 	log.Printf("🛑 CANCELLING ALL ACTIVE ORDERS | Mode: %s",
 		map[bool]string{true: "SIMULATION", false: "REAL API"}[c.config.SimulationMode])
 
@@ -588,7 +591,7 @@ func (c *coinexClient) CancelAllActiveOrders() {
 }
 
 // GetOrderExecutionStats returns current order execution statistics
-func (c *coinexClient) GetOrderExecutionStats() (int, float64, float64) {
+func (c *CoinexClient) GetOrderExecutionStats() (int, float64, float64) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -599,18 +602,18 @@ func (c *coinexClient) GetOrderExecutionStats() (int, float64, float64) {
 }
 
 // GetOrderStatus gets the current status of an order
-func (c *coinexClient) GetOrderStatus(orderID string) (*FOKOrderTracker, bool) {
+func (c *CoinexClient) GetOrderStatus(orderID string) (*FOKOrderTracker, bool) {
 	// Simplified: no order tracking needed with sequential execution
 	return nil, false
 }
 
 // GetActiveTrackers returns all active order trackers
-func (c *coinexClient) GetActiveTrackers() []*FOKOrderTracker {
+func (c *CoinexClient) GetActiveTrackers() []*FOKOrderTracker {
 	// Simplified: no active trackers needed with sequential execution
 	return []*FOKOrderTracker{}
 }
 
-func (c *coinexClient) TestConnection() (string, error) {
+func (c *CoinexClient) TestConnection() (string, error) {
 	// Test with a public endpoint that doesn't require authentication
 	// Use the market list endpoint which is simpler and doesn't need market parameter
 	params := map[string]string{
@@ -632,7 +635,7 @@ func (c *coinexClient) TestConnection() (string, error) {
 	return string(responseJSON), nil
 }
 
-func (c *coinexClient) GetBalance() (string, error) {
+func (c *CoinexClient) GetBalance() (string, error) {
 	// Use v2 API for balance
 	timestamp := time.Now().UnixMilli()
 	method := "GET"
@@ -676,7 +679,7 @@ func (c *coinexClient) GetBalance() (string, error) {
 	return string(responseJSON), nil
 }
 
-func (c *coinexClient) GetMarketList() (string, error) {
+func (c *CoinexClient) GetMarketList() (string, error) {
 	// Use the v1 market list endpoint
 	params := map[string]string{
 		"url":    c.baseUrl + "/market/list",
@@ -698,7 +701,7 @@ func (c *coinexClient) GetMarketList() (string, error) {
 }
 
 // Add new method to get all market statistics with 24H volume
-func (c *coinexClient) GetAllMarketTickers() (map[string]interface{}, error) {
+func (c *CoinexClient) GetAllMarketTickers() (map[string]interface{}, error) {
 	params := map[string]string{
 		"url":    c.baseUrl + "/market/ticker/all",
 		"method": "GET",
@@ -712,7 +715,7 @@ func (c *coinexClient) GetAllMarketTickers() (map[string]interface{}, error) {
 	return response, nil
 }
 
-func (c *coinexClient) GetArbitrageMarkets() ([]string, []string, error) {
+func (c *CoinexClient) GetArbitrageMarkets() ([]string, []string, error) {
 	// Get all available markets from CoinEx
 	marketListString, err := c.GetMarketList()
 	if err != nil {
@@ -763,7 +766,7 @@ func (c *coinexClient) GetArbitrageMarkets() ([]string, []string, error) {
 }
 
 // findUSDTAndUSDCAssets finds all USDT and USDC assets separately
-func (c *coinexClient) findUSDTAndUSDCAssets(markets []interface{}) ([]string, []string) {
+func (c *CoinexClient) findUSDTAndUSDCAssets(markets []interface{}) ([]string, []string) {
 	usdtAssets := []string{}
 	usdcAssets := []string{}
 
@@ -805,7 +808,7 @@ func (c *coinexClient) findUSDTAndUSDCAssets(markets []interface{}) ([]string, [
 }
 
 // findCompleteAssets finds assets that have both USDT and USDC pairs
-func (c *coinexClient) findCompleteAssets(usdtAssets, usdcAssets []string) ([]string, []string) {
+func (c *CoinexClient) findCompleteAssets(usdtAssets, usdcAssets []string) ([]string, []string) {
 	completeAssets := []string{}
 	triangularMarkets := []string{}
 
@@ -872,7 +875,7 @@ func (c *coinexClient) findCompleteAssets(usdtAssets, usdcAssets []string) ([]st
 }
 
 // filterMarketsByRealActivity filters markets based on real 24H volume data from CoinEx
-func (c *coinexClient) filterMarketsByRealActivity(markets []string, tickerData map[string]interface{}) ([]string, []string) {
+func (c *CoinexClient) filterMarketsByRealActivity(markets []string, tickerData map[string]interface{}) ([]string, []string) {
 	fmt.Printf("    Analyzing real market activity for %d markets...\n", len(markets))
 
 	// Extract ticker data
@@ -965,7 +968,7 @@ func (c *coinexClient) filterMarketsByRealActivity(markets []string, tickerData 
 }
 
 // validateMarketActivity tests markets for actual trading activity before subscription
-func (c *coinexClient) validateMarketActivity(markets []string, marketDepths *MarketDepths) ([]string, []string) {
+func (c *CoinexClient) validateMarketActivity(markets []string, marketDepths *models.MarketDepths) ([]string, []string) {
 	fmt.Printf("    Testing %d markets for trading activity...\n", len(markets))
 
 	activeMarkets := []string{}
@@ -1001,7 +1004,7 @@ func (c *coinexClient) validateMarketActivity(markets []string, marketDepths *Ma
 }
 
 // isMarketActive determines if a market is likely to be active by checking WebSocket data availability
-func (c *coinexClient) isMarketActive(market string, marketDepths *MarketDepths) bool {
+func (c *CoinexClient) isMarketActive(market string, marketDepths *models.MarketDepths) bool {
 	// Check if we have WebSocket data for this market
 	if orderBook, exists := marketDepths.Load(market); exists && orderBook != nil {
 		if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
@@ -1037,7 +1040,7 @@ func (c *coinexClient) isMarketActive(market string, marketDepths *MarketDepths)
 }
 
 // filterCompleteAssetsByActiveMarkets filters complete assets to only include those with active markets
-func (c *coinexClient) filterCompleteAssetsByActiveMarkets(completeAssets []string, activeMarkets []string) []string {
+func (c *CoinexClient) filterCompleteAssetsByActiveMarkets(completeAssets []string, activeMarkets []string) []string {
 	activeMarketSet := make(map[string]bool)
 	for _, market := range activeMarkets {
 		activeMarketSet[market] = true
@@ -1068,7 +1071,7 @@ func (c *coinexClient) filterCompleteAssetsByActiveMarkets(completeAssets []stri
 }
 
 // manageRealFOKOrderLifecycle implements FOK behavior using limit or market orders based on price
-func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, orderResultChan chan<- *OrderResult) {
+func (c *CoinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, orderResultChan chan<- *OrderResult) {
 	log.Printf("🎯 REAL FOK ORDER | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
 		tracker.Market, tracker.Type, tracker.Amount, tracker.Price)
 
@@ -1230,7 +1233,7 @@ func (c *coinexClient) manageRealFOKOrderLifecycle(tracker *FOKOrderTracker, ord
 }
 
 // placeRealMarketOrder places a real market order via CoinEx API v2
-func (c *coinexClient) placeRealMarketOrder(tracker *FOKOrderTracker) (string, error) {
+func (c *CoinexClient) placeRealMarketOrder(tracker *FOKOrderTracker) (string, error) {
 	log.Printf("📤 PLACING MARKET ORDER | Market: %s | Type: %s | Amount: %.6f",
 		tracker.Market, tracker.Type, tracker.Amount)
 
@@ -1345,7 +1348,7 @@ func (c *coinexClient) placeRealMarketOrder(tracker *FOKOrderTracker) (string, e
 }
 
 // placeRealLimitOrder places a real limit order via CoinEx API v2
-func (c *coinexClient) placeRealLimitOrder(tracker *FOKOrderTracker) (string, error) {
+func (c *CoinexClient) placeRealLimitOrder(tracker *FOKOrderTracker) (string, error) {
 	log.Printf("📤 PLACING LIMIT ORDER | Market: %s | Type: %s | Amount: %.6f | Price: %.8f",
 		tracker.Market, tracker.Type, tracker.Amount, tracker.Price)
 
@@ -1444,7 +1447,7 @@ func (c *coinexClient) placeRealLimitOrder(tracker *FOKOrderTracker) (string, er
 }
 
 // pollRealOrderStatus polls the real order status from CoinEx API until timeout
-func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, error) {
+func (c *CoinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, error) {
 	// Use FOK configuration settings from config
 	fokSettings := c.config.FOKOrderSettings
 	timeoutDuration := time.Duration(fokSettings.FOKTimeoutSeconds) * time.Second
@@ -1596,7 +1599,7 @@ func (c *coinexClient) pollRealOrderStatus(tracker *FOKOrderTracker) (bool, erro
 }
 
 // cancelRealOrder cancels a real order via CoinEx API v2
-func (c *coinexClient) cancelRealOrder(tracker *FOKOrderTracker) error {
+func (c *CoinexClient) cancelRealOrder(tracker *FOKOrderTracker) error {
 	log.Printf("🛑 CANCELLING ORDER | ID: %s | Market: %s", tracker.OrderID, tracker.Market)
 
 	// Convert order_id from string to integer as required by CoinEx API
@@ -1677,7 +1680,7 @@ func (c *coinexClient) cancelRealOrder(tracker *FOKOrderTracker) error {
 // Helper methods for building request data
 
 // buildFormData builds form-encoded data from parameters
-func (c *coinexClient) buildFormData(params map[string]string) string {
+func (c *CoinexClient) buildFormData(params map[string]string) string {
 	var parts []string
 	for key, value := range params {
 		parts = append(parts, key+"="+value)
@@ -1686,7 +1689,7 @@ func (c *coinexClient) buildFormData(params map[string]string) string {
 }
 
 // buildQueryString builds query string from parameters
-func (c *coinexClient) buildQueryString(params map[string]string) string {
+func (c *CoinexClient) buildQueryString(params map[string]string) string {
 	// Sort parameters alphabetically (required for signature)
 	keys := make([]string, 0, len(params))
 	for k := range params {
@@ -1703,7 +1706,7 @@ func (c *coinexClient) buildQueryString(params map[string]string) string {
 
 // buildSortedQueryString builds a sorted query string from key-value pairs
 // This encapsulates the key extraction and placement logic
-func (c *coinexClient) buildSortedQueryString(params map[string]string) string {
+func (c *CoinexClient) buildSortedQueryString(params map[string]string) string {
 	// Extract and sort keys
 	keys := make([]string, 0, len(params))
 	for k := range params {
@@ -1721,7 +1724,7 @@ func (c *coinexClient) buildSortedQueryString(params map[string]string) string {
 }
 
 // EnsureCriticalMarketData ensures critical markets have data via WebSocket only
-func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, marketDepths *MarketDepths) {
+func (c *CoinexClient) EnsureCriticalMarketData(criticalMarkets []string, marketDepths *models.MarketDepths) {
 	log.Printf("🔄 Ensuring critical markets have WebSocket data: %v", criticalMarkets)
 
 	failedCount := 0
@@ -1763,7 +1766,7 @@ func (c *coinexClient) EnsureCriticalMarketData(criticalMarkets []string, market
 
 // FetchCriticalMarketsViaWebSocket fetches order book data for critical markets via WebSocket only
 // This is used as a primary data source for quote currencies and other critical markets
-func (c *coinexClient) FetchCriticalMarketsViaWebSocket(markets []string, marketDepths *MarketDepths) {
+func (c *CoinexClient) FetchCriticalMarketsViaWebSocket(markets []string, marketDepths *models.MarketDepths) {
 	log.Printf("🔄 Subscribing to critical markets via WebSocket with full flow: %v", markets)
 
 	// Use the new full subscription flow that:
@@ -1799,7 +1802,7 @@ func (c *coinexClient) FetchCriticalMarketsViaWebSocket(markets []string, market
 }
 
 // GetQuoteCurrencyMarkets returns all markets for the configured quote currencies
-func (c *coinexClient) GetQuoteCurrencyMarkets() []string {
+func (c *CoinexClient) GetQuoteCurrencyMarkets() []string {
 	var quoteMarkets []string
 
 	// Get all available markets from CoinEx
@@ -1835,11 +1838,11 @@ func (c *coinexClient) GetQuoteCurrencyMarkets() []string {
 
 // CriticalMarketPriceManager handles critical market data efficiently
 type CriticalMarketPriceManager struct {
-	config *Config
+	config *config.Config
 }
 
 // NewCriticalMarketPriceManager creates a new critical market price manager
-func NewCriticalMarketPriceManager(coinexClient *coinexClient, config *Config) *CriticalMarketPriceManager {
+func NewCriticalMarketPriceManager(client *CoinexClient, config *config.Config) *CriticalMarketPriceManager {
 	log.Printf("🔧 CRITICAL MARKET PRICE MANAGER | Initialized - all markets use WebSocket data")
 	return &CriticalMarketPriceManager{
 		config: config,
@@ -1867,14 +1870,14 @@ func (cmm *CriticalMarketPriceManager) GetAssumedPrice(market string) (float64, 
 }
 
 // GetCriticalMarketSnapshot returns empty snapshot - we don't need price data
-func (cmm *CriticalMarketPriceManager) GetCriticalMarketSnapshot() map[string]*OrderBook {
+func (cmm *CriticalMarketPriceManager) GetCriticalMarketSnapshot() map[string]*models.OrderBook {
 	// Return empty snapshot - we don't need price data for critical markets
 	// The arbitrage engine will handle critical markets differently
-	return make(map[string]*OrderBook)
+	return make(map[string]*models.OrderBook)
 }
 
 // GetOpenOrders gets all open orders from the exchange
-func (c *coinexClient) GetOpenOrders() ([]map[string]interface{}, error) {
+func (c *CoinexClient) GetOpenOrders() ([]map[string]interface{}, error) {
 	// Use v2 API for getting open orders
 	timestamp := time.Now().UnixMilli()
 	method := "GET"
@@ -1941,7 +1944,7 @@ func (c *coinexClient) GetOpenOrders() ([]map[string]interface{}, error) {
 }
 
 // CancelAllOrders cancels all orders for a specific market using CoinEx API
-func (c *coinexClient) CancelAllOrders(market string) error {
+func (c *CoinexClient) CancelAllOrders(market string) error {
 	log.Printf("🛑 CANCELLING ALL ORDERS | Market: %s", market)
 
 	timestamp := time.Now().UnixMilli()
@@ -2007,17 +2010,8 @@ func (c *coinexClient) CancelAllOrders(market string) error {
 	return nil
 }
 
-// getMapKeysBool returns keys from a map[string]bool
-func getMapKeysBool(m map[string]bool) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
 // checkOrderStatusImmediately checks order status immediately after placement
-func (c *coinexClient) checkOrderStatusImmediately(tracker *FOKOrderTracker) bool {
+func (c *CoinexClient) checkOrderStatusImmediately(tracker *FOKOrderTracker) bool {
 	// Quick status check without full polling logic
 	timestamp := time.Now().UnixMilli()
 	method := "GET"
@@ -2077,7 +2071,7 @@ func (c *coinexClient) checkOrderStatusImmediately(tracker *FOKOrderTracker) boo
 }
 
 // getOrderFillData retrieves actual fill data from the order status API
-func (c *coinexClient) getOrderFillData(tracker *FOKOrderTracker) (float64, float64, float64, float64) {
+func (c *CoinexClient) getOrderFillData(tracker *FOKOrderTracker) (float64, float64, float64, float64) {
 	// Get order status to retrieve fill data
 	timestamp := time.Now().UnixMilli()
 	method := "GET"
@@ -2172,7 +2166,7 @@ func parseFloat(i interface{}) float64 {
 }
 
 // CanPlaceOrder checks if we can place a new order based on spending limits
-func (c *coinexClient) CanPlaceOrder(orderValue float64) bool {
+func (c *CoinexClient) CanPlaceOrder(orderValue float64) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -2186,7 +2180,7 @@ func (c *coinexClient) CanPlaceOrder(orderValue float64) bool {
 }
 
 // UpdateSpending updates the current spending amount
-func (c *coinexClient) UpdateSpending(orderValue float64) {
+func (c *CoinexClient) UpdateSpending(orderValue float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

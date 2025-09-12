@@ -5,7 +5,16 @@ import (
 	"fmt"
 	"sync"
 	"time"
-)
+
+	)
+
+// Min returns the smaller of two integers
+func Min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
 
 // Depth represents a single price level in the order book.
 type Depth struct {

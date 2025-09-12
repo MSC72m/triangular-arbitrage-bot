@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"triangular-arbitrage-bot/pkg/models"
-	"triangular-arbitrage-bot/pkg/utils"
+	"triangular-arbitrage-bot/internal/config"
 )
 
 // LogLevel represents the logging level
@@ -124,8 +124,16 @@ func (l *GlobalLogger) Close() {
 	// No-op - log module handles file closing automatically
 }
 
+// min returns the smaller of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // SetupLogger configures the global logger with file output
-func SetupLogger(config *models.Config) {
+func SetupLogger(config *config.Config) {
 	// Create log directory
 	logDir := "log"
 	if err := os.MkdirAll(logDir, 0755); err != nil {
@@ -207,7 +215,7 @@ func LogMarketPrices(marketDepths *models.MarketDepths) {
 		return
 	}
 
-	log.Printf("MARKET PRICES (Sample of %d markets):", utils.Min(5, len(availableMarkets)))
+	log.Printf("MARKET PRICES (Sample of %d markets):", min(5, len(availableMarkets)))
 	for i, market := range availableMarkets {
 		if i >= 5 {
 			break

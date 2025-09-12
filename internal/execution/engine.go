@@ -13,6 +13,7 @@ import (
 	"triangular-arbitrage-bot/internal/config"
 	"triangular-arbitrage-bot/internal/exchange"
 	"triangular-arbitrage-bot/pkg/models"
+	"triangular-arbitrage-bot/pkg/common"
 )
 
 // Simplified ArbitrageEngine with minimal concurrency
@@ -20,7 +21,7 @@ type ArbitrageEngine struct {
 	config       *config.Config
 	marketDepths *models.MarketDepths
 	metrics      *models.Metrics
-	client *exchange.coinexClient
+	client *exchange.CoinexClient
 
 	// Triangular paths cache
 	triangularPaths []TriangularPath
@@ -45,13 +46,13 @@ type ArbitrageEngine struct {
 }
 
 // NewArbitrageEngine creates a new simplified arbitrage engine
-func NewArbitrageEngine(config *config.Config, marketDepths *models.MarketDepths, metrics *models.Metrics, *exchange.coinexClient) *ArbitrageEngine {
+func NewArbitrageEngine(config *config.Config, marketDepths *models.MarketDepths, metrics *models.Metrics, client *exchange.CoinexClient) *ArbitrageEngine {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ArbitrageEngine{
 		config:                config,
 		marketDepths:          marketDepths,
 		metrics:               metrics,
-		*exchange.coinexClient:          *exchange.coinexClient,
+		client:                client,
 		triangularPaths:       []TriangularPath{},
 		executedOpportunities: make(map[string]time.Time),
 		ctx:                   ctx,

@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"encoding/json"
@@ -34,7 +34,7 @@ type OrderExecutionSettings struct {
 
 type PriceModifers struct {
 	BasePriceModifer float64 `json:"basePriceModifer"`
-	BuyPriceModifer float64 `json:"buyPriceModifer"`
+	BuyPriceModifer  float64 `json:"buyPriceModifer"`
 	SellPriceModifer float64 `json:"sellPriceModifer"`
 }
 

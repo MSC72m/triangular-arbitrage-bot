@@ -1,4 +1,4 @@
-package main
+package logging
 
 import (
 	"fmt"
@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"triangular-arbitrage-bot/pkg/models"
+	"triangular-arbitrage-bot/pkg/utils"
 )
 
 // LogLevel represents the logging level
@@ -122,7 +125,7 @@ func (l *GlobalLogger) Close() {
 }
 
 // SetupLogger configures the global logger with file output
-func SetupLogger(config *Config) {
+func SetupLogger(config *models.Config) {
 	// Create log directory
 	logDir := "log"
 	if err := os.MkdirAll(logDir, 0755); err != nil {
@@ -165,4 +168,97 @@ func SetupLogger(config *Config) {
 	}
 
 	logger.Info("Logger initialized with level: %s", config.LogLevel)
+}
+
+// LogBasicMetrics logs basic metrics without prices
+func LogBasicMetrics(metrics *models.Metrics, marketDepths *models.MarketDepths) {
+	snapshot := metrics.GetSnapshot()
+	availableMarkets := marketDepths.GetAvailableMarkets()
+
+	uptime := time.Since(snapshot.StartTime)
+
+	log.Printf(" METRICS | Uptime: %v | Markets: %d | Opportunities: %d | Trades: %d | PnL: $%.4f | Messages: %d",
+		uptime.Round(time.Second),
+		len(availableMarkets),
+		snapshot.OpportunitiesDetected,
+		snapshot.TradesExecuted,
+		snapshot.TotalPnL,
+		snapshot.MessagesProcessed)
+}
+
+// LogSimpleMetrics logs simple metrics summary
+func LogSimpleMetrics(metrics *models.Metrics, marketDepths *models.MarketDepths) {
+	snapshot := metrics.GetSnapshot()
+
+	uptime := time.Since(snapshot.StartTime)
+	log.Printf(" FINAL METRICS | Uptime: %v | Opportunities: %d | Trades: %d | PnL: $%.4f | Messages: %d",
+		uptime.Round(time.Second),
+		snapshot.OpportunitiesDetected,
+		snapshot.TradesExecuted,
+		snapshot.TotalPnL,
+		snapshot.MessagesProcessed)
+}
+
+// LogMarketPrices logs market prices for debugging
+func LogMarketPrices(marketDepths *models.MarketDepths) {
+	availableMarkets := marketDepths.GetAvailableMarkets()
+	if len(availableMarkets) == 0 {
+		log.Println("No market data available")
+		return
+	}
+
+	log.Printf("MARKET PRICES (Sample of %d markets):", utils.Min(5, len(availableMarkets)))
+	for i, market := range availableMarkets {
+		if i >= 5 {
+			break
+		}
+		if OrderBook, exists := marketDepths.Load(market); exists {
+			if len(OrderBook.Bids) > 0 && len(OrderBook.Asks) > 0 {
+				bestBid := OrderBook.Bids[0].Price
+				bestAsk := OrderBook.Asks[0].Price
+				log.Printf("  %s: Bid=%s Ask=%s", market, bestBid, bestAsk)
+			}
+		}
+	}
+}
+
+// LogMarketDataStatus logs the status of market data
+func LogMarketDataStatus(marketDepths *models.MarketDepths, expectedMarkets []string) {
+	availableMarkets := marketDepths.GetAvailableMarkets()
+	missingMarkets := 0
+
+	for _, expected := range expectedMarkets {
+		found := false
+		for _, available := range availableMarkets {
+			if available == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missingMarkets++
+		}
+	}
+
+	log.Printf("MARKET DATA STATUS: %d/%d markets available (%d missing)",
+		len(availableMarkets), len(expectedMarkets), missingMarkets)
+}
+
+// LogDetailedMarketData logs detailed market data for specific markets
+func LogDetailedMarketData(marketDepths *models.MarketDepths, markets []string) {
+	for _, market := range markets {
+		if OrderBook, exists := marketDepths.Load(market); exists {
+			log.Printf("DETAILED %s: %d bids, %d asks", market, len(OrderBook.Bids), len(OrderBook.Asks))
+			if len(OrderBook.Bids) > 0 {
+				log.Printf("  Best 3 bids: %s, %s, %s",
+					OrderBook.Bids[0].Price, OrderBook.Bids[1].Price, OrderBook.Bids[2].Price)
+			}
+			if len(OrderBook.Asks) > 0 {
+				log.Printf("  Best 3 asks: %s, %s, %s",
+					OrderBook.Asks[0].Price, OrderBook.Asks[1].Price, OrderBook.Asks[2].Price)
+			}
+		} else {
+			log.Printf("DETAILED %s: NO DATA", market)
+		}
+	}
 }

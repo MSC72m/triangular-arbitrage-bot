@@ -1,4 +1,4 @@
-package main
+package models
 
 import (
 	"encoding/json"
@@ -199,6 +199,80 @@ func (m *Metrics) IncrementTrades() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.TradesExecuted++
+	m.LastUpdateTime = time.Now()
+}
+
+// IncrementSuccessfulTrades safely increments successful trades counter
+func (m *Metrics) IncrementSuccessfulTrades() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.TradesSuccessful++
+	m.LastUpdateTime = time.Now()
+}
+
+// IncrementFailedTrades safely increments failed trades counter
+func (m *Metrics) IncrementFailedTrades() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.TradesFailed++
+	m.LastUpdateTime = time.Now()
+}
+
+// AddFees safely adds to total fees
+func (m *Metrics) AddFees(fees float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.TotalFees += fees
+	m.LastUpdateTime = time.Now()
+}
+
+// UpdateDetectionTime safely updates average detection time
+func (m *Metrics) UpdateDetectionTime(detectionTime time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Simple moving average
+	if m.AvgDetectionTime == 0 {
+		m.AvgDetectionTime = float64(detectionTime.Milliseconds())
+	} else {
+		m.AvgDetectionTime = (m.AvgDetectionTime + float64(detectionTime.Milliseconds())) / 2
+	}
+	m.LastUpdateTime = time.Now()
+}
+
+// UpdateExecutionTime safely updates average execution time
+func (m *Metrics) UpdateExecutionTime(executionTime time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Simple moving average
+	if m.AvgExecutionTime == 0 {
+		m.AvgExecutionTime = float64(executionTime.Milliseconds())
+	} else {
+		m.AvgExecutionTime = (m.AvgExecutionTime + float64(executionTime.Milliseconds())) / 2
+	}
+	m.LastUpdateTime = time.Now()
+}
+
+// IncrementMessagesProcessed safely increments messages processed counter
+func (m *Metrics) IncrementMessagesProcessed() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.MessagesProcessed++
+	m.LastUpdateTime = time.Now()
+}
+
+// IncrementErrorCount safely increments error counter
+func (m *Metrics) IncrementErrorCount() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ErrorCount++
+	m.LastUpdateTime = time.Now()
+}
+
+// SetActiveConnections safely sets active connections count
+func (m *Metrics) SetActiveConnections(count int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ActiveConnections = count
 	m.LastUpdateTime = time.Now()
 }
 

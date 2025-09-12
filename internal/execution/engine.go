@@ -1,4 +1,4 @@
-package main
+package execution
 
 import (
 	"context"
@@ -9,14 +9,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"triangular-arbitrage-bot/internal/config"
+	"triangular-arbitrage-bot/internal/exchange"
+	"triangular-arbitrage-bot/pkg/models"
 )
 
 // Simplified ArbitrageEngine with minimal concurrency
 type ArbitrageEngine struct {
-	config       *Config
-	marketDepths *MarketDepths
-	metrics      *Metrics
-	coinexClient *coinexClient
+	config       *config.Config
+	marketDepths *models.MarketDepths
+	metrics      *models.Metrics
+	client *exchange.coinexClient
 
 	// Triangular paths cache
 	triangularPaths []TriangularPath
@@ -41,13 +45,13 @@ type ArbitrageEngine struct {
 }
 
 // NewArbitrageEngine creates a new simplified arbitrage engine
-func NewArbitrageEngine(config *Config, marketDepths *MarketDepths, metrics *Metrics, coinexClient *coinexClient) *ArbitrageEngine {
+func NewArbitrageEngine(config *config.Config, marketDepths *models.MarketDepths, metrics *models.Metrics, *exchange.coinexClient) *ArbitrageEngine {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ArbitrageEngine{
 		config:                config,
 		marketDepths:          marketDepths,
 		metrics:               metrics,
-		coinexClient:          coinexClient,
+		*exchange.coinexClient:          *exchange.coinexClient,
 		triangularPaths:       []TriangularPath{},
 		executedOpportunities: make(map[string]time.Time),
 		ctx:                   ctx,
@@ -431,7 +435,7 @@ func (ae *ArbitrageEngine) placeAndWaitForOrder(market, orderType string, amount
 		legName, market, orderType, amount, price)
 
 	// Place the order
-	tracker := ae.coinexClient.PlaceFOKOrder(market, orderType, amount, price, orderResultChan)
+	tracker := ae.*exchange.coinexClient.PlaceFOKOrder(market, orderType, amount, price, orderResultChan)
 	if tracker == nil {
 		log.Printf("❌ ORDER PLACEMENT FAILED | %s | Market: %s | Tracker is nil", legName, market)
 		return nil

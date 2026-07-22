@@ -19,7 +19,7 @@ all: fmt vet lint test build
 
 build:
 	@mkdir -p $(BUILD_DIR)
-	go build $(GO_FLAGS) $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY) .
+	go build $(GO_FLAGS) $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY) ./cmd/bot/
 
 run: build
 	./$(BUILD_DIR)/$(BINARY) -config config.json
@@ -76,11 +76,11 @@ clean:
 # Cross-compilation
 build-linux:
 	@mkdir -p $(BUILD_DIR)
-	GOOS=linux GOARCH=amd64 go build $(GO_FLAGS) $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY)-linux-amd64 .
+	GOOS=linux GOARCH=amd64 go build $(GO_FLAGS) $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY)-linux-amd64 ./cmd/bot/
 
 build-darwin:
 	@mkdir -p $(BUILD_DIR)
-	GOOS=darwin GOARCH=arm64 go build $(GO_FLAGS) $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY)-darwin-arm64 .
+	GOOS=darwin GOARCH=arm64 go build $(GO_FLAGS) $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY)-darwin-arm64 ./cmd/bot/
 
 build-all-platforms: build-linux build-darwin
 	@echo "Cross-platform builds complete"

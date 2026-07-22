@@ -3,8 +3,6 @@ package market
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"triangular-arbitrage-bot/internal/config"
@@ -154,47 +152,4 @@ func (m *Manager) GetOrderBookREST(market string) (*models.OrderBook, error) {
 	}
 
 	return OrderBook, nil
-}
-
-// GetBestPrice returns the best price for a given market and side
-// For buys, we check bids[0] (highest bid)
-// For sells, we check asks[0] (lowest ask)
-func (m *Manager) GetBestPrice(market string, side string) (float64, error) {
-	OrderBook, exists := m.marketDepths.Load(market)
-	if !exists {
-		return 0, fmt.Errorf("no order book data for market: %s", market)
-	}
-
-	switch strings.ToLower(side) {
-	case "buy":
-		// For buys, we want the highest bid (bids[0])
-		if len(OrderBook.Bids) > 0 {
-			price, err := strconv.ParseFloat(OrderBook.Bids[0].Price, 64)
-			if err != nil {
-				return 0, fmt.Errorf("failed to parse bid price: %w", err)
-			}
-			return price, nil
-		}
-	case "sell":
-		// For sells, we want the lowest ask (asks[0])
-		if len(OrderBook.Asks) > 0 {
-			price, err := strconv.ParseFloat(OrderBook.Asks[0].Price, 64)
-			if err != nil {
-				return 0, fmt.Errorf("failed to parse ask price: %w", err)
-			}
-			return price, nil
-		}
-	}
-
-	return 0, fmt.Errorf("no %s orders available for market: %s", side, market)
-}
-
-// GetMarketDepth returns the order book depth for a market
-func (m *Manager) GetMarketDepth(market string) (*models.OrderBook, bool) {
-	return m.marketDepths.Load(market)
-}
-
-// GetAvailableMarkets returns all markets with available order book data
-func (m *Manager) GetAvailableMarkets() []string {
-	return m.marketDepths.GetAvailableMarkets()
 }

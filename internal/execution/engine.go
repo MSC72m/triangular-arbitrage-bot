@@ -286,7 +286,6 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity models.ArbitrageOppo
 	log.Printf(" USING STATIC ORDER AMOUNT | Initial USDT: %.6f", initialUSDT)
 
 	// Execute legs sequentially with proper synchronization
-	results := make([]*exchange.OrderResult, 0, 3)
 
 	// Leg 1: Buy Asset with USDT (LIMIT ORDER with calculated price)
 	// Calculate the asset amount to buy: USDT amount / price
@@ -304,7 +303,6 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity models.ArbitrageOppo
 		ae.logCurrentOrderBookData(opportunity.Path.Market1, "Leg 1 Failure")
 		return // No recovery needed if leg 1 fails
 	}
-	results = append(results, result1)
 	log.Printf(" LEG 1 COMPLETED | Received %.6f %s", result1.FilledAmount, opportunity.Path.Asset1)
 
 	// Leg 2: Sell Asset for USDC (LIMIT ORDER with calculated price) - IMMEDIATE START
@@ -332,7 +330,6 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity models.ArbitrageOppo
 		ae.placeReversalOrder(opportunity.Path.Market1, "sell", actualAssetReceived, "Leg 2 Reversal")
 		return
 	}
-	results = append(results, result2)
 	log.Printf(" LEG 2 COMPLETED | Received %.6f USDC", result2.FilledValue)
 
 	// Leg 3: Sell USDC for USDT (MARKET ORDER - no price specified) - IMMEDIATE START
@@ -383,7 +380,6 @@ func (ae *ArbitrageEngine) executeRealArbitrage(opportunity models.ArbitrageOppo
 		return
 	}
 
-	results = append(results, result3)
 	log.Printf(" LEG 3 COMPLETED | Received %.6f USDT at avg price %.8f", result3.FilledAmount, result3.AvgPrice)
 
 	// Calculate final profit
@@ -718,9 +714,9 @@ func (ae *ArbitrageEngine) calculateOpportunity(path models.TriangularPath, snap
 
 // validateMarketData validates that we have sufficient market data
 func (ae *ArbitrageEngine) validateMarketData(path models.TriangularPath, snapshot map[string]*models.OrderBook, detectionStart time.Time) (*models.OrderBook, *models.OrderBook, *models.OrderBook, bool) {
-	market1Data, _ := snapshot[path.Market1]
-	market2Data, _ := snapshot[path.Market2]
-	market3Data, _ := snapshot[path.Market3]
+	market1Data := snapshot[path.Market1]
+	market2Data := snapshot[path.Market2]
+	market3Data := snapshot[path.Market3]
 
 	// Helper function to validate order book data
 	validateOrderBookData := func(market string, marketData *models.OrderBook) (*models.OrderBook, bool) {

@@ -267,7 +267,7 @@ func main() {
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	})
 	healthServer := &http.Server{
 		Addr:    ":8080",
@@ -322,7 +322,7 @@ func main() {
 		log.Println("Shutting down health server...")
 		healthCtx, healthCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer healthCancel()
-		healthServer.Shutdown(healthCtx)
+		_ = healthServer.Shutdown(healthCtx)
 
 		log.Println("Final metrics:")
 		logging.LogSimpleMetrics(metrics, marketDepths)

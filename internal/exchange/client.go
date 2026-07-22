@@ -61,10 +61,6 @@ type FOKOrderTracker struct {
 	IsActive      bool
 	RetryCount    int
 	mu            sync.RWMutex
-	// Add flag to track if CancelChan has been closed
-	cancelChanClosed bool
-	// Add sync.Once to ensure channel is only closed once
-	cancelOnce sync.Once
 }
 
 type CoinexClient struct {
@@ -115,22 +111,6 @@ func (c *CoinexClient) generateRESTSignature(method, requestPath, queryString, b
 
 	// Create the string to sign: method + request_path_with_query + body + timestamp
 	stringToSign := method + fullPath + body + strconv.FormatInt(timestamp, 10)
-
-	// Create HMAC-SHA256 signature
-	h := hmac.New(sha256.New, []byte(c.secretID))
-	h.Write([]byte(stringToSign))
-	signature := hex.EncodeToString(h.Sum(nil))
-
-	return signature
-}
-
-// generateWebSocketSignature creates HMAC-SHA256 signature for CoinEx WebSocket authentication
-func (c *CoinexClient) generateWebSocketSignature(timestamp int64) string {
-	// Create the string to sign for WebSocket authentication
-	// Format: timestamp (just the timestamp!)
-	// According to CoinEx docs: https://docs.coinex.com/api/v2/authorization
-
-	stringToSign := strconv.FormatInt(timestamp, 10)
 
 	// Create HMAC-SHA256 signature
 	h := hmac.New(sha256.New, []byte(c.secretID))
@@ -244,31 +224,6 @@ func (c *CoinexClient) getTradingFee(market string) float64 {
 }
 
 // Helper methods for building request data
-
-// buildFormData builds form-encoded data from parameters
-func (c *CoinexClient) buildFormData(params map[string]string) string {
-	var parts []string
-	for key, value := range params {
-		parts = append(parts, key+"="+value)
-	}
-	return strings.Join(parts, "&")
-}
-
-// buildQueryString builds query string from parameters
-func (c *CoinexClient) buildQueryString(params map[string]string) string {
-	// Sort parameters alphabetically (required for signature)
-	keys := make([]string, 0, len(params))
-	for k := range params {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var parts []string
-	for _, key := range keys {
-		parts = append(parts, key+"="+params[key])
-	}
-	return strings.Join(parts, "&")
-}
 
 // buildSortedQueryString builds a sorted query string from key-value pairs
 // This encapsulates the key extraction and placement logic

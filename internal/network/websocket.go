@@ -156,7 +156,7 @@ func (c *HttpClient) authenticateWebSocket(secretID, apiKey string) error {
 	}
 
 	// Wait for authentication response with longer timeout
-	c.wsConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	_ = c.wsConn.SetReadDeadline(time.Now().Add(30 * time.Second))
 
 	// Read multiple messages to find the auth response
 	for i := 0; i < 10; i++ { // Try up to 10 messages
@@ -568,32 +568,6 @@ func (c *HttpClient) GetWebSocketStats() map[string]interface{} {
 	}
 
 	return stats
-}
-
-func (c *HttpClient) checkConnectionHealth() {
-	c.mu.RLock()
-	connected := c.wsConnected
-	lastPong := c.wsLastPong
-	reconnecting := c.wsReconnecting
-	c.mu.RUnlock()
-
-	if !connected || reconnecting {
-		return
-	}
-
-	// Check if we haven't received a pong in too long
-	if time.Since(lastPong) > c.wsPongTimeout {
-		log.Printf("  WebSocket connection appears stale (no pong for %v), triggering reconnection\n", time.Since(lastPong))
-		select {
-		case c.wsReconnectChan <- true:
-		default:
-			// Channel full, ignore
-		}
-		return
-	}
-
-	// Don't send additional pings from health check - let the ping loop handle it
-	// This avoids overwhelming the connection with too many pings
 }
 
 // isConnectionHealthy checks if the WebSocket connection is healthy

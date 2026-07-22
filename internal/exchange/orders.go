@@ -61,29 +61,6 @@ func (c *CoinexClient) PlaceFOKOrder(market, orderType string, amount, price flo
 	return tracker
 }
 
-// manageOrderLifecycle manages the complete lifecycle of a FOK order
-func (c *CoinexClient) manageOrderLifecycle(tracker *FOKOrderTracker, orderResultChan chan<- OrderResult) {
-	log.Printf(" ORDER LIFECYCLE STARTED | ID: %s | Market: %s | Simulation Mode: %t",
-		tracker.OrderID, tracker.Market, c.config.SimulationMode)
-
-	// Add panic recovery
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf(" ORDER LIFECYCLE PANIC | ID: %s | Error: %v", tracker.OrderID, r)
-		}
-		log.Printf(" ORDER LIFECYCLE COMPLETE | ID: %s | Final Status: %s", tracker.OrderID, tracker.Status)
-	}()
-
-	// Switch between simulation and real API based on config
-	if c.config.SimulationMode {
-		log.Printf(" STARTING SIMULATION ORDER | ID: %s", tracker.OrderID)
-		c.manageSimulationOrderLifecycle(tracker, orderResultChan)
-	} else {
-		log.Printf(" STARTING REAL API ORDER | ID: %s", tracker.OrderID)
-		c.manageRealFOKOrderLifecycle(tracker, orderResultChan)
-	}
-}
-
 // manageSimulationOrderLifecycle handles simulation orders
 func (c *CoinexClient) manageSimulationOrderLifecycle(tracker *FOKOrderTracker, orderResultChan chan<- OrderResult) {
 	// Execute order simulation synchronously (no goroutine)

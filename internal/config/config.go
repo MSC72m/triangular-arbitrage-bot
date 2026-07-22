@@ -196,8 +196,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	env := loadEnvConfig()
-	config.APIKey = env["COINEX_API_KEY"]
-	config.SecretID = env["COINEX_SECRET_ID"]
+	if v, ok := env["COINEX_API_KEY"]; ok {
+		config.APIKey = v
+	}
+	if v, ok := env["COINEX_SECRET_ID"]; ok {
+		config.SecretID = v
+	}
 
 	// Validate configuration
 	if err := config.Validate(); err != nil {

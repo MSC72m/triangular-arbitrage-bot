@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump version and create tag
+        id: tag
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { data: tags } = await github.rest.git.listMatchingRefs({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'refs/tags/',
+            });
+            const versions = tags
+              .map(t => t.ref.replace('refs/tags/v', ''))
+              .filter(v => /^\d+\.\d+\.\d+$/.test(v))
+              .sort((a, b) => {
+                const [ma, mb] = [a, b].map(s => s.split('.').map(Number));
+                for (let i = 0; i < 3; i++) {
+                  if (ma[i] !== mb[i]) return ma[i] - mb[i];
+                }
+                return 0;
+              });
+            const latest = versions.length ? versions[versions.length - 1] : '0.0.0';
+            const [major, minor, patch] = latest.split('.').map(Number);
+            const newVersion = `${major}.${minor}.${patch + 1}`;
+            const tag = `v${newVersion}`;
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `refs/tags/${tag}`,
+              sha: context.sha,
+            });
+            core.setOutput('tag', tag);
+            core.setOutput('version', newVersion);
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            NOTES="Initial release"
+          else
+            NOTES=$(git log --oneline --no-decorate $PREV_TAG..HEAD 2>/dev/null || echo "No changes")
+          fi
+          {
+            echo 'notes<<EOF'
+            echo "$NOTES"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Release ${{ steps.tag.outputs.tag }}
+          body: ${{ steps.notes.outputs.notes }}
+          token: ${{ secrets.GITHUB_TOKEN }}

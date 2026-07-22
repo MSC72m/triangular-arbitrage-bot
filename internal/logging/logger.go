@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"triangular-arbitrage-bot/pkg/models"
 	"triangular-arbitrage-bot/internal/config"
+	"triangular-arbitrage-bot/pkg/models"
 )
 
 // LogLevel represents the logging level
@@ -137,7 +137,7 @@ func SetupLogger(config *config.Config) {
 	// Create log directory
 	logDir := "log"
 	if err := os.MkdirAll(logDir, 0755); err != nil {
-		fmt.Printf("Failed to create log directory: %v\n", err)
+		log.Printf("Failed to create log directory: %v", err)
 		return
 	}
 
@@ -148,7 +148,7 @@ func SetupLogger(config *config.Config) {
 	// Open log file
 	logFile, err := os.OpenFile(logFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		fmt.Printf("Failed to open log file: %v\n", err)
+		log.Printf("Failed to open log file: %v", err)
 		return
 	}
 

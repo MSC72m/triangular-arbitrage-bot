@@ -1,0 +1,39 @@
+{
+  "apiBaseURL": "https://api.coinex.com/v1",
+  "apiBaseURLV2": "https://api.coinex.com/v2/",
+  "profitThreshold": 0.0001,
+  "simulationMode": true,
+  "quoteCurrencies": ["USDT", "USDC"],
+  "criticalMarkets": ["USDCUSDT"],
+  "includeBTC": false,
+  "orderBookDepthLimit": 5,
+  "rateLimitPerSecond": 15,
+  "rateLimitPerMinute": 300,
+  "logLevel": "info",
+  "tradingFees": {
+    "USDT": 0.002,
+    "USDC": 0.002
+  },
+  "defaultTradingFee": 0.002,
+  "webSocketBufferSize": 50000,
+  "fokOrderSettings": {
+    "pollingFrequencyHz": 2.5,
+    "orderTimeoutSeconds": 2,
+    "maxRetryAttempts": 3,
+    "enableAggressiveReEvaluation": true,
+    "cancelAllOnSingleFailure": true,
+    "fokTimeoutSeconds": 3
+  },
+  "orderExecutionSettings": {
+    "maxOrdersPerSecond": 1.0,
+    "orderAmountType": "static",
+    "staticOrderAmount": 3.50,
+    "dynamicOrderPercentage": 0.25,
+    "maxVolumeFraction": 0.5,
+    "accountBalance": 100,
+    "enableSpendingLimits": true,
+    "maxDailySpend": 50,
+    "minOrderAmount": 0.10,
+    "maxOrderAmount": 10
+  }
+}

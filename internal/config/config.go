@@ -3,9 +3,9 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
-
-	)
+)
 
 // FOKOrderSettings configures Fill-or-Kill order handling
 type FOKOrderSettings struct {
@@ -71,7 +71,7 @@ type Config struct {
 	// Performance & Latency
 	MaxLatencyMs             int `json:"maxLatencyMs"`             // Maximum acceptable latency for execution
 	ConcurrentScans          int `json:"concurrentScans"`          // Number of concurrent arbitrage scans
-	wsSubscriptionsBatchSize int `json:"wsSubscriptionsBatchSize"` // Number of markets to subscribe to in a single batch
+	WsSubscriptionsBatchSize int `json:"wsSubscriptionsBatchSize"` // Number of markets to subscribe to in a single batch
 
 	// Logging
 	LogLevel string `json:"logLevel"` // debug, info, warn, error
@@ -127,7 +127,7 @@ func DefaultConfig() *Config {
 		// Performance defaults
 		MaxLatencyMs:             200, // 200ms max latency
 		ConcurrentScans:          250, // 250 concurrent scanners
-		wsSubscriptionsBatchSize: 50,  // 50 markets per batch
+		WsSubscriptionsBatchSize: 50,  // 50 markets per batch
 
 		// Logging defaults
 		LogLevel: "debug",
@@ -205,40 +205,40 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	// Log configuration details
-	fmt.Printf("[CONFIG] Loaded configuration:\n")
-	fmt.Printf("[CONFIG] Profit Threshold: %.4f%%\n", config.ProfitThreshold*100)
-	fmt.Printf("[CONFIG] Quote Currencies: %v\n", config.QuoteCurrencies)
-	fmt.Printf("[CONFIG] Include BTC: %v\n", config.IncludeBTC)
-	fmt.Printf("[CONFIG] 🔒 Asset Locking Enabled: %v\n", config.EnableAssetLocking)
-	fmt.Printf("[CONFIG] ""⏱️ Order Execution Time: %dms", config.OrderExecutionTimeMs)
-	fmt.Printf("[CONFIG] ""Max Orders Per Asset: %d", config.MaxConcurrentOrdersPerAsset)
-	fmt.Printf("[CONFIG] ""Order Simulation: %v", config.EnableOrderSimulation)
-	fmt.Printf("[CONFIG] ""Order Book Depth Limit: %d", config.OrderBookDepthLimit)
-	fmt.Printf("[CONFIG] ""Rate Limit Per Second: %d", config.RateLimitPerSecond)
-	fmt.Printf("[CONFIG] ""Rate Limit Per Minute: %d", config.RateLimitPerMinute)
-	fmt.Printf("[CONFIG] ""Max Latency Ms: %d", config.MaxLatencyMs)
-	fmt.Printf("[CONFIG] ""Concurrent Scans: %d", config.ConcurrentScans)
-	fmt.Printf("[CONFIG] ""Log Level: %s", config.LogLevel)
-	fmt.Printf("[CONFIG] ""Default Trading Fee: %.4f%%", config.DefaultTradingFee*100)
-	fmt.Printf("[CONFIG] ""FOK Order Settings:")
-	fmt.Printf("[CONFIG] ""   Polling Frequency: %.1fHz", config.FOKOrderSettings.PollingFrequencyHz)
-	fmt.Printf("[CONFIG] ""   Order Timeout: %d seconds", config.FOKOrderSettings.OrderTimeoutSeconds)
-	fmt.Printf("[CONFIG] ""   Max Retry Attempts: %d", config.FOKOrderSettings.MaxRetryAttempts)
-	fmt.Printf("[CONFIG] ""   Enable Aggressive Re-evaluation: %v", config.FOKOrderSettings.EnableAggressiveReEvaluation)
-	fmt.Printf("[CONFIG] ""   Cancel All on Single Failure: %v", config.FOKOrderSettings.CancelAllOnSingleFailure)
-	fmt.Printf("[CONFIG] ""   FOK Timeout: %d seconds", config.FOKOrderSettings.FOKTimeoutSeconds)
-	fmt.Printf("[CONFIG] ""   FOK Polling Frequency: %.1fHz", config.FOKOrderSettings.FOKPollingFrequencyHz)
-	fmt.Printf("[CONFIG] ""Order Execution Settings:")
-	fmt.Printf("[CONFIG] ""   Max Orders Per Second: %.2f", config.OrderExecutionSettings.MaxOrdersPerSecond)
-	fmt.Printf("[CONFIG] ""   Max Concurrent Arbitrage Cycles: %d", config.OrderExecutionSettings.MaxConcurrentArbitrages)
-	fmt.Printf("[CONFIG] ""   Order Amount Type: %s", config.OrderExecutionSettings.OrderAmountType)
-	fmt.Printf("[CONFIG] ""   Dynamic Order Percentage: %.2f%%", config.OrderExecutionSettings.DynamicOrderPercentage*100)
-	fmt.Printf("[CONFIG] ""   Max Volume Fraction: %.2f%%", config.OrderExecutionSettings.MaxVolumeFraction*100)
-	fmt.Printf("[CONFIG] ""   Max Daily Spend: %.2f", config.OrderExecutionSettings.MaxDailySpend)
-	fmt.Printf("[CONFIG] ""   Account Balance: %.2f", config.OrderExecutionSettings.AccountBalance)
-	fmt.Printf("[CONFIG] ""   Enable Spending Limits: %v", config.OrderExecutionSettings.EnableSpendingLimits)
-	fmt.Printf("[CONFIG] ""   Min Order Amount: %.2f", config.OrderExecutionSettings.MinOrderAmount)
-	fmt.Printf("[CONFIG] ""   Max Order Amount: %.2f", config.OrderExecutionSettings.MaxOrderAmount)
+	log.Printf("[CONFIG] Loaded configuration:")
+	log.Printf("[CONFIG] Profit Threshold: %.4f%%", config.ProfitThreshold*100)
+	log.Printf("[CONFIG] Quote Currencies: %v", config.QuoteCurrencies)
+	log.Printf("[CONFIG] Include BTC: %v", config.IncludeBTC)
+	log.Printf("[CONFIG] Asset Locking Enabled: %v", config.EnableAssetLocking)
+	log.Printf("[CONFIG] Order Execution Time: %dms", config.OrderExecutionTimeMs)
+	log.Printf("[CONFIG] Max Orders Per Asset: %d", config.MaxConcurrentOrdersPerAsset)
+	log.Printf("[CONFIG] Order Simulation: %v", config.EnableOrderSimulation)
+	log.Printf("[CONFIG] Order Book Depth Limit: %d", config.OrderBookDepthLimit)
+	log.Printf("[CONFIG] Rate Limit Per Second: %d", config.RateLimitPerSecond)
+	log.Printf("[CONFIG] Rate Limit Per Minute: %d", config.RateLimitPerMinute)
+	log.Printf("[CONFIG] Max Latency Ms: %d", config.MaxLatencyMs)
+	log.Printf("[CONFIG] Concurrent Scans: %d", config.ConcurrentScans)
+	log.Printf("[CONFIG] Log Level: %s", config.LogLevel)
+	log.Printf("[CONFIG] Default Trading Fee: %.4f%%", config.DefaultTradingFee*100)
+	log.Printf("[CONFIG] FOK Order Settings:")
+	log.Printf("[CONFIG]    Polling Frequency: %.1fHz", config.FOKOrderSettings.PollingFrequencyHz)
+	log.Printf("[CONFIG]    Order Timeout: %d seconds", config.FOKOrderSettings.OrderTimeoutSeconds)
+	log.Printf("[CONFIG]    Max Retry Attempts: %d", config.FOKOrderSettings.MaxRetryAttempts)
+	log.Printf("[CONFIG]    Enable Aggressive Re-evaluation: %v", config.FOKOrderSettings.EnableAggressiveReEvaluation)
+	log.Printf("[CONFIG]    Cancel All on Single Failure: %v", config.FOKOrderSettings.CancelAllOnSingleFailure)
+	log.Printf("[CONFIG]    FOK Timeout: %d seconds", config.FOKOrderSettings.FOKTimeoutSeconds)
+	log.Printf("[CONFIG]    FOK Polling Frequency: %.1fHz", config.FOKOrderSettings.FOKPollingFrequencyHz)
+	log.Printf("[CONFIG] Order Execution Settings:")
+	log.Printf("[CONFIG]    Max Orders Per Second: %.2f", config.OrderExecutionSettings.MaxOrdersPerSecond)
+	log.Printf("[CONFIG]    Max Concurrent Arbitrage Cycles: %d", config.OrderExecutionSettings.MaxConcurrentArbitrages)
+	log.Printf("[CONFIG]    Order Amount Type: %s", config.OrderExecutionSettings.OrderAmountType)
+	log.Printf("[CONFIG]    Dynamic Order Percentage: %.2f%%", config.OrderExecutionSettings.DynamicOrderPercentage*100)
+	log.Printf("[CONFIG]    Max Volume Fraction: %.2f%%", config.OrderExecutionSettings.MaxVolumeFraction*100)
+	log.Printf("[CONFIG]    Max Daily Spend: %.2f", config.OrderExecutionSettings.MaxDailySpend)
+	log.Printf("[CONFIG]    Account Balance: %.2f", config.OrderExecutionSettings.AccountBalance)
+	log.Printf("[CONFIG]    Enable Spending Limits: %v", config.OrderExecutionSettings.EnableSpendingLimits)
+	log.Printf("[CONFIG]    Min Order Amount: %.2f", config.OrderExecutionSettings.MinOrderAmount)
+	log.Printf("[CONFIG]    Max Order Amount: %.2f", config.OrderExecutionSettings.MaxOrderAmount)
 
 	return config, nil
 }
@@ -262,8 +262,7 @@ func (c *Config) Validate() error {
 		}
 
 		// REAL TRADING MODE VALIDATION
-		logger := GetLogger()
-		fmt.Printf("[CONFIG] ""REAL TRADING MODE VALIDATION:")
+		log.Printf("[CONFIG] REAL TRADING MODE VALIDATION:")
 
 		// Helper functions for min/max
 		min := func(a, b int) int {
@@ -279,11 +278,11 @@ func (c *Config) Validate() error {
 			return b
 		}
 
-		fmt.Printf("[CONFIG] ""🔑 API Key: %s...%s (length: %d)",
+		log.Printf("[CONFIG] API Key: %s...%s (length: %d)",
 			c.APIKey[:min(len(c.APIKey), 8)], c.APIKey[max(0, len(c.APIKey)-8):], len(c.APIKey))
-		fmt.Printf("[CONFIG] ""🔐 Secret Key: %s...%s (length: %d)",
+		log.Printf("[CONFIG] Secret Key: %s...%s (length: %d)",
 			c.SecretID[:min(len(c.SecretID), 8)], c.SecretID[max(0, len(c.SecretID)-8):], len(c.SecretID))
-		fmt.Printf("[CONFIG] ""API credentials appear valid for real trading")
+		log.Printf("[CONFIG] API credentials appear valid for real trading")
 	}
 
 	if c.ProfitThreshold <= 0 {

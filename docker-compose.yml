@@ -1,0 +1,24 @@
+services:
+  bot:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    image: triangular-arbitrage-bot:${VERSION:-dev}
+    container_name: triangular-arbitrage-bot
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

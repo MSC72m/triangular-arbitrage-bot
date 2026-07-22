@@ -106,4 +106,8 @@ The bot exposes a health check endpoint at `GET :8080/healthz` that returns `200
 
 ## License
 
-MIT
+GNU Affero General Public License v3.0 (AGPL-3.0)
+
+See [LICENSE](LICENSE) for the full text.
+
+If you use, modify, or deploy this software — especially as a network service — you **must** release your changes under the same license. This ensures that everyone benefits from improvements made to the code.

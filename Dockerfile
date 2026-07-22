@@ -13,7 +13,7 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_TIME=unknown
 
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X triangular-arbitrage-bot/internal/version.Version=${VERSION} -X triangular-arbitrage-bot/internal/version.Commit=${COMMIT} -X triangular-arbitrage-bot/internal/version.BuildTime=${BUILD_TIME}" -o /build/bot .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X triangular-arbitrage-bot/internal/version.Version=${VERSION} -X triangular-arbitrage-bot/internal/version.Commit=${COMMIT} -X triangular-arbitrage-bot/internal/version.BuildTime=${BUILD_TIME}" -o /build/bot ./cmd/bot/
 
 FROM alpine:3.21
 

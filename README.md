@@ -81,14 +81,14 @@ make run
 ### Cross-platform builds
 
 ```bash
-make build-all   # builds for linux/amd64, windows/amd64, darwin/amd64, darwin/arm64
+make build-all-platforms   # builds for linux/amd64 and darwin/arm64
 ```
 
 ## Testing
 
 ```bash
-make test                    # run all tests
-make test-coverage           # run with coverage report
+make test                    # run all tests with race detector
+make cover                   # run with coverage report (HTML)
 go test -race ./...          # run with race detector
 ```
 

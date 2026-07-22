@@ -58,7 +58,7 @@ jobs:
               -X triangular-arbitrage-bot/internal/version.Version=${GITHUB_REF_NAME} \
               -X triangular-arbitrage-bot/internal/version.Commit=${{ steps.vars.outputs.sha_short }} \
               -X triangular-arbitrage-bot/internal/version.BuildTime=${{ steps.vars.outputs.build_time }}" \
-            ./
+            ./cmd/bot/
 
   docker:
     if: github.ref == 'refs/heads/main'

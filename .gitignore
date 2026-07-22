@@ -28,6 +28,7 @@ coverage.html
 # Logs
 *.log
 /logs/
+/logs.bak/
 
 # Generated
 CLAUDE.md
